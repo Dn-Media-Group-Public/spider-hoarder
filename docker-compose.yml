@@ -1,0 +1,29 @@
+version: "3.8"
+
+services:
+  mcp-research:
+    build:
+      context: mcp-research
+      dockerfile: Dockerfile
+    image: mcp-research:local
+    environment:
+      RESEARCH_BLOB_URL: ${RESEARCH_BLOB_URL:-file:///data}
+      BLOB_TOKEN_SECRET: ${BLOB_TOKEN_SECRET}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8090}
+    ports:
+      - "${MCP_RESEARCH_PORT:-8090}:8080"
+    volumes:
+      - research_data:/data
+    networks:
+      - spider_hoarder_net
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+
+networks:
+  spider_hoarder_net:
+    driver: overlay
+
+volumes:
+  research_data:

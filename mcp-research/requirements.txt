@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+fastapi-mcp==0.4.0
+mcp==1.29.1
+requests
+playwright==1.48.0
+trafilatura
+markitdown[all]
+fsspec
+python-multipart
