@@ -10,21 +10,32 @@ import mimetypes
 import os
 import re
 import uuid
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
 from fastapi_mcp import FastApiMCP
 
 import blobtoken
+import browser_session
 import extract
 import fetch
 import storage
+from fetch import CHROME_UA
 
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "http://localhost:8080").rstrip("/")
 
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
-app = FastAPI()
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    await browser_session.startup()
+    yield
+    await browser_session.shutdown()
+
+
+app = FastAPI(lifespan=_lifespan)
 
 
 def _check_job_id(job_id: str) -> str:
@@ -41,11 +52,15 @@ def _check_rel_path(path: str) -> str:
 
 
 @app.get("/api/ingest_page", operation_id="ingest_page")
-def ingest_page(url: str) -> dict:
+async def ingest_page(url: str) -> dict:
     """Fetch a URL (HTML via headless browser, anything else direct) and parse it
-    to Markdown. Returns {job_id, files: [...], text?: str}."""
+    to Markdown. Returns {job_id, files: [...], text?: str}.
+
+    HTML fetches make a best-effort attempt to dismiss cookie-consent banners
+    first. If the returned Markdown still looks like a consent wall, fall back
+    to start_interactive_session/click_element/finish_interactive_session."""
     job_id = str(uuid.uuid4())
-    raw, content_type = fetch.fetch(url)
+    raw, content_type = await fetch.fetch(url)
     filename = os.path.basename(url.split("?")[0]) or "page"
     storage.write_bytes(job_id, f"original/{filename}", raw, content_type)
 
@@ -65,6 +80,71 @@ def ingest_page(url: str) -> dict:
     manifest = storage.get_manifest(job_id)
     result = {"job_id": job_id, "files": manifest["files"]}
     if text is not None and len(text) < 50_000:
+        result["text"] = text
+    return result
+
+
+def _screenshot_result(session_id: str, page_screenshot: bytes, clickable: list[dict]) -> dict:
+    storage.write_bytes(session_id, "screenshot.png", page_screenshot, "image/png")
+    token = blobtoken.mint(session_id, "screenshot.png")
+    return {
+        "session_id": session_id,
+        "screenshot_url": f"{PUBLIC_BASE_URL}/blob/{token}",
+        "clickable_elements": clickable,
+    }
+
+
+@app.get("/api/start_interactive_session", operation_id="start_interactive_session")
+async def start_interactive_session(url: str) -> dict:
+    """Open a live browser session for a page where automatic cookie-consent
+    handling wasn't enough. Returns {session_id, screenshot_url, clickable_elements}
+    so the caller can pick an element to click via click_element, then call
+    finish_interactive_session once the real content is visible."""
+    session_id, session = await browser_session.create_session(url, CHROME_UA)
+    page = session["page"]
+    clickable = await browser_session.tag_clickable(page)
+    shot = await browser_session.screenshot(page)
+    return _screenshot_result(session_id, shot, clickable)
+
+
+@app.get("/api/click_element", operation_id="click_element")
+async def click_element(session_id: str, element_id: str) -> dict:
+    """Click one of the elements returned by start_interactive_session/click_element
+    (by its "id"), then return a fresh screenshot_url + clickable_elements —
+    banners can take more than one click."""
+    session = browser_session.get_session(session_id)
+    if session is None:
+        raise HTTPException(404, "session not found or expired")
+    page = session["page"]
+    try:
+        await page.click(f'[data-mcp-id="{element_id}"]', timeout=5000)
+        await page.wait_for_timeout(500)
+    except Exception as e:
+        raise HTTPException(400, f"click failed: {e}")
+    clickable = await browser_session.tag_clickable(page)
+    shot = await browser_session.screenshot(page)
+    return _screenshot_result(session_id, shot, clickable)
+
+
+@app.get("/api/finish_interactive_session", operation_id="finish_interactive_session")
+async def finish_interactive_session(session_id: str) -> dict:
+    """Extract and store the current page of an interactive session, then close
+    it. Returns the same shape as ingest_page: {job_id, files, text?}."""
+    session = browser_session.get_session(session_id)
+    if session is None:
+        raise HTTPException(404, "session not found or expired")
+    page = session["page"]
+    html_bytes = (await page.content()).encode("utf-8")
+    await browser_session.close_session(session_id)
+
+    job_id = str(uuid.uuid4())
+    storage.write_bytes(job_id, "original/page.html", html_bytes, "text/html")
+    text = extract.html_to_markdown(html_bytes)
+    storage.write_bytes(job_id, "parsed/page.html.md", text.encode(), "text/markdown")
+
+    manifest = storage.get_manifest(job_id)
+    result = {"job_id": job_id, "files": manifest["files"]}
+    if len(text) < 50_000:
         result["text"] = text
     return result
 
@@ -178,6 +258,9 @@ mcp = FastApiMCP(
         "list_files",
         "get_file_text",
         "get_file_url",
+        "start_interactive_session",
+        "click_element",
+        "finish_interactive_session",
     ],
 )
 mcp.mount_http()

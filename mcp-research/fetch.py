@@ -3,6 +3,9 @@ direct download. Returns (raw_bytes, content_type)."""
 
 import requests
 
+import browser_session
+import consent_click
+
 CHROME_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
@@ -25,24 +28,24 @@ def _content_type(url: str) -> str:
     return resp.headers.get("Content-Type", "")
 
 
-def fetch(url: str) -> tuple[bytes, str]:
+async def fetch(url: str) -> tuple[bytes, str]:
     ctype = _content_type(url)
     if "text/html" in ctype or ctype == "":
-        return _fetch_html(url), "text/html"
+        return await _fetch_html(url), "text/html"
     resp = requests.get(url, timeout=60, headers={"User-Agent": CHROME_UA})
     resp.raise_for_status()
     return resp.content, ctype
 
 
-def _fetch_html(url: str) -> bytes:
-    from playwright.sync_api import sync_playwright
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch()
-        page = browser.new_page(user_agent=CHROME_UA)
-        page.goto(url, wait_until="networkidle", timeout=60_000)
+async def _fetch_html(url: str) -> bytes:
+    context = await browser_session.new_context(CHROME_UA)
+    try:
+        page = await context.new_page()
+        await page.goto(url, wait_until="networkidle", timeout=60_000)
+        await consent_click.try_dismiss(page)
         # short quiescence check beyond networkidle for client-rendered content
-        page.wait_for_timeout(1000)
-        html = page.content()
-        browser.close()
+        await page.wait_for_timeout(1000)
+        html = await page.content()
         return html.encode("utf-8")
+    finally:
+        await context.close()
