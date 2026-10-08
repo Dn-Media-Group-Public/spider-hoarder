@@ -29,6 +29,7 @@ log = logging.getLogger("sessiond")
 
 SOCKET = os.environ.get("SESSIOND_SOCKET", "/run/sessiond.sock")
 GW_UID = int(os.environ.get("GW_UID", "1000"))
+GW_COLLECT_GID = int(os.environ.get("GW_COLLECT_GID", "1500"))  # gateway is a member; sessions are not
 SESSION_GROUP = os.environ.get("SESSION_GROUP", "/app/session-group.sh")
 WIPE_ROOTS = ["/home", "/tmp", "/var/tmp", "/dev/shm", "/run"]
 NPROC = os.environ.get("SESSION_NPROC", "1024")  # Chromium's process tree is hundreds
@@ -148,8 +149,13 @@ def start(uid: int, env: dict, files: dict) -> None:
         raise RuntimeError("uid dirty at start, quarantined")
     state[uid] = BUSY
     try:
-        os.mkdir(home, 0o700)
-        os.chown(home, uid, uid)
+        os.mkdir(home)
+        os.chown(home, uid, GW_COLLECT_GID)
+        os.chmod(home, 0o710)  # gateway may traverse to out/, not list the home
+        out = os.path.join(home, "out")  # file outputs the gateway copies into blob storage
+        os.mkdir(out)
+        os.chown(out, uid, GW_COLLECT_GID)
+        os.chmod(out, 0o2750)  # setgid: files created inside inherit gw-collect
         for name, content in files.items():
             if "/" in name or name.startswith("."):
                 raise ValueError(f"bad file name {name!r}")
@@ -167,7 +173,7 @@ def start(uid: int, env: dict, files: dict) -> None:
         }
         procs[uid] = subprocess.Popen(
             ["prlimit", f"--nproc={NPROC}", f"--nofile={NOFILE}", SESSION_GROUP],
-            env=child_env, cwd=home, user=uid, group=uid, extra_groups=[], umask=0o077,
+            env=child_env, cwd=home, user=uid, group=uid, extra_groups=[], umask=0o027,
             start_new_session=True, stdin=subprocess.DEVNULL, stdout=2, stderr=2,
         )
         log.info("started uid %s", uid)

@@ -126,6 +126,8 @@ needed later, it's a bucket lifecycle rule, not app code.
 | `get_file_text(job_id, path)` | Returns one parsed file's Markdown inline — for small files the agent wants to read directly. |
 | `get_file_url(job_id, path)` | Mints a short-lived **opaque** signed URL for one blob (original or parsed) — for large files the agent wants to hand to Ariadne by reference instead of pasting inline. |
 
+All file-producing tools (screenshots, PDFs, any `filename=` output) also return `{job_id, files, text?}`. See also: [Plan: Tool file outputs become jobs](../implemented-plans/file-outputs-as-jobs.md)
+
 `get_file_url` does **not** use fsspec's native presigning (`fs.sign()`),
 which only some backends support and which would leak the job UUID/path in
 the URL. Instead `mcp-research` runs its own tiny proxy route:

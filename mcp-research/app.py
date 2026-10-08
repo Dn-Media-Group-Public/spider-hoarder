@@ -12,6 +12,7 @@ import json
 import mimetypes
 import os
 import re
+import stat
 import time
 import uuid
 from typing import Any
@@ -42,6 +43,16 @@ BASE = f"{SCHEME}://{PUBLIC_HOST}/{EGRESS}"
 MCP_PATH = f"/{EGRESS}/mcp"
 UPLOAD_MARK = "@upload"  # blobtoken path marking an upload-link token (never a real file path)
 INLINE_LIMIT = 50_000
+MAX_FILE_BYTES = int(os.environ.get("MAX_FILE_BYTES", 50 * 1024 * 1024))
+# Proxied tools whose upstream writes a file: name -> default job-internal file name when the agent gives no
+# `filename`; None = only a file when the agent passes `filename`, else it returns inline as upstream does.
+FILE_TOOLS = {
+    "browser_take_screenshot": "screenshot.png", "browser_pdf_save": "page.pdf",
+    "browser_snapshot": None, "browser_evaluate": None, "browser_console_messages": None,
+    "browser_network_request": None, "browser_network_requests": None, "browser_run_code_unsafe": None,
+}
+FILE_TOOLS_NOTE = ("\n\nWhen this writes a file, the result is {job_id, files, text?}; fetch with get_file_text / "
+                   "get_file_url. `filename` only names the file inside the job.")
 
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
@@ -52,7 +63,9 @@ mcp = FastMCP(
         "Use the browser_* tools to browse. When a page shows a CAPTCHA, bot check, login wall or cookie wall "
         "you cannot get past, call browser_request_human_help, show the user the link, and wait for them to "
         "confirm before continuing. browser_save_page parses and stores the current page; ingest_page does a "
-        "one-shot fetch of a URL. Call browser_end_session when finished."
+        "one-shot fetch of a URL. Tools that write files (screenshots, PDFs, anything given a `filename`) return "
+        "{job_id, files, text?} instead; fetch them with list_files / get_file_text / get_file_url. "
+        "Call browser_end_session when finished."
     ),
     token_verifier=auth.KeycloakVerifier(
         OIDC_ISSUER, os.environ["MCP_AUDIENCE"], os.environ.get("ALLOWED_GROUP", ""),
@@ -79,7 +92,9 @@ EXTRA_TOOLS = [
                "the user, explain what to do, then STOP until they confirm they are done."),
     types.Tool(name="browser_save_page", inputSchema=_schema(),
                description="Parse the page currently open in the browser to Markdown and store it. "
-               "Returns {job_id, files, text?}. Use after getting past consent walls/CAPTCHAs."),
+               "Returns {job_id, files, text?}. Use after getting past consent walls/CAPTCHAs. "
+               "Prefer this over browser_snapshot for extracting page content; use browser_snapshot only for "
+               "navigation and interaction (finding refs to click or type into)."),
     types.Tool(name="browser_end_session", inputSchema=_schema(),
                description="Close this conversation's browser and discard its state (cookies, tabs, downloads)."),
     types.Tool(name="ingest_page", inputSchema=_schema(url="URL to fetch"),
@@ -139,10 +154,75 @@ def _store_and_parse(key: str, filename: str, raw: bytes, content_type: str) -> 
     else:
         text = extract.html_to_markdown(raw) if "html" in content_type else extract.file_to_markdown(raw, filename)
         storage.write_bytes(key, f"parsed/{filename}.md", text.encode(), "text/markdown")
+    return _job_result(key, text)
+
+
+def _job_result(key: str, text: str | None) -> dict:
+    """{files, text?}: the one place that decides whether text is small enough to return inline."""
     result = {"files": storage.get_manifest(key)["files"]}
     if text is not None and len(text) < INLINE_LIMIT:
         result["text"] = text
     return result
+
+
+def _read_out(uid: int, name: str) -> bytes:
+    """Read <home>/out/<name> from a session without trusting anything the session controls: every path
+    component is opened O_NOFOLLOW relative to the previous fd (a session owns out/ and could swap it for
+    a symlink), O_NONBLOCK so a planted FIFO cannot hang us, regular files only, size-capped."""
+    fds = []
+    try:
+        fds.append(os.open(ports.home(uid), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW))
+        fds.append(os.open("out", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fds[-1]))
+        fds.append(os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fds[-1]))
+        st = os.fstat(fds[-1])
+        if not stat.S_ISREG(st.st_mode):
+            raise ValueError("output is not a regular file")
+        if st.st_size > MAX_FILE_BYTES:
+            raise ValueError(f"output file too large ({st.st_size} > {MAX_FILE_BYTES} bytes)")
+        with os.fdopen(os.dup(fds[-1]), "rb") as f:
+            data = f.read(MAX_FILE_BYTES + 1)
+        if len(data) > MAX_FILE_BYTES:
+            raise ValueError("output file too large")
+        return data
+    finally:
+        for fd in fds:
+            os.close(fd)
+
+
+def _job_name(filename: Any, default: str) -> str:
+    """Agent-supplied filename -> a bare job-internal name (never a path)."""
+    name = os.path.basename(str(filename or "").replace("\\", "/"))
+    return default if name in ("", ".", "..") else name
+
+
+def _store_file(key: str, name: str, raw: bytes) -> dict:
+    ctype = mimetypes.guess_type(name)[0] or "application/octet-stream"
+    storage.write_bytes(key, f"original/{name}", raw, ctype)
+    text = None
+    if name.lower().endswith(".pdf"):
+        text = extract.file_to_markdown(raw, name)
+        storage.write_bytes(key, f"parsed/{name}.md", text.encode(), "text/markdown")
+    elif b"\0" not in raw[:1024]:  # ponytail: NUL sniff for text vs binary
+        text = raw.decode("utf-8", errors="replace")
+    return _job_result(key, text)
+
+
+async def _file_tool(bs: sessions.BrowserSession, name: str, arguments: dict) -> types.CallToolResult | None:
+    """Run a file-writing upstream tool; the file ends up under a new job_id. None = not a file call."""
+    default = FILE_TOOLS[name]
+    if default is None and not arguments.get("filename"):
+        return None
+    jname = _job_name(arguments.get("filename"), default or "output")
+    job_id = str(uuid.uuid4())
+    private = f"{uuid.uuid4()}-{jname}"  # gateway-chosen, relative: lands in out/, never an agent-chosen path
+    res = await bs.client.call_tool(name, {**arguments, "filename": private})
+    if res.isError:
+        return res
+    try:
+        raw = await asyncio.to_thread(_read_out, bs.uid, private)
+    except (OSError, ValueError) as e:
+        return _text(f"{name} produced no readable output file ({e}). Upstream said: {sessions.result_text(res)}", True)
+    return _text(json.dumps({"job_id": job_id, **_store_file(_key(bs.owner, job_id), jname, raw)}))
 
 
 async def _ingest_page(owner: str, url: str, live: sessions.BrowserSession | None = None) -> dict:
@@ -171,7 +251,10 @@ def _text(msg: str, error: bool = False) -> types.CallToolResult:
 
 @server.list_tools()
 async def list_tools() -> list[types.Tool]:
-    return [t for t in await sessions.upstream_tools() if t.name not in HIDDEN] + EXTRA_TOOLS
+    tools = [t for t in await sessions.upstream_tools() if t.name not in HIDDEN]
+    tools = [t.model_copy(update={"description": (t.description or "") + FILE_TOOLS_NOTE}) if t.name in FILE_TOOLS else t
+             for t in tools]
+    return tools + EXTRA_TOOLS
 
 
 @server.call_tool(validate_input=False)
@@ -223,6 +306,8 @@ async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
                 "Do not take further browser actions until the user confirms they are done.")
         if name == "browser_save_page":
             return _text(json.dumps(await _save_page(bs)))
+        if name in FILE_TOOLS and (res := await _file_tool(bs, name, args)):
+            return res
         return await bs.client.call_tool(name, arguments)
     except Exception as e:  # noqa: BLE001
         return _text(f"{type(e).__name__}: {e}", True)

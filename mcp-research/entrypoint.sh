@@ -54,7 +54,7 @@ i=0; while [ ! -S /run/sessiond.sock ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i
 
 # --- gateway: uid 1000, no caps, restarted on exit
 while :; do
-  setpriv --no-new-privs --reuid=1000 --regid=1000 --clear-groups --bounding-set=-all --inh-caps=-all \
+  setpriv --no-new-privs --reuid=1000 --regid=1000 --groups="${GW_COLLECT_GID:-1500}" --bounding-set=-all --inh-caps=-all \
     uvicorn app:app --host 0.0.0.0 --port 8000 || true
   echo "gateway exited, restarting" >&2
   sleep 1

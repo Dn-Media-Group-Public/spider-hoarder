@@ -66,8 +66,9 @@ the gateway:
 1. `start(uid)` is refused unless the uid is `free` **and** a scan of `/proc`
    finds no process with that real/effective/saved uid **and** its homedir does
    not exist.
-2. It creates `/home/s<uid>` (`0700`, owned by uid), then forks: child sets
-   `umask 077`, `setgroups([])`, `setgid`, `setuid` (in that order, then checks
+2. It creates `/home/s<uid>` (`0710`, owned by uid, group `gw-collect`) and
+   `out/` (`2750`, same group; the gateway's copy-out dir), then forks: child sets
+   `umask 027`, `setgroups([])`, `setgid`, `setuid` (in that order, then checks
    `setuid(0)` fails), applies `RLIMIT_NPROC` (per-uid, so this is a real
    per-session process cap), `RLIMIT_NOFILE`, a clean environment
    (`HOME=/home/s<uid>`, `DISPLAY`, no gateway secrets), `setsid`, `exec`s the
@@ -94,11 +95,13 @@ success. The reaper (idle timeout, `browser_end_session`, MCP session close,
 crashed supervisor) all go through the same `stop`.
 
 Anything that must outlive a session (extracted pages, screenshots, downloads
-the model asked to keep) is copied by the gateway into blob storage **before**
+the model asked to keep) is copied by the gateway (from `out/`, read with `O_NOFOLLOW`, size-capped) into blob storage **before**
 `stop`, owned by the gateway, never by the session uid. The homedir (profile,
 Playwright output dir, downloads) is disposable by design. An evidence archive
 is a non-goal for now; it would be "copy the output dir into storage before
 wipe".
+
+See also: [Plan: Tool file outputs become jobs](file-outputs-as-jobs.md)
 
 ## Isolation, honestly
 

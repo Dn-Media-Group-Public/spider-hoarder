@@ -3,7 +3,7 @@
 # In: HOME DISPLAY_NUM VNC_PORT WS_PORT MCP_PORT [PROXY_SERVER]; $HOME/vncpass, $HOME/hostrules
 set -eu
 export DISPLAY=":$DISPLAY_NUM"
-mkdir -p "$HOME/profile" "$HOME/output"
+mkdir -p "$HOME/profile"  # $HOME/out is created by sessiond (group gw-collect)
 
 Xvfb "$DISPLAY" -screen 0 1440x900x24 -nolisten tcp &
 i=0; while [ ! -e "/tmp/.X11-unix/X$DISPLAY_NUM" ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i+1)); done
@@ -33,7 +33,7 @@ cat > "$HOME/mcp.json" <<JSON
     "initScript": ["/app/consent.js"]
   },
   "server": {"host": "127.0.0.1", "port": $MCP_PORT, "allowedHosts": ["mcp-upstream"]},
-  "outputDir": "$HOME/output"
+  "outputDir": "$HOME/out"
 }
 JSON
 exec playwright-mcp --config "$HOME/mcp.json" --caps pdf

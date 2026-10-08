@@ -3,6 +3,7 @@ CMP host-rules, owner scoping."""
 
 import asyncio
 import os
+import shutil
 import time
 import types
 
@@ -81,6 +82,49 @@ def test_owner_scoping():
             assert False, bad
         except ValueError:
             pass
+
+
+def test_file_outputs():
+    import app, storage, tempfile
+    storage.BLOB_URL = "file://" + tempfile.mkdtemp()
+    home = tempfile.mkdtemp()
+    app.ports.home = lambda uid: home
+    os.mkdir(home + "/out")
+    w = lambda n, b: open(f"{home}/out/{n}", "wb").write(b)
+    w("ok.txt", b"hi")
+    assert app._read_out(1, "ok.txt") == b"hi"
+    w("big", b"x" * 11)
+    app.MAX_FILE_BYTES = 10
+    for bad in ("big", "missing"):
+        try:
+            app._read_out(1, bad); assert False, bad
+        except (ValueError, OSError):
+            pass
+    app.MAX_FILE_BYTES = 1000
+    os.symlink("/etc/passwd", home + "/out/link")
+    os.mkfifo(home + "/out/fifo")
+    for bad in ("link", "fifo"):  # symlink refused, FIFO neither hangs nor is read
+        try:
+            app._read_out(1, bad); assert False, bad
+        except (ValueError, OSError):
+            pass
+    shutil.move(home + "/out", home + "/real"); os.symlink(home + "/real", home + "/out")  # swapped out/ dir
+    try:
+        app._read_out(1, "ok.txt"); assert False
+    except OSError:
+        pass
+    for given in ("../../etc/passwd", "/etc/passwd", "a\\..\\b.png", "", "..", None):
+        n = app._job_name(given, "d")
+        assert "/" not in n and "\\" not in n and n not in ("", ".", ".."), (given, n)
+    assert app._job_name("../../x.png", "d") == "x.png"
+    j = "123e4567-e89b-12d3-a456-426614174000"
+    key = app._key("a@x.y", j)
+    r = app._store_file(key, "shot.png", b"\x89PNG\0\0")
+    assert "text" not in r and any(f["path"] == "original/shot.png" for f in r["files"]), r
+    r = app._store_file(key, "snap.md", b"# page")
+    assert r["text"] == "# page"
+    app.INLINE_LIMIT = 3
+    assert "text" not in app._store_file(key, "snap2.md", b"# page")
 
 
 if __name__ == "__main__":

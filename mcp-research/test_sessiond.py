@@ -35,10 +35,21 @@ def test_reuse_is_clean():
     sessiond.start(A, {}, {"vncpass": "pw"})
     time.sleep(1)
     assert sessiond.uid_procs(A) and os.path.exists(ports.home(A) + "/profile")
-    assert oct(os.stat(ports.home(A)).st_mode & 0o777) == "0o700" and os.stat(ports.home(A)).st_uid == A
+    assert oct(os.stat(ports.home(A)).st_mode & 0o777) == "0o710" and os.stat(ports.home(A)).st_uid == A
+    out = ports.home(A) + "/out"
+    st = os.stat(out)
+    assert oct(st.st_mode & 0o7777) == "0o2750" and st.st_uid == A and st.st_gid == sessiond.GW_COLLECT_GID
     # B cannot read A's home or signal A
     r = subprocess.run(["sh", "-c", f"cat {ports.home(A)}/profile"], user=B, group=B, extra_groups=[], capture_output=True)
     assert r.returncode != 0
+    # a file the session writes in out/ is 0640 gw-collect: a gateway-like member reads it, another session cannot
+    sh = lambda cmd, **kw: subprocess.run(["sh", "-c", cmd], capture_output=True, **kw)
+    assert sh(f"echo shot > {out}/f", user=A, group=A, extra_groups=[], umask=0o027).returncode == 0
+    fst = os.stat(out + "/f")
+    assert oct(fst.st_mode & 0o777) == "0o640" and fst.st_gid == sessiond.GW_COLLECT_GID
+    assert sh(f"cat {out}/f", user=sessiond.GW_UID, group=sessiond.GW_UID, extra_groups=[sessiond.GW_COLLECT_GID]).stdout == b"shot\n"
+    assert sh(f"cat {out}/f", user=B, group=B, extra_groups=[]).returncode != 0
+    assert sh(f"ls {ports.home(A)}", user=sessiond.GW_UID, group=sessiond.GW_UID, extra_groups=[sessiond.GW_COLLECT_GID]).returncode != 0
     pid = sessiond.uid_procs(A)[0]
     r = subprocess.run(["sh", "-c", f"kill -9 {pid}"], user=B, group=B, extra_groups=[], capture_output=True)
     assert r.returncode != 0 and sessiond.uid_procs(A)
