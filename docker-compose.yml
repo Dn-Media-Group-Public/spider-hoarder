@@ -50,6 +50,8 @@ services:
     environment:
       OAUTH2_PROXY_PROVIDER: keycloak-oidc
       OAUTH2_PROXY_OIDC_ISSUER_URL: ${OIDC_ISSUER}
+      # the groups claim comes from the realm-default scope mcp-groups; there is no scope named "groups"
+      OAUTH2_PROXY_SCOPE: openid email profile
       OAUTH2_PROXY_CLIENT_ID: ${O2P_CLIENT_ID}
       OAUTH2_PROXY_CLIENT_SECRET: ${O2P_CLIENT_SECRET}
       OAUTH2_PROXY_COOKIE_SECRET: ${O2P_COOKIE_SECRET}

@@ -49,6 +49,9 @@
 			request_header -X-Upstream
 			forward_auth research-{args[0]}:8000 {
 				uri /authz
+				# the auth subrequest is a plain GET even when the browser asks for a websocket
+				header_up -Upgrade
+				header_up -Connection
 				copy_headers X-Upstream
 			}
 			uri path_regexp ^/{args[0]}/view/[A-Za-z0-9_-]+ ""
