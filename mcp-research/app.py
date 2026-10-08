@@ -1,266 +1,314 @@
-"""mcp-research: generic, Ariadne-agnostic fetch-and-parse MCP server.
+"""mcp-research gateway: per-user isolated headed browser sessions (proxied
+@playwright/mcp) plus fetch/parse/blob tools. See
+docs/implemented-plans/browser-sessions-plan.md.
 
-No auth, no layers, no knowledge that Ariadne exists. Given a URL or an
-uploaded file, returns Markdown text (small files) and/or short-lived opaque
-blob URLs (large files). See docs/plans/agentic-research-mcp.md.
-"""
+Everything is served under /<egress>/ (Caddy routes by that prefix), except
+/authz which Caddy's forward_auth calls on the internal network."""
 
+import asyncio
+import contextlib
 import html
+import json
 import mimetypes
 import os
 import re
+import time
 import uuid
-from contextlib import asynccontextmanager
+from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, Response
-from fastapi_mcp import FastApiMCP
+from mcp import types
+from mcp.server.auth.provider import AccessToken
+from mcp.server.auth.settings import AuthSettings
+from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
+from starlette.exceptions import HTTPException
+from starlette.requests import Request
+from starlette.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 
+import auth
 import blobtoken
-import browser_session
 import extract
 import fetch
+import ports
+import sessions
 import storage
-from fetch import CHROME_UA
 
-PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "http://localhost:8080").rstrip("/")
+EGRESS = sessions.EGRESS
+PUBLIC_HOST = os.environ["PUBLIC_HOST"]
+SCHEME = os.environ.get("PUBLIC_SCHEME", "https")  # TLS ends at the load balancer; dev uses http
+OIDC_ISSUER = os.environ["OIDC_ISSUER"].rstrip("/")
+BASE = f"{SCHEME}://{PUBLIC_HOST}/{EGRESS}"
+MCP_PATH = f"/{EGRESS}/mcp"
+UPLOAD_MARK = "@upload"  # blobtoken path marking an upload-link token (never a real file path)
+INLINE_LIMIT = 50_000
 
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
+mcp = FastMCP(
+    name=f"mcp-research-{EGRESS}",
+    instructions=(
+        f"Each conversation gets its own private, isolated browser ({'egress via Tor' if EGRESS == 'tor' else 'direct egress'}). "
+        "Use the browser_* tools to browse. When a page shows a CAPTCHA, bot check, login wall or cookie wall "
+        "you cannot get past, call browser_request_human_help, show the user the link, and wait for them to "
+        "confirm before continuing. browser_save_page parses and stores the current page; ingest_page does a "
+        "one-shot fetch of a URL. Call browser_end_session when finished."
+    ),
+    token_verifier=auth.KeycloakVerifier(
+        OIDC_ISSUER, os.environ["MCP_AUDIENCE"], os.environ.get("ALLOWED_GROUP", ""),
+        jwks_url=os.environ.get("OIDC_JWKS_URL", "")),  # optional: fetch keys over an internal address
+    auth=AuthSettings(issuer_url=OIDC_ISSUER, resource_server_url=f"{SCHEME}://{PUBLIC_HOST}{MCP_PATH}"),
+    streamable_http_path=MCP_PATH,
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[PUBLIC_HOST], allowed_origins=[f"{SCHEME}://{PUBLIC_HOST}"],
+    ),
+)
+server = mcp._mcp_server  # static FastMCP tool handlers are replaced by a proxy below
 
-@asynccontextmanager
-async def _lifespan(app: FastAPI):
-    await browser_session.startup()
-    yield
-    await browser_session.shutdown()
+
+def _schema(**props: str) -> dict:
+    return {"type": "object", "properties": {k: {"type": "string", "description": v} for k, v in props.items()},
+            "required": list(props)}
 
 
-app = FastAPI(lifespan=_lifespan)
+EXTRA_TOOLS = [
+    types.Tool(name="browser_request_human_help", inputSchema=_schema(reason="What the user needs to do, e.g. 'solve the CAPTCHA'"),
+               description="Get a link that lets the user see and control THIS conversation's browser in a new tab. "
+               "Use it for a CAPTCHA, bot challenge, login, 2FA or anything else a human should do. Give the link to "
+               "the user, explain what to do, then STOP until they confirm they are done."),
+    types.Tool(name="browser_save_page", inputSchema=_schema(),
+               description="Parse the page currently open in the browser to Markdown and store it. "
+               "Returns {job_id, files, text?}. Use after getting past consent walls/CAPTCHAs."),
+    types.Tool(name="browser_end_session", inputSchema=_schema(),
+               description="Close this conversation's browser and discard its state (cookies, tabs, downloads)."),
+    types.Tool(name="ingest_page", inputSchema=_schema(url="URL to fetch"),
+               description="One-shot: fetch a URL (HTML via a throwaway browser, anything else directly) and parse it "
+               "to Markdown. Returns {job_id, files, text?}. If the text looks like a consent/CAPTCHA wall, use the "
+               "browser_* tools and browser_request_human_help instead."),
+    types.Tool(name="get_upload_link", inputSchema=_schema(),
+               description="Mint a job id and a link for a human to upload files through a browser."),
+    types.Tool(name="list_files", inputSchema=_schema(job_id="Job id"), description="Manifest of files stored under a job id."),
+    types.Tool(name="get_file_text", inputSchema=_schema(job_id="Job id", path="File path from the manifest"),
+               description="Return one parsed file's Markdown text inline."),
+    types.Tool(name="get_file_url", inputSchema=_schema(job_id="Job id", path="File path from the manifest"),
+               description="Mint a short-lived opaque signed URL for one blob (original or parsed)."),
+]
+HIDDEN = {"browser_install"}
 
 
-def _check_job_id(job_id: str) -> str:
+def _caller() -> tuple[Any, str]:
+    ctx = server.request_context
+    token: AccessToken = ctx.request.scope["user"].access_token
+    return ctx.session, token.claims["email"].lower()
+
+
+def _key(owner: str, job_id: str) -> str:
+    """Storage key: jobs live under <owner>/<job_id>, so callers only see their own."""
     if not _UUID_RE.match(job_id):
-        raise HTTPException(400, "invalid job_id")
-    return job_id
+        raise ValueError("invalid job_id")
+    safe = re.sub(r"[^a-z0-9._@-]", "_", owner)
+    if "@" not in safe:  # also keeps '..' from being an owner dir
+        raise ValueError("invalid owner")
+    return f"{safe}/{job_id}"
 
 
 def _check_rel_path(path: str) -> str:
     norm = os.path.normpath(path)
-    if norm.startswith("..") or norm.startswith("/") or os.path.isabs(norm):
-        raise HTTPException(400, "invalid path")
+    if norm.startswith("..") or os.path.isabs(norm):
+        raise ValueError("invalid path")
     return path
 
 
-@app.get("/api/ingest_page", operation_id="ingest_page")
-async def ingest_page(url: str) -> dict:
-    """Fetch a URL (HTML via headless browser, anything else direct) and parse it
-    to Markdown. Returns {job_id, files: [...], text?: str}.
-
-    HTML fetches make a best-effort attempt to dismiss cookie-consent banners
-    first. If the returned Markdown still looks like a consent wall, fall back
-    to start_interactive_session/click_element/finish_interactive_session."""
-    job_id = str(uuid.uuid4())
-    raw, content_type = await fetch.fetch(url)
-    filename = os.path.basename(url.split("?")[0]) or "page"
-    storage.write_bytes(job_id, f"original/{filename}", raw, content_type)
-
+def _store_and_parse(key: str, filename: str, raw: bytes, content_type: str) -> dict:
+    storage.write_bytes(key, f"original/{filename}", raw, content_type)
+    text = None
     if extract.is_zip(content_type, filename):
         for rel_path, data in extract.unpack_zip(raw).items():
-            storage.write_bytes(job_id, f"original/{rel_path}", data, "application/octet-stream")
+            storage.write_bytes(key, f"original/{rel_path}", data, "application/octet-stream")
             md = extract.file_to_markdown(data, rel_path)
-            storage.write_bytes(job_id, f"parsed/{rel_path}.md", md.encode(), "text/markdown")
-        text = None
-    elif content_type == "text/html":
-        text = extract.html_to_markdown(raw)
-        storage.write_bytes(job_id, f"parsed/{filename}.md", text.encode(), "text/markdown")
+            storage.write_bytes(key, f"parsed/{rel_path}.md", md.encode(), "text/markdown")
     else:
-        text = extract.file_to_markdown(raw, filename)
-        storage.write_bytes(job_id, f"parsed/{filename}.md", text.encode(), "text/markdown")
-
-    manifest = storage.get_manifest(job_id)
-    result = {"job_id": job_id, "files": manifest["files"]}
-    if text is not None and len(text) < 50_000:
+        text = extract.html_to_markdown(raw) if "html" in content_type else extract.file_to_markdown(raw, filename)
+        storage.write_bytes(key, f"parsed/{filename}.md", text.encode(), "text/markdown")
+    result = {"files": storage.get_manifest(key)["files"]}
+    if text is not None and len(text) < INLINE_LIMIT:
         result["text"] = text
     return result
 
 
-def _screenshot_result(session_id: str, page_screenshot: bytes, clickable: list[dict]) -> dict:
-    storage.write_bytes(session_id, "screenshot.png", page_screenshot, "image/png")
-    token = blobtoken.mint(session_id, "screenshot.png")
-    return {
-        "session_id": session_id,
-        "screenshot_url": f"{PUBLIC_BASE_URL}/blob/{token}",
-        "clickable_elements": clickable,
-    }
+async def _ingest_page(owner: str, url: str) -> dict:
+    job_id = str(uuid.uuid4())
+    ctype = await asyncio.to_thread(fetch.content_type, url)
+    if "text/html" in ctype or ctype == "":
+        raw, ctype = (await sessions.fetch_html(owner, url)).encode(), "text/html"
+    else:
+        raw, ctype = await asyncio.to_thread(fetch.download, url)
+    filename = os.path.basename(url.split("?")[0]) or "page"
+    return {"job_id": job_id, **_store_and_parse(_key(owner, job_id), filename, raw, ctype)}
 
 
-@app.get("/api/start_interactive_session", operation_id="start_interactive_session")
-async def start_interactive_session(url: str) -> dict:
-    """Open a live browser session for a page where automatic cookie-consent
-    handling wasn't enough. Returns {session_id, screenshot_url, clickable_elements}
-    so the caller can pick an element to click via click_element, then call
-    finish_interactive_session once the real content is visible."""
-    session_id, session = await browser_session.create_session(url, CHROME_UA)
-    page = session["page"]
-    clickable = await browser_session.tag_clickable(page)
-    shot = await browser_session.screenshot(page)
-    return _screenshot_result(session_id, shot, clickable)
+async def _save_page(bs: sessions.BrowserSession) -> dict:
+    job_id = str(uuid.uuid4())
+    raw = (await sessions.page_html(bs)).encode()
+    return {"job_id": job_id, **_store_and_parse(_key(bs.owner, job_id), "page.html", raw, "text/html")}
 
 
-@app.get("/api/click_element", operation_id="click_element")
-async def click_element(session_id: str, element_id: str) -> dict:
-    """Click one of the elements returned by start_interactive_session/click_element
-    (by its "id"), then return a fresh screenshot_url + clickable_elements —
-    banners can take more than one click."""
-    session = browser_session.get_session(session_id)
-    if session is None:
-        raise HTTPException(404, "session not found or expired")
-    page = session["page"]
+def _text(msg: str, error: bool = False) -> types.CallToolResult:
+    return types.CallToolResult(content=[types.TextContent(type="text", text=msg)], isError=error)
+
+
+@server.list_tools()
+async def list_tools() -> list[types.Tool]:
+    return [t for t in await sessions.upstream_tools() if t.name not in HIDDEN] + EXTRA_TOOLS
+
+
+@server.call_tool(validate_input=False)
+async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
+    mcp_session, owner = _caller()
+    args = arguments or {}
+    if name in HIDDEN:
+        return _text(f"{name} is disabled", True)
     try:
-        await page.click(f'[data-mcp-id="{element_id}"]', timeout=5000)
-        await page.wait_for_timeout(500)
-    except Exception as e:
-        raise HTTPException(400, f"click failed: {e}")
-    clickable = await browser_session.tag_clickable(page)
-    shot = await browser_session.screenshot(page)
-    return _screenshot_result(session_id, shot, clickable)
+        if name == "browser_end_session":
+            bs = await sessions.get_session(mcp_session, owner, create=False)
+            if bs:
+                await sessions.close(bs)
+            return _text("Browser session closed.")
+        if name == "ingest_page":
+            return _text(json.dumps(await _ingest_page(owner, args["url"])))
+        if name == "get_upload_link":
+            job_id = str(uuid.uuid4())
+            token = blobtoken.mint(_key(owner, job_id), UPLOAD_MARK, ttl=3600)
+            return _text(json.dumps({"url": f"{BASE}/upload/{token}", "job_id": job_id}))
+        if name in ("list_files", "get_file_text", "get_file_url"):
+            key = _key(owner, args["job_id"])
+            if name == "list_files":
+                return _text(json.dumps(storage.get_manifest(key)))
+            path = _check_rel_path(args["path"])
+            if not storage.exists(key, path):
+                return _text("file not found", True)
+            if name == "get_file_text":
+                return _text(json.dumps({"text": storage.read_text(key, path)}))
+            return _text(json.dumps({"url": f"{BASE}/blob/{blobtoken.mint(key, path)}"}))
+
+        bs = await sessions.get_session(mcp_session, owner)
+        bs.last_used = time.time()
+        if name == "browser_request_human_help":
+            reason = args.get("reason", "help with the page")
+            return _text(
+                f"Live view of this conversation's browser: {BASE}/view/{bs.id}/start\n"
+                f"Ask the user to open it (they sign in with their newsroom account) and to: {reason}. "
+                "Only the user who owns this conversation can open it. "
+                "Do not take further browser actions until the user confirms they are done.")
+        if name == "browser_save_page":
+            return _text(json.dumps(await _save_page(bs)))
+        return await bs.client.call_tool(name, arguments)
+    except Exception as e:  # noqa: BLE001
+        return _text(f"{type(e).__name__}: {e}", True)
 
 
-@app.get("/api/finish_interactive_session", operation_id="finish_interactive_session")
-async def finish_interactive_session(session_id: str) -> dict:
-    """Extract and store the current page of an interactive session, then close
-    it. Returns the same shape as ingest_page: {job_id, files, text?}."""
-    session = browser_session.get_session(session_id)
-    if session is None:
-        raise HTTPException(404, "session not found or expired")
-    page = session["page"]
-    html_bytes = (await page.content()).encode("utf-8")
-    await browser_session.close_session(session_id)
-
-    job_id = str(uuid.uuid4())
-    storage.write_bytes(job_id, "original/page.html", html_bytes, "text/html")
-    text = extract.html_to_markdown(html_bytes)
-    storage.write_bytes(job_id, "parsed/page.html.md", text.encode(), "text/markdown")
-
-    manifest = storage.get_manifest(job_id)
-    result = {"job_id": job_id, "files": manifest["files"]}
-    if len(text) < 50_000:
-        result["text"] = text
-    return result
+# ------------------------------------------------------ live view / web ----
+VIEW_RE = re.compile(rf"^/{EGRESS}/view/([A-Za-z0-9_-]+)(/|$)")
 
 
-@app.get("/api/get_upload_link", operation_id="get_upload_link")
-def get_upload_link() -> dict:
-    """Mint a job id and return a link for a human to upload files through a browser."""
-    job_id = str(uuid.uuid4())
-    return {"url": f"{PUBLIC_BASE_URL}/upload/{job_id}", "job_id": job_id}
+def _owned_session(request: Request, view_id: str) -> sessions.BrowserSession | None:
+    # X-Auth-Request-Email is set by Caddy after oauth2-proxy (client values stripped);
+    # the gateway port is only reachable from Caddy, and session uids are firewalled off loopback.
+    email = request.headers.get("x-auth-request-email", "").lower()
+    bs = sessions.by_view.get(view_id)
+    if not bs or not email or bs.owner != email:
+        return None
+    bs.last_used = time.time()
+    return bs
 
 
-@app.get("/api/list_files", operation_id="list_files")
-def list_files(job_id: str) -> dict:
-    """Return the manifest (index.json) of files stored under a job id."""
-    _check_job_id(job_id)
-    return storage.get_manifest(job_id)
+@mcp.custom_route("/authz", methods=["GET"])
+async def authz(request: Request) -> Response:
+    """Caddy forward_auth: is this SSO user the owner of the session in the URL?"""
+    m = VIEW_RE.match(request.headers.get("x-forwarded-uri", ""))
+    bs = _owned_session(request, m.group(1)) if m else None
+    if not bs:
+        return PlainTextResponse("forbidden", status_code=403)
+    return Response(status_code=200, headers={"X-Upstream": f"research-{EGRESS}:{ports.ws_port(bs.uid)}"})
 
 
-@app.get("/api/get_file_text", operation_id="get_file_text")
-def get_file_text(job_id: str, path: str) -> dict:
-    """Return one parsed file's Markdown text inline."""
-    _check_job_id(job_id)
-    _check_rel_path(path)
-    if not storage.exists(job_id, path):
-        raise HTTPException(404, "file not found")
-    return {"text": storage.read_text(job_id, path)}
+@mcp.custom_route(f"/{EGRESS}/view/{{view_id}}/start", methods=["GET"])
+async def view_start(request: Request) -> Response:
+    """Landing link handed to the user; reveals the VNC password only to the owner."""
+    view_id = request.path_params["view_id"]
+    bs = _owned_session(request, view_id)
+    if not bs:
+        return PlainTextResponse("This browser session does not exist or is not yours.", status_code=403)
+    base = f"/{EGRESS}/view/{view_id}"
+    return RedirectResponse(
+        f"{base}/vnc.html?path={base.lstrip('/')}/websockify&autoconnect=1&reconnect=1"
+        f"&resize=scale&password={bs.vnc_password}", status_code=302)
 
 
-@app.get("/api/get_file_url", operation_id="get_file_url")
-def get_file_url(job_id: str, path: str) -> dict:
-    """Mint a short-lived opaque signed URL for one blob (original or parsed)."""
-    _check_job_id(job_id)
-    _check_rel_path(path)
-    if not storage.exists(job_id, path):
-        raise HTTPException(404, "file not found")
-    token = blobtoken.mint(job_id, path)
-    return {"url": f"{PUBLIC_BASE_URL}/blob/{token}"}
-
-
-_UPLOAD_PAGE = """<!doctype html>
-<html><body>
-<h1>Upload files</h1>
-<form method="post" action="" enctype="multipart/form-data">
-  <input type="file" name="files" multiple>
-  <button type="submit">Upload</button>
-</form>
-</body></html>"""
-
-
-@app.get("/upload/{job_id}", response_class=HTMLResponse, include_in_schema=False)
-def upload_page(job_id: str):
-    _check_job_id(job_id)
-    return _UPLOAD_PAGE
-
-
-@app.post("/upload/{job_id}", response_class=HTMLResponse, include_in_schema=False)
-async def upload_submit(job_id: str, request: Request):
-    _check_job_id(job_id)
-    form = await request.form()
-    files = form.getlist("files")
-    parsed_previews = []
-    for uf in files:
-        if not hasattr(uf, "filename"):
-            continue
-        data = await uf.read()
-        filename = uf.filename or "upload"
-        content_type = uf.content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
-        storage.write_bytes(job_id, f"original/{filename}", data, content_type)
-
-        if extract.is_zip(content_type, filename):
-            for rel_path, member_data in extract.unpack_zip(data).items():
-                storage.write_bytes(job_id, f"original/{rel_path}", member_data, "application/octet-stream")
-                md = extract.file_to_markdown(member_data, rel_path)
-                storage.write_bytes(job_id, f"parsed/{rel_path}.md", md.encode(), "text/markdown")
-                parsed_previews.append((rel_path, md))
-        else:
-            md = extract.file_to_markdown(data, filename)
-            storage.write_bytes(job_id, f"parsed/{filename}.md", md.encode(), "text/markdown")
-            parsed_previews.append((filename, md))
-
-    body = "".join(
-        f"<h2>{html.escape(name)}</h2><pre>{html.escape(text[:5000])}</pre>"
-        for name, text in parsed_previews
-    )
-    return f"<!doctype html><html><body><h1>Uploaded</h1>{body}</body></html>"
-
-
-@app.get("/blob/{token}", include_in_schema=False)
-def get_blob(token: str):
+def _upload_key(token: str) -> str:
     try:
         data = blobtoken.verify(token)
     except ValueError as e:
         raise HTTPException(403, str(e))
-    if not storage.exists(data["job_id"], data["path"]):
+    if data["path"] != UPLOAD_MARK:
+        raise HTTPException(403, "not an upload link")
+    return data["job_id"]
+
+
+@mcp.custom_route(f"/{EGRESS}/upload/{{token}}", methods=["GET"])
+async def upload_page(request: Request) -> Response:
+    _upload_key(request.path_params["token"])
+    return HTMLResponse(
+        '<!doctype html><html><body><h1>Upload files</h1>'
+        '<form method="post" action="" enctype="multipart/form-data">'
+        '<input type="file" name="files" multiple><button type="submit">Upload</button></form></body></html>')
+
+
+@mcp.custom_route(f"/{EGRESS}/upload/{{token}}", methods=["POST"])
+async def upload_submit(request: Request) -> Response:
+    key = _upload_key(request.path_params["token"])
+    form = await request.form()
+    previews = []
+    for uf in form.getlist("files"):
+        if not hasattr(uf, "filename"):
+            continue
+        data = await uf.read()
+        filename = os.path.basename(uf.filename or "upload")
+        ctype = uf.content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        _store_and_parse(key, filename, data, ctype)
+        previews.append((filename, storage.read_text(key, f"parsed/{filename}.md") if storage.exists(key, f"parsed/{filename}.md") else "(archive unpacked)"))
+    body = "".join(f"<h2>{html.escape(n)}</h2><pre>{html.escape(t[:5000])}</pre>" for n, t in previews)
+    return HTMLResponse(f"<!doctype html><html><body><h1>Uploaded</h1>{body}</body></html>")
+
+
+@mcp.custom_route(f"/{EGRESS}/blob/{{token}}", methods=["GET"])
+async def get_blob(request: Request) -> Response:
+    try:
+        data = blobtoken.verify(request.path_params["token"])
+    except ValueError as e:
+        raise HTTPException(403, str(e))
+    if data["path"] == UPLOAD_MARK or not storage.exists(data["job_id"], data["path"]):
         raise HTTPException(404, "file not found")
-    content = storage.read_bytes(data["job_id"], data["path"])
     ctype = mimetypes.guess_type(data["path"])[0] or "application/octet-stream"
-    return Response(content=content, media_type=ctype)
+    return Response(content=storage.read_bytes(data["job_id"], data["path"]), media_type=ctype)
 
 
-mcp = FastApiMCP(
-    app,
-    name="mcp-research",
-    description=(
-        "Generic fetch-and-parse service: given a URL or an uploaded file, "
-        "returns Markdown text. No knowledge of any downstream graph or auth."
-    ),
-    include_operations=[
-        "ingest_page",
-        "get_upload_link",
-        "list_files",
-        "get_file_text",
-        "get_file_url",
-        "start_interactive_session",
-        "click_element",
-        "finish_interactive_session",
-    ],
-)
-mcp.mount_http()
+# ---------------------------------------------------------------- app ------
+app = mcp.streamable_http_app()
+_inner_lifespan = app.router.lifespan_context
+
+
+@contextlib.asynccontextmanager
+async def lifespan(a):
+    await sessions.pool.reset()
+    async with _inner_lifespan(a):
+        task = asyncio.create_task(sessions.reaper())
+        try:
+            yield
+        finally:
+            task.cancel()
+            for bs in list(sessions.by_mcp.values()):
+                await sessions.close(bs)
+
+
+app.router.lifespan_context = lifespan

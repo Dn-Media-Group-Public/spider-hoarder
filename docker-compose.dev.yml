@@ -1,0 +1,56 @@
+# Dev overlay (`./deploy.sh --dev`): a local Keycloak, plain http, no certificates.
+# Never deployed in prod. Same idea as article-graph's dev overlay: start-dev, sslRequired none,
+# `localhost` as the issuer host, and `extra_hosts: localhost:host-gateway` so the containers
+# that verify tokens reach it at the same URL the browser uses.
+version: "3.8"
+
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: start-dev
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HTTP_PORT: "${KC_DEV_PORT:-8085}"
+      KC_HOSTNAME: http://localhost:${KC_DEV_PORT:-8085}
+    ports: ["${KC_DEV_PORT:-8085}:${KC_DEV_PORT:-8085}"]
+    volumes: [keycloak_data:/opt/keycloak/data]
+    deploy: { replicas: 1, restart_policy: { condition: any } }
+    networks: [public]
+
+  # One-shot and idempotent: realm, scopes, DCR policy, initial user (keycloak/setup.sh).
+  # Runs on every deploy; also what you run by hand against a prod Keycloak (see README).
+  keycloak-init:
+    image: quay.io/keycloak/keycloak:26.0
+    entrypoint: ["bash", "-c", "until kcadm.sh config credentials --server $$KC_URL --realm master --user admin --password admin >/dev/null 2>&1; do sleep 5; done; exec bash /setup.sh"]
+    environment:
+      PATH: /usr/bin:/bin:/opt/keycloak/bin
+      KC_URL: http://keycloak:${KC_DEV_PORT:-8085}
+      KC_ADMIN: admin
+      KC_ADMIN_PASSWORD: admin
+      KC_REALM: ${KC_REALM:-newsroom}
+      KC_USER: ${KC_USER:-researcher}
+      KC_USER_PASSWORD: ${KC_USER_PASSWORD}
+      PUBLIC_HOST: ${PUBLIC_HOST}
+      PUBLIC_SCHEME: ${PUBLIC_SCHEME}
+      MCP_AUDIENCE: ${MCP_AUDIENCE}
+      ALLOWED_GROUP: ${ALLOWED_GROUP:-/investigations}
+      O2P_CLIENT_ID: ${O2P_CLIENT_ID}
+      O2P_CLIENT_SECRET: ${O2P_CLIENT_SECRET}
+    configs:
+      - { source: keycloak_setup, target: /setup.sh, mode: 0555 }
+    deploy: { replicas: 1, restart_policy: { condition: on-failure, delay: 10s, max_attempts: 5 } }
+    networks: [public]
+
+  research-tor:
+    extra_hosts: ["localhost:host-gateway"]
+  research-clear:
+    extra_hosts: ["localhost:host-gateway"]
+  oauth2-proxy:
+    extra_hosts: ["localhost:host-gateway"]
+
+configs:
+  keycloak_setup: { file: ./keycloak/setup.sh }
+
+volumes:
+  keycloak_data: {}

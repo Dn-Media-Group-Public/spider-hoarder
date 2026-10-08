@@ -1,29 +1,98 @@
+# Per-user isolated browser sessions + fetch/parse/blob tools.
+#   $PUBLIC_SCHEME://$PUBLIC_HOST/tor/mcp     browsers egress via Tor only
+#   $PUBLIC_SCHEME://$PUBLIC_HOST/clear/mcp   browsers egress directly (public internet only)
+# Auth: an external OIDC IdP (OIDC_ISSUER, Keycloak); `./deploy.sh --dev` adds a local one
+# (docker-compose.dev.yml). Set it up with keycloak/setup.sh (realm, scopes, DCR for Claude, a user).
+# TLS is terminated in front of Caddy (Google LB in prod: PUBLIC_SCHEME=https; dev: http, no TLS).
+# Docker Swarm stack (`./deploy.sh`). Swarm notes: `build:` is ignored (deploy.sh builds
+# the images), `shm_size`/`security_opt` are unsupported (Chromium runs with
+# --disable-dev-shm-usage; entrypoint.sh sets no_new_privs itself).
 version: "3.8"
 
+x-research: &research
+  image: mcp-research:local
+  cap_drop: [ALL]
+  # NET_ADMIN: entrypoint firewall only, dropped before sessiond/gateway start.
+  # The rest is sessiond's (setuid/setgid/chown/kill, DAC_OVERRIDE+FOWNER to sweep session files).
+  cap_add: [NET_ADMIN, SETUID, SETGID, CHOWN, KILL, DAC_OVERRIDE, FOWNER]
+  deploy:
+    replicas: 1
+    restart_policy: { condition: any }
+    resources:
+      limits: { memory: 12g }   # a runaway session can OOM all sessions on this egress
+  volumes:
+    - research_data:/data
+  environment: &research-env
+    PUBLIC_HOST: ${PUBLIC_HOST}
+    PUBLIC_SCHEME: ${PUBLIC_SCHEME:-https}
+    OIDC_ISSUER: ${OIDC_ISSUER}
+    MCP_AUDIENCE: ${MCP_AUDIENCE}
+    ALLOWED_GROUP: ${ALLOWED_GROUP:-}
+    RESEARCH_BLOB_URL: ${RESEARCH_BLOB_URL:-file:///data}
+    BLOB_TOKEN_SECRET: ${BLOB_TOKEN_SECRET}
+    MAX_SESSIONS_TOTAL: ${MAX_SESSIONS_TOTAL:-18}
+    MAX_SESSIONS_PER_USER: ${MAX_SESSIONS_PER_USER:-3}
+    IDLE_TIMEOUT: ${IDLE_TIMEOUT:-1800}
+
 services:
-  mcp-research:
-    build:
-      context: mcp-research
-      dockerfile: Dockerfile
-    image: mcp-research:local
-    environment:
-      RESEARCH_BLOB_URL: ${RESEARCH_BLOB_URL:-file:///data}
-      BLOB_TOKEN_SECRET: ${BLOB_TOKEN_SECRET}
-      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8090}
-    ports:
-      - "${MCP_RESEARCH_PORT:-8090}:8080"
+  caddy:
+    image: caddy:2.11
+    deploy: { replicas: 1, restart_policy: { condition: any } }
+    ports: ["80:80"]
     volumes:
-      - research_data:/data
-    networks:
-      - spider_hoarder_net
-    deploy:
-      replicas: 1
-      restart_policy:
-        condition: on-failure
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+    networks: [public, sessions_tor, sessions_clear]
+
+  # Human SSO for the live view (MCP bearer tokens are verified by the gateways)
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.5
+    deploy: { replicas: 1, restart_policy: { condition: any } }
+    environment:
+      OAUTH2_PROXY_PROVIDER: keycloak-oidc
+      OAUTH2_PROXY_OIDC_ISSUER_URL: ${OIDC_ISSUER}
+      OAUTH2_PROXY_CLIENT_ID: ${O2P_CLIENT_ID}
+      OAUTH2_PROXY_CLIENT_SECRET: ${O2P_CLIENT_SECRET}
+      OAUTH2_PROXY_COOKIE_SECRET: ${O2P_COOKIE_SECRET}
+      OAUTH2_PROXY_COOKIE_SECURE: ${O2P_COOKIE_SECURE:-true}   # deploy.sh: false when PUBLIC_SCHEME=http
+      OAUTH2_PROXY_REDIRECT_URL: ${PUBLIC_SCHEME:-https}://${PUBLIC_HOST}/oauth2/callback
+      OAUTH2_PROXY_HTTP_ADDRESS: 0.0.0.0:4180
+      OAUTH2_PROXY_REVERSE_PROXY: "true"
+      OAUTH2_PROXY_UPSTREAMS: static://202
+      OAUTH2_PROXY_EMAIL_DOMAINS: "*"
+      OAUTH2_PROXY_ALLOWED_GROUPS: ${ALLOWED_GROUP:-}
+      OAUTH2_PROXY_SET_XAUTHREQUEST: "true"
+      OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
+      OAUTH2_PROXY_CODE_CHALLENGE_METHOD: S256
+    networks: [public]
+
+  research-tor:
+    <<: *research
+    environment:
+      <<: *research-env
+      EGRESS: tor
+    networks: [sessions_tor, public]   # public: the gateway reaches the IdP; browsers (session uids) are firewalled to tor only
+
+  research-clear:
+    <<: *research
+    environment:
+      <<: *research-env
+      EGRESS: clear
+    networks: [sessions_clear, public]
+
+  tor:
+    image: spider-hoarder-tor:local
+    deploy: { replicas: 1, restart_policy: { condition: any } }
+    environment:
+      MAX_SESSIONS_TOTAL: ${MAX_SESSIONS_TOTAL:-18}
+    volumes: [tor_data:/var/lib/tor]
+    networks: [tor_egress, sessions_tor]
 
 networks:
-  spider_hoarder_net:
-    driver: overlay
+  public: { driver: overlay }
+  tor_egress: { driver: overlay }
+  sessions_tor: { driver: overlay, internal: true }   # tor browsers: no internet, only tor:9050+
+  sessions_clear: { driver: overlay }                 # clear browsers -> internet (uid firewall blocks private ranges)
 
 volumes:
-  research_data:
+  tor_data: {}
+  research_data: {}

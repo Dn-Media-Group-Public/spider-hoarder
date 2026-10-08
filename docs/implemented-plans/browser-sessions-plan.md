@@ -1,7 +1,7 @@
 # Browser sessions: merging newsroom-browsers into mcp-research
 
-Status: proposal, 2026-10-07. Supersedes the container-per-session design in
-[newsroom-browsers-plan.md](newsroom-browsers-plan.md) (reuse its Keycloak,
+Status: implemented 2026-10-07 (see "Implementation notes" at the end). Supersedes the container-per-session design in
+[newsroom-browsers-plan.md](../plans/newsroom-browsers-plan.md) (reuse its Keycloak,
 Caddy/oauth2-proxy and Tor sections; its Docker-launching parts are dropped).
 Builds on the existing `mcp-research` service.
 
@@ -253,3 +253,50 @@ be verified; if it is a problem, this service moves to plain compose.
 - A quarantined uid is lost until restart; watch for it in logs.
 - Swarm vs plain compose (see Deployment).
 - Consent blocklist mechanism (see above).
+
+## Implementation notes (2026-10-07)
+
+Decisions taken where the plan left them open, and deviations:
+
+- **Swarm (production runs on it):** stays a Swarm stack, verified with a real
+  `docker stack deploy` (Docker 26.1). `cap_drop`/`cap_add` are honoured by stack deploy.
+  Unsupported there: `security_opt` (so `entrypoint.sh` sets `no_new_privs` with
+  `setpriv` on sessiond and the gateway; verified `NoNewPrivs: 1`), `shm_size` (Chromium
+  runs with `--disable-dev-shm-usage`), `build:` (`deploy.sh` builds the local images).
+  The `internal` overlay network and the uid firewall against the Tor service VIP work.
+- **Consent blocklist:** Cookiemonster gives ~670 hosts. Direct (clear) egress uses
+  Chromium `--host-rules` (verified). Under Tor `--host-rules` do **not** apply
+  (the proxy resolves names; verified), so each Tor session runs a small SOCKS5
+  filtering relay (`filter_proxy.py`) between Chromium and Tor's per-session
+  SocksPort (verified: blocklisted host refused, Tor still used).
+- **Loopback:** instead of "ACCEPT loopback" the uid firewall allows each session uid
+  only its own loopback ports (x11vnc, filter relay), the Docker resolver and
+  established replies, so a session cannot reach the gateway (spoofing
+  `X-Auth-Request-Email`) or other sessions' MCP/VNC ports.
+- **Upload links** are signed (`blobtoken`, marker path `@upload`, 1h) and carry the
+  owner-scoped job key, so the upload page needs no SSO and cannot cross owners.
+- **Secrets off argv:** VNC password and host rules are 0600 files in the session home.
+- Gateway start and sessiond start both wipe every pool uid; the entrypoint
+  restarts the gateway if it exits. `setuid(0)`-must-fail is not asserted at
+  launch (Popen drops uid/gid/groups; covered by `no-new-privileges` and tests).
+- Port layout is derived in `ports.py` (SocksPorts, firewall and pool size agree).
+
+- **Auth/Keycloak, TLS and dev mode:** TLS ends at the Google load balancer, so the stack only
+  speaks http (`PUBLIC_SCHEME` says which URLs users see). Prod uses an external OIDC IdP
+  (`OIDC_ISSUER`); `./deploy.sh --dev` adds `docker-compose.dev.yml` (local Keycloak with
+  `start-dev`, `extra_hosts: localhost:host-gateway`, like article-graph's dev overlay).
+  `keycloak/setup.sh` initializes a realm for both: realm-default scopes (`aud`, `groups`),
+  oauth2-proxy client, anonymous DCR limited to claude.ai/claude.com/localhost redirects, and one
+  user. Claude registers itself via DCR. Verified in dev on Swarm: discovery, DCR (hostile
+  redirect rejected), tokens for a DCR client accepted by both gateways, SSO redirect.
+  The gateways joined the `public` network to reach the IdP; the per-uid firewall still confines
+  the browsers (the tor instance no longer has an internal-only network for the gateway).
+
+**Not verified live** (no public host / real claude.ai here): the live-view handoff through
+oauth2-proxy and Caddy `forward_auth` with a real browser session, the
+CAPTCHA smoke test through noVNC in a browser, the Chromium sandbox attempt,
+gVisor, and metrics (phase 6 is only the container-level hardening already in
+compose). Verified in containers and a real Swarm stack deploy: sessiond lifecycle/isolation tests, per-uid
+firewall on both egresses, Tor egress, an authenticated MCP flow with a stub JWKS
+(tool proxying, `browser_save_page`, `ingest_page`, owner scoping, `/authz` and
+`/start` ownership).

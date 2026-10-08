@@ -1,0 +1,83 @@
+# Keycloak SSO for humans (oauth2-proxy). Puts the verified email in
+# X-Auth-Request-Email; any client-supplied value is stripped first.
+(sso) {
+	request_header -X-Auth-Request-Email
+	forward_auth oauth2-proxy:4180 {
+		uri /oauth2/auth
+		copy_headers X-Auth-Request-Email
+		@unauth status 401
+		handle_response @unauth {
+			redir * /oauth2/start?rd={http.request.orig_uri.path}
+		}
+	}
+}
+
+(egress) {
+	# MCP endpoint + RFC 9728 metadata: bearer auth is done by the gateway itself.
+	# Upload and blob links are signed capability URLs, checked by the gateway.
+	handle /{args[0]}/mcp* {
+		reverse_proxy research-{args[0]}:8000 {
+			flush_interval -1
+		}
+	}
+	handle /.well-known/oauth-protected-resource/{args[0]}/mcp {
+		reverse_proxy research-{args[0]}:8000
+	}
+	handle /{args[0]}/upload/* {
+		reverse_proxy research-{args[0]}:8000
+	}
+	handle /{args[0]}/blob/* {
+		reverse_proxy research-{args[0]}:8000
+	}
+
+	# Handoff link given to the user: SSO, then the gateway checks ownership
+	# and redirects to noVNC with the session's VNC password.
+	@start_{args[0]} path_regexp ^/{args[0]}/view/[A-Za-z0-9_-]+/start$
+	handle @start_{args[0]} {
+		route {
+			import sso
+			reverse_proxy research-{args[0]}:8000
+		}
+	}
+
+	# Live view (noVNC page + websocket): SSO, ownership check, then proxy
+	# straight to that session's websockify port in the research container.
+	@view_{args[0]} path_regexp ^/{args[0]}/view/[A-Za-z0-9_-]+/
+	handle @view_{args[0]} {
+		route {
+			import sso
+			request_header -X-Upstream
+			forward_auth research-{args[0]}:8000 {
+				uri /authz
+				copy_headers X-Upstream
+			}
+			uri path_regexp ^/{args[0]}/view/[A-Za-z0-9_-]+ ""
+			reverse_proxy {http.request.header.X-Upstream}
+		}
+	}
+}
+
+# TLS is terminated by the load balancer in front (Google LB in prod); dev has none.
+{
+	auto_https off
+	servers {
+		trusted_proxies static private_ranges   # keep the LB's X-Forwarded-Proto/-For
+	}
+}
+
+:80 {
+	handle /healthz {
+		respond 200
+	}
+
+	handle /oauth2/* {
+		reverse_proxy oauth2-proxy:4180
+	}
+
+	import egress tor
+	import egress clear
+
+	handle {
+		respond 404
+	}
+}
