@@ -174,24 +174,64 @@ def parse_eval_result(text: str) -> str:
     return value
 
 
+# Scroll to trigger lazy content, then wait until the DOM has been quiet for 1s (max 10s) so
+# client-side rendered pages are complete before we read them.
+SETTLE_JS = """async () => {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  let last = Date.now();
+  const obs = new MutationObserver(() => { last = Date.now(); });
+  obs.observe(document.documentElement, {subtree: true, childList: true, characterData: true});
+  const y0 = window.scrollY;
+  for (let y = 0, i = 0; y < document.body.scrollHeight && i < 30; y += window.innerHeight, i++) {
+    window.scrollTo(0, y);
+    await sleep(150);
+  }
+  window.scrollTo(0, y0);
+  const t0 = Date.now();
+  while (Date.now() - last < 1000 && Date.now() - t0 < 10000) await sleep(100);
+  obs.disconnect();
+  return document.documentElement.outerHTML;
+}"""
+
+
 async def page_html(bs: BrowserSession) -> str:
-    res = await bs.client.call_tool("browser_evaluate", {"function": "() => document.documentElement.outerHTML"})
+    res = await bs.client.call_tool("browser_evaluate", {"function": SETTLE_JS})
     if res.isError:
         raise RuntimeError(result_text(res))
     return parse_eval_result(result_text(res))
 
 
-async def fetch_html(owner: str, url: str) -> str:
-    """One-shot: ephemeral session (own uid), navigate, read HTML, destroy."""
+async def cookies_for(bs: BrowserSession, url: str) -> dict:
+    """The session's browser cookies applicable to url, as a name->value dict for `requests`."""
+    code = "async (page) => JSON.stringify(await page.context().cookies(%s))" % json.dumps(url)
+    res = await bs.client.call_tool("browser_run_code_unsafe", {"code": code})
+    if res.isError:
+        raise RuntimeError(result_text(res))
+    return {c["name"]: c["value"] for c in json.loads(parse_eval_result(result_text(res)))}
+
+
+async def fetch_html(owner: str, url: str, live: BrowserSession | None = None) -> str:
+    """One-shot: navigate, read HTML. Without `live`: ephemeral session (own uid), destroyed after.
+    With `live`: a temporary tab in that session, so its cookies apply."""
+    if live:
+        await live.client.call_tool("browser_tabs", {"action": "new"})
+        try:
+            return await _navigate_read(live, url)
+        finally:
+            await live.client.call_tool("browser_tabs", {"action": "close"})
     bs = await new_session(owner)
     try:
-        for tool, args in (("browser_navigate", {"url": url}), ("browser_wait_for", {"time": 2})):
-            res = await bs.client.call_tool(tool, args)
-            if res.isError:
-                raise RuntimeError(result_text(res))
-        return await page_html(bs)
+        return await _navigate_read(bs, url)
     finally:
         await close(bs)
+
+
+async def _navigate_read(bs: BrowserSession, url: str) -> str:
+    for tool, args in (("browser_navigate", {"url": url}), ("browser_wait_for", {"time": 2})):
+        res = await bs.client.call_tool(tool, args)
+        if res.isError:
+            raise RuntimeError(result_text(res))
+    return await page_html(bs)
 
 
 async def reaper() -> None:

@@ -14,30 +14,33 @@ CHROME_UA = (
     "(KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 )
 EGRESS = os.environ.get("EGRESS", "clear")
-_TOR = {"http": f"socks5h://tor:{ports.GATEWAY_SOCKS_PORT}", "https": f"socks5h://tor:{ports.GATEWAY_SOCKS_PORT}"}
 
 
-def _request(method: str, url: str, **kw) -> requests.Response:
+def _request(method: str, url: str, socks_port: int | None = None, cookies: dict | None = None, **kw) -> requests.Response:
     kw["headers"] = {"User-Agent": CHROME_UA, **kw.get("headers", {})}
+    if cookies:
+        kw["cookies"] = cookies
     if EGRESS == "tor":
-        return requests.request(method, url, proxies=_TOR, **kw)
+        # a session's own SocksPort = same Tor circuit (exit IP) as its browser
+        p = f"socks5h://tor:{socks_port or ports.GATEWAY_SOCKS_PORT}"
+        return requests.request(method, url, proxies={"http": p, "https": p}, **kw)
     return netguard.guarded_request(method, url, **kw)
 
 
-def content_type(url: str) -> str:
+def content_type(url: str, **kw) -> str:
     try:
-        ctype = _request("HEAD", url, timeout=15).headers.get("Content-Type", "")
+        ctype = _request("HEAD", url, timeout=15, **kw).headers.get("Content-Type", "")
         if ctype:
             return ctype
     except (requests.RequestException, ValueError):
         pass
     # HEAD unsupported or empty content-type: small ranged GET
-    resp = _request("GET", url, timeout=15, headers={"Range": "bytes=0-0"}, stream=True)
+    resp = _request("GET", url, timeout=15, **kw, headers={"Range": "bytes=0-0"}, stream=True)
     resp.close()
     return resp.headers.get("Content-Type", "")
 
 
-def download(url: str) -> tuple[bytes, str]:
-    resp = _request("GET", url, timeout=60)
+def download(url: str, **kw) -> tuple[bytes, str]:
+    resp = _request("GET", url, timeout=60, **kw)
     resp.raise_for_status()
     return resp.content, resp.headers.get("Content-Type", "")

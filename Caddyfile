@@ -80,6 +80,10 @@
 	import egress tor
 	import egress clear
 
+	handle / {
+		reverse_proxy research-clear:8000
+	}
+
 	handle {
 		respond 404
 	}

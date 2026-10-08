@@ -145,13 +145,16 @@ def _store_and_parse(key: str, filename: str, raw: bytes, content_type: str) -> 
     return result
 
 
-async def _ingest_page(owner: str, url: str) -> dict:
+async def _ingest_page(owner: str, url: str, live: sessions.BrowserSession | None = None) -> dict:
     job_id = str(uuid.uuid4())
-    ctype = await asyncio.to_thread(fetch.content_type, url)
+    kw = {}
+    if live:  # preflight/download as the real browser session: its cookies, its Tor circuit
+        kw = {"cookies": await sessions.cookies_for(live, url), "socks_port": ports.socks_port(live.uid)}
+    ctype = await asyncio.to_thread(fetch.content_type, url, **kw)
     if "text/html" in ctype or ctype == "":
-        raw, ctype = (await sessions.fetch_html(owner, url)).encode(), "text/html"
+        raw, ctype = (await sessions.fetch_html(owner, url, live)).encode(), "text/html"
     else:
-        raw, ctype = await asyncio.to_thread(fetch.download, url)
+        raw, ctype = await asyncio.to_thread(fetch.download, url, **kw)
     filename = os.path.basename(url.split("?")[0]) or "page"
     return {"job_id": job_id, **_store_and_parse(_key(owner, job_id), filename, raw, ctype)}
 
@@ -184,7 +187,8 @@ async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
                 await sessions.close(bs)
             return _text("Browser session closed.")
         if name == "ingest_page":
-            return _text(json.dumps(await _ingest_page(owner, args["url"])))
+            return _text(json.dumps(await _ingest_page(
+                owner, args["url"], await sessions.get_session(mcp_session, owner, create=False))))
         if name == "get_upload_link":
             job_id = str(uuid.uuid4())
             token = blobtoken.mint(_key(owner, job_id), UPLOAD_MARK, ttl=3600)
@@ -270,6 +274,20 @@ def _upload_key(token: str) -> str:
     if data["path"] != UPLOAD_MARK:
         raise HTTPException(403, "not an upload link")
     return data["job_id"]
+
+
+@mcp.custom_route("/", methods=["GET"])
+async def index_page(request: Request) -> Response:
+    """Public landing page (no auth): how to add both servers; URLs come from PUBLIC_SCHEME/PUBLIC_HOST."""
+    root = f"{SCHEME}://{PUBLIC_HOST}"
+    cmds = "\n".join(
+        f"claude mcp add --transport http spider-hoarder-{e} {root}/{e}/mcp" for e in ("clear", "tor"))
+    return HTMLResponse(
+        "<!doctype html><html><head><meta charset=utf-8><title>spider-hoarder</title></head><body>"
+        "<h1>spider-hoarder</h1><p>Add the MCP servers to Claude Code:</p>"
+        f"<pre>{html.escape(cmds)}</pre>"
+        "<p>Then run <code>/mcp</code>, pick the server and choose Authenticate. "
+        "<b>clear</b> browses directly; <b>tor</b> browses via Tor.</p></body></html>")
 
 
 @mcp.custom_route(f"/{EGRESS}/upload/{{token}}", methods=["GET"])
