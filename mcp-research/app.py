@@ -65,6 +65,7 @@ mcp = FastMCP(
         "confirm before continuing. browser_save_page parses and stores the current page; ingest_page does a "
         "one-shot fetch of a URL. Tools that write files (screenshots, PDFs, anything given a `filename`) return "
         "{job_id, files, text?} instead; fetch them with list_files / get_file_text / get_file_url. "
+        "terse/<name>.md is an outline (headings, links, images) of parsed/<name>.md. "
         "Call browser_end_session when finished."
     ),
     token_verifier=auth.KeycloakVerifier(
@@ -103,7 +104,7 @@ EXTRA_TOOLS = [
                "browser_* tools and browser_request_human_help instead."),
     types.Tool(name="get_upload_link", inputSchema=_schema(),
                description="Mint a job id and a link for a human to upload files through a browser."),
-    types.Tool(name="list_files", inputSchema=_schema(job_id="Job id"), description="Manifest of files stored under a job id."),
+    types.Tool(name="list_files", inputSchema=_schema(job_id="Job id"), description="Manifest of files stored under a job id. terse/<name>.md is an outline (headings, links, images) of parsed/<name>.md."),
     types.Tool(name="get_file_text", inputSchema={
                    "type": "object", "required": ["job_id", "path"],
                    "properties": {
@@ -113,7 +114,8 @@ EXTRA_TOOLS = [
                        "length": {"type": ["integer", "null"], "minimum": 0, "default": DEFAULT_TEXT_LENGTH,
                                   "description": f"Max characters to return (default {DEFAULT_TEXT_LENGTH}); null = whole file"}}},
                description="Return one parsed file's Markdown text inline, or a slice of it "
-               "(offset/length in characters). If truncated, a header gives the total size and the next offset."),
+               "(offset/length in characters). If truncated, a header gives the total size and the next offset. "
+               "terse/<name>.md is an outline (headings, links, images) of parsed/<name>.md."),
     types.Tool(name="get_file_url", inputSchema=_schema(job_id="Job id", path="File path from the manifest"),
                description="Mint a short-lived opaque signed URL for one blob (original or parsed)."),
 ]
@@ -151,17 +153,33 @@ def _store_and_parse(key: str, filename: str, raw: bytes, content_type: str) -> 
             storage.write_bytes(key, f"original/{rel_path}", data, "application/octet-stream")
             md = extract.file_to_markdown(data, rel_path)
             storage.write_bytes(key, f"parsed/{rel_path}.md", md.encode(), "text/markdown")
-    else:
-        text = extract.html_to_markdown(raw) if "html" in content_type else extract.file_to_markdown(raw, filename)
-        storage.write_bytes(key, f"parsed/{filename}.md", text.encode(), "text/markdown")
-    return _job_result(key, text)
+            _write_terse(key, f"{rel_path}.md", md)
+        return _job_result(key)
+    if filename.lower().endswith((".md", ".markdown")):  # already Markdown: no parsed/, terse from the original
+        text = raw.decode("utf-8", errors="replace")
+        return _job_result(key, text, f"original/{filename}", _write_terse(key, filename, text), f"terse/{filename}")
+    text = extract.html_to_markdown(raw) if "html" in content_type else extract.file_to_markdown(raw, filename)
+    storage.write_bytes(key, f"parsed/{filename}.md", text.encode(), "text/markdown")
+    return _job_result(key, text, f"parsed/{filename}.md", _write_terse(key, f"{filename}.md", text), f"terse/{filename}.md")
 
 
-def _job_result(key: str, text: str | None) -> dict:
-    """{files, text?}: the one place that decides whether text is small enough to return inline."""
+def _write_terse(key: str, name: str, md: str) -> str:
+    """Store terse/<name> if the outline is non-empty; returns the outline text."""
+    t = extract.terse(md)
+    if t:
+        storage.write_bytes(key, f"terse/{name}", t.encode(), "text/markdown")
+    return t
+
+
+def _job_result(key: str, text: str | None = None, path: str | None = None,
+                terse: str = "", terse_path: str = "") -> dict:
+    """{files, text?, text_path?}: the one place that decides whether text is small enough to return inline;
+    falls back to the terse outline when the full text is too big."""
     result = {"files": storage.get_manifest(key)["files"]}
     if text is not None and len(text) < INLINE_LIMIT:
-        result["text"] = text
+        result["text"], result["text_path"] = text, path
+    elif terse and len(terse) < INLINE_LIMIT:
+        result["text"], result["text_path"] = terse, terse_path
     return result
 
 
@@ -198,13 +216,16 @@ def _job_name(filename: Any, default: str) -> str:
 def _store_file(key: str, name: str, raw: bytes) -> dict:
     ctype = mimetypes.guess_type(name)[0] or "application/octet-stream"
     storage.write_bytes(key, f"original/{name}", raw, ctype)
-    text = None
     if name.lower().endswith(".pdf"):
         text = extract.file_to_markdown(raw, name)
         storage.write_bytes(key, f"parsed/{name}.md", text.encode(), "text/markdown")
-    elif b"\0" not in raw[:1024]:  # ponytail: NUL sniff for text vs binary
+        return _job_result(key, text, f"parsed/{name}.md", _write_terse(key, f"{name}.md", text), f"terse/{name}.md")
+    if b"\0" not in raw[:1024]:  # ponytail: NUL sniff for text vs binary
         text = raw.decode("utf-8", errors="replace")
-    return _job_result(key, text)
+        if name.lower().endswith((".md", ".markdown")):
+            return _job_result(key, text, f"original/{name}", _write_terse(key, name, text), f"terse/{name}")
+        return _job_result(key, text, f"original/{name}")
+    return _job_result(key)
 
 
 async def _file_tool(bs: sessions.BrowserSession, name: str, arguments: dict) -> types.CallToolResult | None:

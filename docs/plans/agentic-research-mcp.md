@@ -106,6 +106,7 @@ storage URL, e.g. `gs://bucket/prefix`):
 <job_uuid>/
   original/<filename>            # raw bytes exactly as fetched or uploaded
   parsed/**                      # mirrors the original's internal structure
+  terse/**                       # outline (headings, links, images) of each parsed/Markdown file
     report.pdf.md                # e.g. for a zip: same relative paths, +.md
     subdir/notes.docx.md
   index.json                     # manifest: every file above, path/size/content-type
@@ -123,7 +124,7 @@ needed later, it's a bucket lifecycle rule, not app code.
 | `ingest_page(url)` | Fetch flow above. Returns `{job_id, files: [...], text?: str}`. |
 | `get_upload_link()` | Mints a job UUID, returns `{url, job_id}`. |
 | `list_files(job_id)` | Returns that job's `index.json`. |
-| `get_file_text(job_id, path)` | Returns one parsed file's Markdown inline — for small files the agent wants to read directly. |
+| `get_file_text(job_id, path)` | Returns one parsed file's Markdown inline — for small files the agent wants to read directly. Also serves `terse/<name>.md` outlines. See also: [Plan: Terse outline view](../implemented-plans/terse-view.md) |
 | `get_file_url(job_id, path)` | Mints a short-lived **opaque** signed URL for one blob (original or parsed) — for large files the agent wants to hand to Ariadne by reference instead of pasting inline. |
 
 All file-producing tools (screenshots, PDFs, any `filename=` output) also return `{job_id, files, text?}`. See also: [Plan: Tool file outputs become jobs](../implemented-plans/file-outputs-as-jobs.md)

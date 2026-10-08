@@ -8,3 +8,5 @@ markitdown[all]
 fsspec
 python-multipart
 lxml_html_clean
+markdown-it-py
+linkify-it-py

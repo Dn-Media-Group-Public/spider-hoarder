@@ -6,9 +6,11 @@ import os
 import zipfile
 
 import trafilatura
+from markdown_it import MarkdownIt
 from markitdown import MarkItDown
 
 _md = MarkItDown()
+_mdit = MarkdownIt("commonmark", {"linkify": True}).enable(["table", "linkify"])
 
 
 def is_zip(content_type: str, filename: str) -> bool:
@@ -45,3 +47,43 @@ def unpack_zip(data: bytes) -> dict[str, bytes]:
         for name in safe_zip_members(zf):
             out[name] = zf.read(name)
     return out
+
+
+def _pieces(children) -> list[tuple[bool, str]]:
+    """Inline tokens -> [(is_link_or_image, text)]; styling flattened, links/images as Markdown."""
+    out, i = [], 0
+    while i < len(children):
+        t = children[i]
+        if t.type in ("text", "code_inline"):
+            out.append((False, t.content))
+        elif t.type in ("softbreak", "hardbreak"):
+            out.append((False, " "))
+        elif t.type == "image":
+            alt = "".join(s for _, s in _pieces(t.children or []))
+            out.append((True, f"![{alt}]({t.attrGet('src')})"))
+        elif t.type == "link_open":
+            j = i + 1
+            while children[j].type != "link_close":  # links cannot nest
+                j += 1
+            text = "".join(s for _, s in _pieces(children[i + 1:j]))
+            out.append((True, f"<{text}>" if t.markup in ("autolink", "linkify") else f"[{text}]({t.attrGet('href')})"))
+            i = j
+        i += 1
+    return out
+
+
+def terse(markdown: str) -> str:
+    """Outline of a Markdown document: headings, plus one `* ` bullet per link/image outside headings."""
+    lines, level = [], 0
+    for tok in _mdit.parse(markdown):
+        if tok.type == "heading_open":
+            level = int(tok.tag[1:])
+        elif tok.type == "heading_close":
+            level = 0
+        elif tok.type == "inline":
+            pieces = _pieces(tok.children or [])
+            if level:
+                lines.append("#" * level + " " + "".join(s for _, s in pieces))
+            else:
+                lines += [f"* {s}" for is_link, s in pieces if is_link]
+    return "\n".join(lines)

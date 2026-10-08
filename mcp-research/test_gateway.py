@@ -127,6 +127,71 @@ def test_file_outputs():
     assert "text" not in app._store_file(key, "snap2.md", b"# page")
 
 
+def test_terse():
+    import extract
+    t = extract.terse
+    md = """Intro [a](http://a "title") text ![i](http://i.png)
+
+Setext
+======
+
+## Sec [**bold** `c`](http://h) x
+
+[![alt](img)](url) and [**b** t](u2) <https://auto.x> https://lin.kify/x [r][ref]
+
+| c |
+|---|
+| [tl](tu) |
+
+- [li](lu)
+
+> [q](qu)
+
+```
+# not a heading
+[no](link)
+```
+
+    [no](indented)
+
+`[no](code)`
+
+<div><a href="x">no</a></div>
+
+[a](http://a)
+
+[ref]: http://ref
+"""
+    assert t(md).split("\n") == [
+        "* [a](http://a)", "* ![i](http://i.png)", "# Setext", "## Sec [bold c](http://h) x",
+        "* [![alt](img)](url)", "* [b t](u2)", "* <https://auto.x>", "* <https://lin.kify/x>", "* [r](http://ref)",
+        "* [tl](tu)", "* [li](lu)", "* [q](qu)", "* [a](http://a)"], t(md)
+    assert t("just prose\n\n```\n# x\n```") == ""
+
+
+def test_store_terse():
+    import app, storage, tempfile
+    storage.BLOB_URL = "file://" + tempfile.mkdtemp()
+    app.INLINE_LIMIT = 50_000
+    key = app._key("a@x.y", "123e4567-e89b-12d3-a456-426614174001")
+    paths = lambda r: {f["path"] for f in r["files"]}
+    r = app._store_and_parse(key, "p.html", b"<html><body><article><h1>Title</h1><p>" + b"Some long article text here. " * 20 + b"</p><h2>Part</h2><p>" + b"More article text. " * 20 + b"</p></article></body></html>", "text/html")
+    assert {"original/p.html", "parsed/p.html.md", "terse/p.html.md"} <= paths(r), paths(r)
+    r = app._store_and_parse(key, "n.md", b"# H\n[l](u)", "text/markdown")
+    assert "terse/n.md" in paths(r) and not any(p.startswith("parsed/n") for p in paths(r))
+    assert r["text_path"] == "original/n.md"
+    r = app._store_and_parse(key, "t.txt", b"hello", "text/plain")
+    assert not any(p.startswith("terse/t") for p in paths(r))
+    r = app._store_and_parse(key, "e.md", b"only prose", "text/markdown")
+    assert "terse/e.md" not in paths(r)
+    app.INLINE_LIMIT = 15  # parsed large, terse small -> outline inline
+    r = app._store_and_parse(key, "big.md", b"# H\n[l](u)\n" + b"prose " * 10, "text/markdown")
+    assert r["text"] == "# H\n* [l](u)" and r["text_path"] == "terse/big.md", r
+    app.INLINE_LIMIT = 3  # both large
+    assert "text" not in app._store_and_parse(key, "big2.md", b"# Heading\n[l](u)\n" + b"prose " * 10, "text/markdown")
+    app.INLINE_LIMIT = 50_000
+
+
 if __name__ == "__main__":
     for n, f in list(globals().items()):
         if n.startswith("test_"):
