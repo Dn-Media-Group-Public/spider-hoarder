@@ -34,6 +34,7 @@ import sessions
 import storage
 
 EGRESS = sessions.EGRESS
+DEFAULT_TEXT_LENGTH = 20000  # chars; keeps get_file_text results LLM-sized
 PUBLIC_HOST = os.environ["PUBLIC_HOST"]
 SCHEME = os.environ.get("PUBLIC_SCHEME", "https")  # TLS ends at the load balancer; dev uses http
 OIDC_ISSUER = os.environ["OIDC_ISSUER"].rstrip("/")
@@ -88,8 +89,16 @@ EXTRA_TOOLS = [
     types.Tool(name="get_upload_link", inputSchema=_schema(),
                description="Mint a job id and a link for a human to upload files through a browser."),
     types.Tool(name="list_files", inputSchema=_schema(job_id="Job id"), description="Manifest of files stored under a job id."),
-    types.Tool(name="get_file_text", inputSchema=_schema(job_id="Job id", path="File path from the manifest"),
-               description="Return one parsed file's Markdown text inline."),
+    types.Tool(name="get_file_text", inputSchema={
+                   "type": "object", "required": ["job_id", "path"],
+                   "properties": {
+                       "job_id": {"type": "string", "description": "Job id"},
+                       "path": {"type": "string", "description": "File path from the manifest"},
+                       "offset": {"type": "integer", "minimum": 0, "description": "Start character (default 0)"},
+                       "length": {"type": ["integer", "null"], "minimum": 0, "default": DEFAULT_TEXT_LENGTH,
+                                  "description": f"Max characters to return (default {DEFAULT_TEXT_LENGTH}); null = whole file"}}},
+               description="Return one parsed file's Markdown text inline, or a slice of it "
+               "(offset/length in characters). If truncated, a header gives the total size and the next offset."),
     types.Tool(name="get_file_url", inputSchema=_schema(job_id="Job id", path="File path from the manifest"),
                description="Mint a short-lived opaque signed URL for one blob (original or parsed)."),
 ]
@@ -188,7 +197,15 @@ async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
             if not storage.exists(key, path):
                 return _text("file not found", True)
             if name == "get_file_text":
-                return _text(json.dumps({"text": storage.read_text(key, path)}))
+                text = storage.read_text(key, path)
+                off = max(int(args.get("offset") or 0), 0)
+                n = args.get("length", DEFAULT_TEXT_LENGTH)
+                end = len(text) if n is None else min(off + max(int(n), 0), len(text))
+                if off == 0 and end == len(text):
+                    return _text(text)
+                return _text(f"[Showing characters {off}-{end} of {len(text)}."
+                             + (f" Truncated: call again with offset={end} to continue." if end < len(text) else "")
+                             + f"]\n\n{text[off:end]}")
             return _text(json.dumps({"url": f"{BASE}/blob/{blobtoken.mint(key, path)}"}))
 
         bs = await sessions.get_session(mcp_session, owner)
