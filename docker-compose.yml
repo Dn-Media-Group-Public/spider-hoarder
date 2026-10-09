@@ -57,7 +57,7 @@ services:
     environment:
       OAUTH2_PROXY_PROVIDER: keycloak-oidc
       OAUTH2_PROXY_OIDC_ISSUER_URL: ${OIDC_ISSUER}
-      OAUTH2_PROXY_SCOPE: openid email profile
+      MCP_SCOPE: ${MCP_SCOPE:-}   # entrypoint builds the scope list from it: the same one Claude's MCP client gets
       OIDC_ISSUER: ${OIDC_ISSUER}
       PUBLIC_HOST: ${PUBLIC_HOST}
       PUBLIC_SCHEME: ${PUBLIC_SCHEME:-https}
