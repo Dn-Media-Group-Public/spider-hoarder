@@ -92,7 +92,7 @@ mcp = FastMCP(
         OIDC_ISSUER, os.environ.get("MCP_SCOPE", ""),
         jwks_url=os.environ.get("OIDC_JWKS_URL", "")),  # optional: fetch keys over an internal address
     auth=AuthSettings(issuer_url=OIDC_ISSUER, resource_server_url=f"{SCHEME}://{PUBLIC_HOST}{MCP_PATH}",
-                      required_scopes=["basic", *_ENFORCED_SCOPES]),  # = advertised; enforcement is narrowed below
+                      required_scopes=["basic", "email", *_ENFORCED_SCOPES]),  # = advertised; enforcement is narrowed below
     streamable_http_path=MCP_PATH,
     transport_security=TransportSecuritySettings(
         enable_dns_rebinding_protection=True,

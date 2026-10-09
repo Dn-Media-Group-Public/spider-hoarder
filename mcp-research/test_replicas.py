@@ -145,5 +145,5 @@ def test_unauthenticated_mcp_post_is_401_not_500():
 def test_metadata_advertises_basic_and_enforced_scope():
     from starlette.testclient import TestClient
     r = TestClient(app.app, base_url=f"https://{app.PUBLIC_HOST}").get("/.well-known/oauth-protected-resource" + app.MCP_PATH)
-    assert "basic" in r.json()["scopes_supported"] and set(app._ENFORCED_SCOPES) <= set(r.json()["scopes_supported"])
+    assert {"basic", "email"} <= set(r.json()["scopes_supported"]) and set(app._ENFORCED_SCOPES) <= set(r.json()["scopes_supported"])
     assert _mcp_route().app.required_scopes == app._ENFORCED_SCOPES  # basic is advertised, not enforced
