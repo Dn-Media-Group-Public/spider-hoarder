@@ -34,8 +34,6 @@ services:
       PUBLIC_HOST: ${PUBLIC_HOST}
       PUBLIC_SCHEME: ${PUBLIC_SCHEME}
       MCP_SCOPE: ${MCP_SCOPE:-}
-      O2P_CLIENT_ID: ${O2P_CLIENT_ID}
-      O2P_CLIENT_SECRET: ${O2P_CLIENT_SECRET}
     configs:
       - { source: keycloak_setup, target: /setup.sh, mode: 0555 }
     deploy: { replicas: 1, restart_policy: { condition: on-failure, delay: 10s, max_attempts: 5 } }

@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Initialize a Keycloak realm for spider-hoarder (idempotent: re-running is safe; it resets
-# the initial user's password to KC_USER_PASSWORD). Claude registers itself through Dynamic
-# Client Registration, so no Claude client is created here, only the anonymous-DCR policy.
+# the initial user's password to KC_USER_PASSWORD). Claude and oauth2-proxy register themselves through
+# Dynamic Client Registration, so no clients are created here, only the anonymous-DCR policy.
 # Needs kcadm.sh (shipped in the Keycloak image, /opt/keycloak/bin). Env:
 #   KC_URL KC_ADMIN KC_ADMIN_PASSWORD   admin access to Keycloak (master realm)
 #   KC_REALM        realm to create/use (default: newsroom)
 #   KC_USER KC_USER_PASSWORD [KC_USER_EMAIL]   the initial user (KC_USER default: researcher)
-#   plus from .env: PUBLIC_HOST MCP_SCOPE O2P_CLIENT_ID O2P_CLIENT_SECRET
+#   plus from .env: PUBLIC_HOST MCP_SCOPE
 set -euo pipefail
 export PATH="$PATH:/opt/keycloak/bin"
 : "${KC_URL:?}" "${KC_ADMIN:?}" "${KC_ADMIN_PASSWORD:?}" "${KC_USER_PASSWORD:?}"
-: "${PUBLIC_HOST:?}" "${O2P_CLIENT_ID:?}" "${O2P_CLIENT_SECRET:?}"
+: "${PUBLIC_HOST:?}"
 REALM=${KC_REALM:-newsroom}
 USERNAME=${KC_USER:-researcher}
 EMAIL=${KC_USER_EMAIL:-$USERNAME@example.org}
@@ -35,13 +35,6 @@ if [ -n "${MCP_SCOPE:-}" ] && [ -z "$(id_of client-scopes name "$MCP_SCOPE" || t
   $K create client-scopes -r "$REALM" -s name="$MCP_SCOPE" -s protocol=openid-connect \
      -s attributes.'"include.in.token.scope"'=true -s attributes.'"display.on.consent.screen"'=false
   $K update "default-default-client-scopes/$(id_of client-scopes name "$MCP_SCOPE")" -r "$REALM" -n
-fi
-
-# Human live-view login (oauth2-proxy): confidential client
-if [ -z "$(id_of clients clientId "$O2P_CLIENT_ID" || true)" ]; then
-  $K create clients -r "$REALM" -s clientId="$O2P_CLIENT_ID" -s secret="$O2P_CLIENT_SECRET" \
-     -s publicClient=false -s standardFlowEnabled=true -s directAccessGrantsEnabled=false \
-     -s "redirectUris=[\"${PUBLIC_SCHEME:-https}://$PUBLIC_HOST/oauth2/callback\"]"
 fi
 
 # Dynamic Client Registration for Claude (claude.ai/claude.com and Claude Code on localhost).

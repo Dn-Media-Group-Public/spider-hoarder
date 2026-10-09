@@ -52,14 +52,15 @@ services:
 
   # Human SSO for the live view (MCP bearer tokens are verified by the gateways)
   oauth2-proxy:
-    image: quay.io/oauth2-proxy/oauth2-proxy:v7.15.5
+    image: oauth2-proxy-dcr:local   # built by deploy.sh; registers itself via DCR (oauth2-proxy/entrypoint.sh)
     deploy: { replicas: 1, restart_policy: { condition: any } }
     environment:
       OAUTH2_PROXY_PROVIDER: keycloak-oidc
       OAUTH2_PROXY_OIDC_ISSUER_URL: ${OIDC_ISSUER}
       OAUTH2_PROXY_SCOPE: openid email profile
-      OAUTH2_PROXY_CLIENT_ID: ${O2P_CLIENT_ID}
-      OAUTH2_PROXY_CLIENT_SECRET: ${O2P_CLIENT_SECRET}
+      OIDC_ISSUER: ${OIDC_ISSUER}
+      PUBLIC_HOST: ${PUBLIC_HOST}
+      PUBLIC_SCHEME: ${PUBLIC_SCHEME:-https}
       OAUTH2_PROXY_COOKIE_SECRET: ${O2P_COOKIE_SECRET}
       OAUTH2_PROXY_COOKIE_SECURE: ${O2P_COOKIE_SECURE:-true}   # deploy.sh: false when PUBLIC_SCHEME=http
       OAUTH2_PROXY_REDIRECT_URL: ${PUBLIC_SCHEME:-https}://${PUBLIC_HOST}/oauth2/callback
@@ -70,6 +71,8 @@ services:
       OAUTH2_PROXY_SET_XAUTHREQUEST: "true"
       OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
       OAUTH2_PROXY_CODE_CHALLENGE_METHOD: S256
+    volumes:
+      - o2p_state:/state
     networks: [public, auth]   # public: the IdP; auth: nginx
 
   research-tor:
@@ -111,3 +114,4 @@ networks:
 volumes:
   tor_data: {}
   research_data: {}
+  o2p_state: {}   # oauth2-proxy's DCR registration

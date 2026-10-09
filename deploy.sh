@@ -22,7 +22,7 @@ source "${ENV_FILE:-.env}"
 set +a
 
 FILES=(-c docker-compose.yml)
-REQUIRED=(PUBLIC_HOST OIDC_ISSUER O2P_CLIENT_ID O2P_CLIENT_SECRET O2P_COOKIE_SECRET BLOB_TOKEN_SECRET GATEWAY_PORT HTTP_PORT)
+REQUIRED=(PUBLIC_HOST OIDC_ISSUER O2P_COOKIE_SECRET BLOB_TOKEN_SECRET GATEWAY_PORT HTTP_PORT)
 if [ "$DEV" -eq 1 ]; then
   echo "Deploying in DEV mode (local Keycloak, http://localhost, no TLS)"
   export PUBLIC_HOST=localhost:$HTTP_PORT PUBLIC_SCHEME=http
@@ -43,6 +43,7 @@ done
 # Build local images (build: is ignored in stack deploy)
 docker build -t mcp-research:local mcp-research
 docker build -t spider-hoarder-tor:local tor
+docker build -t oauth2-proxy-dcr:local oauth2-proxy
 
 # Initialize swarm if not already active
 docker info --format '{{.Swarm.LocalNodeState}}' | grep -q active || docker swarm init

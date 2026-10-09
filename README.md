@@ -64,11 +64,13 @@ dev hostnames would not work without TLS.)
 
 ## Keycloak
 
+The live-view login (oauth2-proxy) registers its own client through DCR on start and keeps it in the
+`o2p_state` volume (see [Plan: oauth2-proxy DCR](docs/implemented-plans/oauth2-proxy-dcr.md)).
+
 `keycloak/setup.sh` initializes a realm (`KC_REALM`, default `newsroom`), idempotently:
 
 - if `MCP_SCOPE` is set, a **realm-default client scope** of that name, so every client, including the ones Claude registers
   dynamically, gets it ( the gateway requires it in the token's `scope` claim and advertises it so Claude requests it; `aud` is not checked);
-- the confidential client `O2P_CLIENT_ID` for the live-view login (oauth2-proxy);
 - **Dynamic Client Registration (DCR)** for Claude: anonymous registration is allowed, and the
   realm's *Trusted Hosts* policy only accepts redirect URIs on `claude.ai`, `claude.com` and
   `localhost` (Claude Code). Anything else (e.g. `https://evil.example/cb`) gets a 403;
@@ -83,7 +85,7 @@ anywhere that can reach the admin API, using the script from the Keycloak image:
 set -a; source .env; set +a
 docker run --rm -v $PWD/keycloak:/s -e KC_URL=https://keycloak.example.org \
   -e KC_ADMIN=admin -e KC_ADMIN_PASSWORD=... -e KC_REALM -e KC_USER -e KC_USER_PASSWORD \
-  -e PUBLIC_HOST -e PUBLIC_SCHEME -e MCP_SCOPE -e O2P_CLIENT_ID -e O2P_CLIENT_SECRET \
+  -e PUBLIC_HOST -e PUBLIC_SCHEME -e MCP_SCOPE \
   --entrypoint bash quay.io/keycloak/keycloak:26.0 /s/setup.sh
 ```
 
