@@ -1,5 +1,5 @@
 """mcp-research gateway: per-user isolated headed browser sessions (proxied
-@playwright/mcp) plus fetch/parse/blob tools. See
+toolserver) plus fetch/parse/blob tools. See
 docs/implemented-plans/browser-sessions-plan.md.
 
 Everything is served under /<egress>/ (Caddy routes by that prefix), except
@@ -49,7 +49,7 @@ MAX_FILE_BYTES = int(os.environ.get("MAX_FILE_BYTES", 50 * 1024 * 1024))
 FILE_TOOLS = {
     "browser_take_screenshot": "screenshot.png", "browser_pdf_save": "page.pdf",
     "browser_snapshot": None, "browser_evaluate": None, "browser_console_messages": None,
-    "browser_network_request": None, "browser_network_requests": None, "browser_run_code_unsafe": None,
+    "browser_network_request": None, "browser_network_requests": None, "browser_storage_state": "storage-state.json",
 }
 FILE_TOOLS_NOTE = ("\n\nWhen this writes a file, the result is {job_id, files, text?}; fetch with get_file_text / "
                    "get_file_url. `filename` only names the file inside the job.")
@@ -81,23 +81,28 @@ mcp = FastMCP(
 server = mcp._mcp_server  # static FastMCP tool handlers are replaced by a proxy below
 
 
-def _schema(**props: str) -> dict:
-    return {"type": "object", "properties": {k: {"type": "string", "description": v} for k, v in props.items()},
+def _schema(optional: dict | None = None, **props: str) -> dict:
+    return {"type": "object", "properties": {k: {"type": "string", "description": v} for k, v in {**props, **(optional or {})}.items()},
             "required": list(props)}
 
 
+BROWSER_ARG = {"browser": "Browser id from browser_start_session; omit for the shared 'main' browser"}
+
+
 EXTRA_TOOLS = [
-    types.Tool(name="browser_request_human_help", inputSchema=_schema(reason="What the user needs to do, e.g. 'solve the CAPTCHA'"),
+    types.Tool(name="browser_request_human_help", inputSchema=_schema(BROWSER_ARG, reason="What the user needs to do, e.g. 'solve the CAPTCHA'"),
                description="Get a link that lets the user see and control THIS conversation's browser in a new tab. "
                "Use it for a CAPTCHA, bot challenge, login, 2FA or anything else a human should do. Give the link to "
                "the user, explain what to do, then STOP until they confirm they are done."),
-    types.Tool(name="browser_save_page", inputSchema=_schema(),
+    types.Tool(name="browser_save_page", inputSchema=_schema(BROWSER_ARG),
                description="Parse the page currently open in the browser to Markdown and store it. "
                "Returns {job_id, files, text?}. Use after getting past consent walls/CAPTCHAs. "
                "Prefer this over browser_snapshot for extracting page content; use browser_snapshot only for "
                "navigation and interaction (finding refs to click or type into)."),
-    types.Tool(name="browser_end_session", inputSchema=_schema(),
-               description="Close this conversation's browser and discard its state (cookies, tabs, downloads)."),
+    types.Tool(name="browser_end_session", inputSchema=_schema(BROWSER_ARG),
+               description="With `browser`: close just that browser (window and tabs). Without: close all browsers and end "
+               "this conversation's session, discarding its state (cookies, tabs, downloads). Subagents: pass the id "
+               "from browser_start_session when done. Closing the last browser ends the session."),
     types.Tool(name="ingest_page", inputSchema=_schema(url="URL to fetch"),
                description="One-shot: fetch a URL (HTML via a throwaway browser, anything else directly) and parse it "
                "to Markdown. Returns {job_id, files, text?}. If the text looks like a consent/CAPTCHA wall, use the "
@@ -119,7 +124,7 @@ EXTRA_TOOLS = [
     types.Tool(name="get_file_url", inputSchema=_schema(job_id="Job id", path="File path from the manifest"),
                description="Mint a short-lived opaque signed URL for one blob (original or parsed)."),
 ]
-HIDDEN = {"browser_install"}
+HIDDEN = {"browser_install", "browser_bring_to_front"}
 
 
 def _caller() -> tuple[Any, str]:
@@ -260,9 +265,9 @@ async def _ingest_page(owner: str, url: str, live: sessions.BrowserSession | Non
     return {"job_id": job_id, **_store_and_parse(_key(owner, job_id), filename, raw, ctype)}
 
 
-async def _save_page(bs: sessions.BrowserSession) -> dict:
+async def _save_page(bs: sessions.BrowserSession, browser: str | None = None) -> dict:
     job_id = str(uuid.uuid4())
-    raw = (await sessions.page_html(bs)).encode()
+    raw = (await sessions.page_html(bs, browser)).encode()
     return {"job_id": job_id, **_store_and_parse(_key(bs.owner, job_id), "page.html", raw, "text/html")}
 
 
@@ -272,7 +277,8 @@ def _text(msg: str, error: bool = False) -> types.CallToolResult:
 
 @server.list_tools()
 async def list_tools() -> list[types.Tool]:
-    tools = [t for t in await sessions.upstream_tools() if t.name not in HIDDEN]
+    own = {t.name for t in EXTRA_TOOLS}  # the gateway's versions replace the upstream ones of the same name
+    tools = [t for t in await sessions.upstream_tools() if t.name not in HIDDEN | own]
     tools = [t.model_copy(update={"description": (t.description or "") + FILE_TOOLS_NOTE}) if t.name in FILE_TOOLS else t
              for t in tools]
     return tools + EXTRA_TOOLS
@@ -287,8 +293,12 @@ async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
     try:
         if name == "browser_end_session":
             bs = await sessions.get_session(mcp_session, owner, create=False)
+            if bs and args.get("browser"):
+                res = await bs.client.call_tool("browser_end_session", {"browser": args["browser"]})
+                if res.isError or sessions.parse_result(sessions.result_text(res))["remaining"] > 0:
+                    return res
             if bs:
-                await sessions.close(bs)
+                await sessions.close(bs)  # no id, or the last browser was closed
             return _text("Browser session closed.")
         if name == "ingest_page":
             return _text(json.dumps(await _ingest_page(
@@ -320,13 +330,17 @@ async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
         bs.last_used = time.time()
         if name == "browser_request_human_help":
             reason = args.get("reason", "help with the page")
+            if args.get("browser"):  # raise that browser's window in the live view
+                res = await bs.client.call_tool("browser_bring_to_front", {"browser": args["browser"]})
+                if res.isError:
+                    return res
             return _text(
                 f"Live view of this conversation's browser: {BASE}/view/{bs.id}/start\n"
                 f"Ask the user to open it (they sign in with their newsroom account) and to: {reason}. "
                 "Only the user who owns this conversation can open it. "
                 "Do not take further browser actions until the user confirms they are done.")
         if name == "browser_save_page":
-            return _text(json.dumps(await _save_page(bs)))
+            return _text(json.dumps(await _save_page(bs, args.get("browser"))))
         if name in FILE_TOOLS and (res := await _file_tool(bs, name, args)):
             return res
         return await bs.client.call_tool(name, arguments)

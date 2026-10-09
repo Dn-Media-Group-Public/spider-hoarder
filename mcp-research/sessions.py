@@ -1,6 +1,6 @@
 """Browser sessions: one uid + one process group (Xvfb, x11vnc, websockify,
-@playwright/mcp) each, started by sessiond. The gateway proxies MCP tool calls
-to the session's playwright-mcp. All paths that end a session (idle reaper,
+toolserver) each, started by sessiond. The gateway proxies MCP tool calls
+to the session's toolserver. All paths that end a session (idle reaper,
 browser_end_session, MCP session close, crash) go through close()."""
 
 import asyncio
@@ -26,7 +26,7 @@ log = logging.getLogger("sessions")
 EGRESS = os.environ.get("EGRESS", "clear")  # "tor" | "clear"
 IDLE_TIMEOUT = int(os.environ.get("IDLE_TIMEOUT", "1800"))
 MAX_PER_USER = int(os.environ.get("MAX_SESSIONS_PER_USER", "3"))
-UPSTREAM_HOST = "mcp-upstream"  # must match allowedHosts in session-group.sh
+UPSTREAM_HOST = "mcp-upstream"  # must match the allow-list in toolserver/server.py
 
 pool = Pool(Sessiond(os.environ.get("SESSIOND_SOCKET", "/run/sessiond.sock")))
 _HOST_RULES = cmp_rules.host_rules()
@@ -148,7 +148,7 @@ async def get_session(mcp_session: Any, owner: str, create: bool = True) -> Brow
 
 
 async def upstream_tools() -> list[types.Tool]:
-    """Tool list of @playwright/mcp, fetched once from a throwaway session."""
+    """Tool list of the toolserver, fetched once from a throwaway session."""
     global _tools_cache
     async with _tools_lock:
         if _tools_cache is None:
@@ -164,11 +164,14 @@ def result_text(res: types.CallToolResult) -> str:
     return "".join(c.text for c in res.content if isinstance(c, types.TextContent))
 
 
-def parse_eval_result(text: str) -> str:
-    """Unwrap browser_evaluate's reply: '### Result\\n<json>\\n### Ran Playwright code...'"""
+def parse_result(text: str):
+    """Unwrap a toolserver reply: '### Result\\n<json>' (up to the next section)."""
     body = text.split("### Result", 1)[-1].lstrip("\n")
-    body = body.split("\n### ", 1)[0].strip()
-    value = json.loads(body)
+    return json.loads(body.split("\n### ", 1)[0].strip())
+
+
+def parse_eval_result(text: str) -> str:
+    value = parse_result(text)
     if not isinstance(value, str):
         raise ValueError("browser_evaluate did not return a string")
     return value
@@ -194,8 +197,8 @@ SETTLE_JS = """async () => {
 }"""
 
 
-async def page_html(bs: BrowserSession) -> str:
-    res = await bs.client.call_tool("browser_evaluate", {"function": SETTLE_JS})
+async def page_html(bs: BrowserSession, browser: str | None = None) -> str:
+    res = await bs.client.call_tool("browser_evaluate", {"function": SETTLE_JS, **_on(browser)})
     if res.isError:
         raise RuntimeError(result_text(res))
     return parse_eval_result(result_text(res))
@@ -203,22 +206,24 @@ async def page_html(bs: BrowserSession) -> str:
 
 async def cookies_for(bs: BrowserSession, url: str) -> dict:
     """The session's browser cookies applicable to url, as a name->value dict for `requests`."""
-    code = "async (page) => JSON.stringify(await page.context().cookies(%s))" % json.dumps(url)
-    res = await bs.client.call_tool("browser_run_code_unsafe", {"code": code})
+    res = await bs.client.call_tool("browser_cookie_list", {"url": url})
     if res.isError:
         raise RuntimeError(result_text(res))
-    return {c["name"]: c["value"] for c in json.loads(parse_eval_result(result_text(res)))}
+    return {c["name"]: c["value"] for c in parse_result(result_text(res))}
 
 
 async def fetch_html(owner: str, url: str, live: BrowserSession | None = None) -> str:
     """One-shot: navigate, read HTML. Without `live`: ephemeral session (own uid), destroyed after.
-    With `live`: a temporary tab in that session, so its cookies apply."""
+    With `live`: a temporary browser (window) in that session, so its cookies apply but nobody's page is clobbered."""
     if live:
-        await live.client.call_tool("browser_tabs", {"action": "new"})
+        res = await live.client.call_tool("browser_start_session", {})
+        if res.isError:
+            raise RuntimeError(result_text(res))
+        browser = parse_result(result_text(res))
         try:
-            return await _navigate_read(live, url)
+            return await _navigate_read(live, url, browser)
         finally:
-            await live.client.call_tool("browser_tabs", {"action": "close"})
+            await live.client.call_tool("browser_end_session", {"browser": browser})
     bs = await new_session(owner)
     try:
         return await _navigate_read(bs, url)
@@ -226,12 +231,16 @@ async def fetch_html(owner: str, url: str, live: BrowserSession | None = None) -
         await close(bs)
 
 
-async def _navigate_read(bs: BrowserSession, url: str) -> str:
+def _on(browser: str | None) -> dict:
+    return {"browser": browser} if browser else {}
+
+
+async def _navigate_read(bs: BrowserSession, url: str, browser: str | None = None) -> str:
     for tool, args in (("browser_navigate", {"url": url}), ("browser_wait_for", {"time": 2})):
-        res = await bs.client.call_tool(tool, args)
+        res = await bs.client.call_tool(tool, {**args, **_on(browser)})
         if res.isError:
             raise RuntimeError(result_text(res))
-    return await page_html(bs)
+    return await page_html(bs, browser)
 
 
 async def reaper() -> None:

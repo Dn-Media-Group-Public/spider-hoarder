@@ -1,5 +1,5 @@
 // Best-effort auto-click of cookie-consent accept buttons. Runs in every page
-// (playwright-mcp initScript); silent no-op without a banner, never throws.
+// (toolserver init script); silent no-op without a banner, never throws.
 (() => {
   const KW = ["accept all", "accept cookies", "accept", "agree", "i agree", "got it", "allow all",
     "godta alle", "godta", "aksepter alle", "aksepter", "jeg godtar"];

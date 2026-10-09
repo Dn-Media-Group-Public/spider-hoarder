@@ -1,6 +1,5 @@
-FROM node:22-bookworm-slim
+FROM debian:bookworm-slim
 
-ARG PLAYWRIGHT_MCP_VERSION=0.0.83
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
     PATH=/venv/bin:$PATH
 
@@ -10,16 +9,14 @@ RUN apt-get update \
       xvfb x11vnc novnc websockify fonts-noto fonts-noto-cjk fonts-noto-color-emoji \
  && rm -rf /var/lib/apt/lists/*
 
-# @playwright/mcp (pinned; flags/config keys change between releases) + the Chromium it expects
-RUN npm install -g @playwright/mcp@${PLAYWRIGHT_MCP_VERSION} \
- && cd "$(npm root -g)/@playwright/mcp" \
- && npx --no-install playwright install --with-deps chromium \
- && chmod -R a+rX /ms-playwright \
- && rm -rf /var/lib/apt/lists/* /root/.npm
-
 WORKDIR /app
 COPY requirements.txt .
 RUN python3 -m venv /venv && pip install --no-cache-dir -r requirements.txt
+
+# Chromium for the toolserver (playwright pinned in requirements.txt)
+RUN playwright install --with-deps chromium \
+ && chmod -R a+rX /ms-playwright \
+ && rm -rf /var/lib/apt/lists/*
 
 # Cookie-consent network blocklist, fetched once at build time (no runtime
 # network dependency): Fanboy's Cookiemonster list.

@@ -55,8 +55,9 @@ def test_ssrf():
 
 
 def test_parse_eval_result():
-    text = '### Result\n"<html>\\n<body>x</body></html>"\n### Ran Playwright code\n```js\nawait page.evaluate()\n```'
+    text = '### Result\n"<html>\\n<body>x</body></html>"\n### Page\n- Page URL: about:blank\n'
     assert sessions.parse_eval_result(text) == "<html>\n<body>x</body></html>"
+    assert sessions.parse_result('### Result\n[{"name": "a"}]') == [{"name": "a"}]
 
 
 def test_host_rules(tmp_path="/tmp/cmp_test.txt"):
@@ -190,6 +191,46 @@ def test_store_terse():
     app.INLINE_LIMIT = 3  # both large
     assert "text" not in app._store_and_parse(key, "big2.md", b"# Heading\n[l](u)\n" + b"prose " * 10, "text/markdown")
     app.INLINE_LIMIT = 50_000
+
+
+def test_multi_browser_routing():
+    import app
+    from mcp import types as mt
+    sessions._tools_cache = [mt.Tool(name=n, inputSchema={"type": "object"}) for n in
+                             ("browser_navigate", "browser_end_session", "browser_bring_to_front", "browser_start_session")]
+    names = [t.name for t in asyncio.run(app.list_tools())]
+    assert names.count("browser_end_session") == 1 and "browser_bring_to_front" not in names
+    assert "browser_start_session" in names
+
+    calls, remaining, closed = [], [1], []
+
+    class Client:
+        async def call_tool(self, name, args):
+            calls.append((name, args))
+            text = '### Result\n{"remaining": %d}' % remaining[0] if name == "browser_end_session" else "### Result\n\"ok\""
+            return mt.CallToolResult(content=[mt.TextContent(type="text", text=text)])
+
+    bs = types.SimpleNamespace(client=Client(), owner="a@b.c", id="v", uid=1, last_used=0)
+
+    async def get_session(*a, **k):
+        return bs
+
+    async def close(b):
+        closed.append(b)
+
+    app._caller = lambda: (None, "a@b.c")
+    sessions.get_session, sessions.close = get_session, close
+    run = lambda n, **a: asyncio.run(app.call_tool(n, a))
+    run("browser_end_session", browser="x")
+    assert calls[-1] == ("browser_end_session", {"browser": "x"}) and not closed  # others remain
+    remaining[0] = 0
+    run("browser_end_session", browser="x")
+    assert closed == [bs]  # last browser closed -> session ends
+    run("browser_end_session")
+    assert len(closed) == 2 and calls[-1][1] == {"browser": "x"}  # no id: no upstream call
+    run("browser_request_human_help", browser="x", reason="r")
+    assert calls[-1] == ("browser_bring_to_front", {"browser": "x"})
+    assert app.FILE_TOOLS["browser_storage_state"] and "browser_run_code_unsafe" not in app.FILE_TOOLS
 
 
 if __name__ == "__main__":

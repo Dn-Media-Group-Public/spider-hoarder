@@ -22,6 +22,18 @@ async def main():
         for u in ("https://cdn.cookielaw.org/", "https://example.org/"):
             r = await bs.client.call_tool("browser_navigate", {"url": u})
             print(u, "->", sessions.result_text(r)[:160].replace("\n", " | "))
+        # two browsers in parallel, one login (cookie) shared, ids isolated, last one closed ends the session
+        a = sessions.parse_result(sessions.result_text(await bs.client.call_tool("browser_start_session", {})))
+        await bs.client.call_tool("browser_navigate", {"url": "https://example.org/", "browser": a})
+        await bs.client.call_tool("browser_navigate", {"url": "https://example.com/"})
+        for b in ({"browser": a}, {}):
+            r = await bs.client.call_tool("browser_tabs", {"action": "list", **b})
+            print("tabs", b, "->", sessions.result_text(r).replace("\n", " | "))
+        await bs.client.call_tool("browser_cookie_set", {"name": "smoke", "value": "1", "domain": "example.org", "path": "/"})
+        print("cookie via other browser:", await sessions.cookies_for(bs, "https://example.org/"))
+        r = await bs.client.call_tool("browser_tabs", {"action": "list", "browser": "bogus"})
+        print("bogus id ->", sessions.result_text(r).replace("\n", " | "))
+        print("end a:", sessions.result_text(await bs.client.call_tool("browser_end_session", {"browser": a})))
         print("free/busy:", len(sessions.pool.free), len(sessions.pool.busy))
     finally:
         await sessions.close(bs)

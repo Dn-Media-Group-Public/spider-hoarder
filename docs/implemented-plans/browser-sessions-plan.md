@@ -17,8 +17,9 @@ no second Playwright integration.
 - One container per egress (`research-tor`, `research-clear`), shared by users.
   **Not** one container per session. No Docker socket, no container creation.
 - Browser sessions are separate processes inside that container, each with
-  its own Xvfb display, x11vnc, noVNC and `@playwright/mcp` (all 27+ tools,
-  not reimplemented).
+  its own Xvfb display, x11vnc, noVNC and a Python MCP tool server (`toolserver/`, one Chromium, many
+  browser windows; it replaced the original `@playwright/mcp`, which was not reimplemented at the time).
+  See also: [Plan: Python browser tool server](python-browser-tool-server.md).
 - **Each session runs under its own Unix uid, with at most one live session
   per uid, ever.** A uid's homedir and everything else it owns is deleted
   before the uid can be handed out again.
@@ -44,7 +45,7 @@ research-<egress> container:
    ├ extract/storage/blobs/uploads   └ listens on /run/sessiond.sock (gw only)
    └ live-view authz (/authz,/start)
   per session (uid 20000+n, gid same, no supplementary groups):
-   Xvfb :n ─ x11vnc (pw) ─ websockify :6080+n ─ playwright-mcp :9000+n ─ Chromium
+   Xvfb :n ─ x11vnc (pw) ─ websockify :6080+n ─ toolserver :9000+n ─ Chromium
 ```
 
 The gateway process parses untrusted documents and fetches arbitrary URLs, so
@@ -148,8 +149,9 @@ network namespace.
 
 ## Tools and flows
 
-Tools the model sees: everything `@playwright/mcp` exposes (tool list cached
-from the first session, `browser_install` hidden) plus:
+Tools the model sees: everything the toolserver exposes (tool list cached
+from the first session, `browser_bring_to_front` hidden) plus (`browser_request_human_help`,
+`browser_save_page` and `browser_end_session` gained an optional `browser` id; See also: [Plan: Python browser tool server](python-browser-tool-server.md)):
 
 | Tool | Behaviour |
 |---|---|
@@ -197,8 +199,8 @@ page/route, which goes away.
 
 ## Deployment
 
-One image (`Dockerfile`): Debian bookworm + Python + Node, `@playwright/mcp`
-(pinned) with its Chromium, `xvfb x11vnc novnc websockify`, fonts, `iptables`,
+One image (`Dockerfile`): Debian bookworm + Python, `playwright`
+(pinned) with its Chromium (was Node + `@playwright/mcp`; See also: [Plan: Python browser tool server](python-browser-tool-server.md)), `xvfb x11vnc novnc websockify`, fonts, `iptables`,
 the gateway and `sessiond`. Compose: `caddy`, `oauth2-proxy`, `research-tor`,
 `research-clear`, `tor`; networks as in the old plan, minus `control` and
 docker-proxy. Container needs caps `SETUID SETGID CHOWN KILL DAC_OVERRIDE`
@@ -212,7 +214,7 @@ be verified; if it is a problem, this service moves to plain compose.
 ## Phases
 
 1. **Supervisor first (riskiest).** `sessiond` + gateway registry, session
-   group launch (Xvfb/x11vnc/websockify/playwright-mcp), `stop` with the full
+   group launch (Xvfb/x11vnc/websockify/toolserver), `stop` with the full
    wipe/verify. No auth yet. Tests below.
 2. **MCP layer.** Port to the `mcp` SDK, proxy tools, `browser_save_page`,
    `ingest_page` via ephemeral session, delete the old browser code, owner-scoped

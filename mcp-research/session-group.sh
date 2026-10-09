@@ -23,17 +23,13 @@ ARGS='"--window-position=0,0","--window-size=1440,900","--disable-dev-shm-usage"
 [ -n "${PROXY_SERVER:-}" ] && ARGS="$ARGS,\"--proxy-server=$PROXY_SERVER\""
 [ -s "$HOME/hostrules" ] && ARGS="$ARGS,\"--host-rules=$(cat "$HOME/hostrules")\""
 
-cat > "$HOME/mcp.json" <<JSON
+cat > "$HOME/toolserver.json" <<JSON
 {
-  "browser": {
-    "browserName": "chromium",
-    "userDataDir": "$HOME/profile",
-    "launchOptions": {"headless": false, "chromiumSandbox": false, "args": [$ARGS]},
-    "contextOptions": {"viewport": null},
-    "initScript": ["/app/consent.js"]
-  },
-  "server": {"host": "127.0.0.1", "port": $MCP_PORT, "allowedHosts": ["mcp-upstream"]},
-  "outputDir": "$HOME/out"
+  "userDataDir": "$HOME/profile",
+  "args": [$ARGS],
+  "initScript": "/app/consent.js",
+  "outDir": "$HOME/out",
+  "port": $MCP_PORT
 }
 JSON
-exec playwright-mcp --config "$HOME/mcp.json" --caps pdf
+cd /app && exec /venv/bin/python -m toolserver "$HOME/toolserver.json"

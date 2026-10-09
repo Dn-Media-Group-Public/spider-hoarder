@@ -1,0 +1,148 @@
+"""Per-tool checks against a real headless Chromium (needs playwright + its Chromium; the
+container smoke test covers headed mode). Run: pytest test_toolserver.py"""
+
+import asyncio
+import json
+import os
+import tempfile
+
+import pytest
+
+from toolserver import tools
+from toolserver.browsers import launch
+from toolserver.server import GOLDEN, TOOLS
+
+PAGE = ("data:text/html,<title>T</title><input id=i><button onclick=\"document.title='clicked'\">Go</button>"
+        "<a href='data:text/html,two'>link</a>")
+
+
+def run(coro):
+    return asyncio.run(coro)
+
+
+@pytest.fixture
+def env(tmp_path):
+    tools.OUT = str(tmp_path)
+
+    async def mk():
+        return await launch({"userDataDir": str(tmp_path / "p"), "args": ["--no-sandbox"], "headless": True})
+    pw, R = run_loop.run_until_complete(mk())
+    yield R
+    run_loop.run_until_complete(R.ctx.close())
+    run_loop.run_until_complete(pw.stop())
+
+
+run_loop = asyncio.new_event_loop()
+
+
+def call(R, name, /, bid=None, **a):
+    async def go():
+        b = None if name in ("browser_start_session", "browser_end_session") else await R.resolve(bid)
+        return await tools.HANDLERS[name](R, b, a)
+    return run_loop.run_until_complete(go())
+
+
+def val(text):
+    return json.loads(text.split("### Result\n", 1)[1].split("\n### ", 1)[0])
+
+
+def test_schemas_match_golden():
+    golden = {t["name"]: t for t in json.load(open(GOLDEN))}
+    ours = {t.name: t for t in TOOLS}
+    assert set(golden) - set(ours) == {"browser_run_code_unsafe"}
+    for n, g in golden.items():
+        if n in ours:
+            props = dict(ours[n].inputSchema["properties"])
+            assert props.pop("browser")
+            assert props == g["inputSchema"].get("properties", {}), n
+    assert {"browser_start_session", "browser_cookie_list", "browser_localstorage_set", "browser_set_storage_state"} <= set(ours)
+    assert len([n for n in ours if "cookie" in n or "storage" in n]) == 17
+    assert set(ours) <= set(tools.HANDLERS)
+
+
+def test_interaction_and_refs(env):
+    R = env
+    out = call(R, "browser_navigate", url=PAGE)
+    assert "### Page" in out and "[Snapshot](out/page-" in out and "Ran Playwright" not in out
+    snap = call(R, "browser_snapshot")
+    assert '```yaml' in snap and 'button "Go"' in snap
+    ref = [l for l in snap.splitlines() if 'button "Go"' in l][0].split("[ref=")[1].split("]")[0]
+    assert "Page Title: clicked" in call(R, "browser_click", target=ref)
+    iref = [l for l in snap.splitlines() if "textbox" in l][0].split("[ref=")[1].split("]")[0]
+    call(R, "browser_type", target=iref, text="hello")
+    assert val(call(R, "browser_evaluate", function="() => document.getElementById('i').value")) == "hello"
+    with pytest.raises(tools.ToolError, match="not found in the current page snapshot"):
+        call(R, "browser_click", target="e999")
+    assert "link" in call(R, "browser_find", text="LINK")
+    assert val(call(R, "browser_evaluate", function="() => 'a'")) == "a"
+
+
+def test_file_outputs(env, tmp_path):
+    R = env
+    call(R, "browser_navigate", url=PAGE)
+    assert "[Screenshot](out/s.png)" in call(R, "browser_take_screenshot", filename="../../s.png")
+    assert (tmp_path / "s.png").read_bytes()[:4] == b"\x89PNG"
+    call(R, "browser_pdf_save", filename="p.pdf")
+    assert (tmp_path / "p.pdf").read_bytes()[:4] == b"%PDF"
+    call(R, "browser_evaluate", function="() => 1+1", filename="e.json")
+    assert (tmp_path / "e.json").read_text() == "2"
+    call(R, "browser_snapshot", filename="s.yml")
+    assert "button" in (tmp_path / "s.yml").read_text()
+    call(R, "browser_storage_state")
+    assert "cookies" in (tmp_path / "storage-state.json").read_text()
+
+
+def test_two_browsers_are_isolated_and_share_logins(env):
+    R = env
+    other = val(call(R, "browser_start_session"))
+    call(R, "browser_navigate", url="data:text/html,<title>main</title>")
+    call(R, "browser_navigate", bid=other, url="data:text/html,<title>other</title>")
+    assert "main" in call(R, "browser_tabs", action="list") and "other" not in call(R, "browser_tabs", action="list")
+    assert "other" in call(R, "browser_tabs", bid=other, action="list")
+    with pytest.raises(tools.ToolError, match="^unknown browser id$"):
+        call(R, "browser_tabs", bid="nope", action="list")
+    # one context: a cookie set via one browser is visible to the other
+    call(R, "browser_cookie_set", name="sid", value="1", domain="example.org", path="/")
+    assert val(call(R, "browser_cookie_get", bid=other, name="sid"))["value"] == "1"
+    assert val(call(R, "browser_cookie_list", url="https://example.org/"))[0]["name"] == "sid"
+    assert val(call(R, "browser_end_session", browser=other)) == {"remaining": 1}
+    with pytest.raises(tools.ToolError):
+        call(R, "browser_tabs", bid=other, action="list")
+    assert val(call(R, "browser_end_session")) == {"remaining": 0}
+    call(R, "browser_navigate", url="data:text/html,<title>again</title>")  # main comes back on demand
+
+
+def test_tabs_and_popups(env):
+    R = env
+    other = val(call(R, "browser_start_session"))
+    call(R, "browser_navigate", bid=other, url="data:text/html,<a target=_blank href='data:text/html,pop'>x</a>")
+    call(R, "browser_tabs", bid=other, action="new", url="data:text/html,<title>t2</title>")
+    assert call(R, "browser_tabs", bid=other, action="list").count("- ") == 2
+    assert call(R, "browser_tabs", action="list").count("- ") == 1  # main did not gain the tab
+    run_loop.run_until_complete(R.cur[other].evaluate("window.open('about:blank')"))
+    run_loop.run_until_complete(R.settle())
+    assert call(R, "browser_tabs", bid=other, action="list").count("- ") == 3  # popup joined its opener's browser
+    call(R, "browser_tabs", bid=other, action="close", index=0)
+    assert call(R, "browser_tabs", bid=other, action="list").count("- ") == 2
+    call(R, "browser_close")  # last tab of main, but another browser exists -> main closes
+    assert "main" not in R.tabs
+
+
+def test_storage_and_console(env):
+    R = env
+    call(R, "browser_navigate", url="about:blank")
+    call(R, "browser_evaluate", function="() => console.error('boom')")
+    assert "boom" in call(R, "browser_console_messages", level="info", all=True)
+    run_loop.run_until_complete(R.ctx.route("https://s.test/**", lambda r: r.fulfill(body="<title>s</title>", content_type="text/html")))
+    call(R, "browser_navigate", url="https://s.test/")
+    call(R, "browser_localstorage_set", key="k", value="v")
+    assert val(call(R, "browser_localstorage_list")) == {"k": "v"}
+    call(R, "browser_sessionstorage_set", key="a", value="b")
+    assert val(call(R, "browser_sessionstorage_get", key="a")) == "b"
+    call(R, "browser_localstorage_clear")
+    assert val(call(R, "browser_localstorage_list")) == {}
+    assert "s.test" in call(R, "browser_network_requests", static=True)
+    assert "-- response-body --" in call(R, "browser_network_request", index=1)
+    state = {"cookies": [], "origins": [{"origin": "https://s.test", "localStorage": [{"name": "x", "value": "y"}]}]}
+    call(R, "browser_set_storage_state", state=state)
+    assert val(call(R, "browser_localstorage_get", key="x")) == "y"

@@ -1,8 +1,8 @@
 # Plan: Python browser tool server with multiple browsers per session
 
-Status: plan, written 2026-10-08, not implemented. Builds on
-[Browser sessions](../implemented-plans/browser-sessions-plan.md) and
-[Tool file outputs become jobs](../implemented-plans/file-outputs-as-jobs.md).
+Status: implemented 2026-10-08 (see "Implementation notes" at the end). Builds on
+[Browser sessions](browser-sessions-plan.md) and
+[Tool file outputs become jobs](file-outputs-as-jobs.md).
 
 ## Problem / Goal
 
@@ -205,3 +205,24 @@ These follow from the agreed decisions but were not discussed in detail:
 
 Per-browser locking or ownership enforcement; seeding separate Chromium processes; any fork of
 `playwright` or `playwright-mcp`; the tools listed under "Not implemented".
+
+## Implementation notes
+
+Deviations and details settled while implementing:
+
+- **Modules:** `toolserver/` has `browsers.py`, `tools.py` (all tool groups and `format` helpers in one file), `server.py`
+  (schemas and transport) and `__main__.py`. `snapshot.py`/`format.py`/`tools_*.py` were folded in: they were each a few lines.
+- **Schemas:** the 25 kept tools are served from `mcp-research/golden_tools.json` (captured from `@playwright/mcp` 0.0.83
+  with `--caps pdf`, 26 tools incl. `browser_run_code_unsafe`) plus a `browser` property; `test_toolserver.py` checks them against it.
+- **Snapshot delivery** (derived detail 1): as before, post-action responses link `- [Snapshot](out/page-<ts>.yml)`; an explicit
+  `browser_snapshot` inlines a yaml block unless given `filename`.
+- **`browser_set_storage_state`** (2): takes the state inline as `state` (object or JSON string).
+- **Closing `main`** (3): `browser_end_session(browser="main")` follows the last-browser rule. `browser_close` on the last tab of the
+  last browser navigates it to `about:blank` instead of closing it (headed Chromium exits with its last window and would kill the
+  server); end the session with `browser_end_session`.
+- **Windows** (4): new windows are set to 1440x900 at (0,0) via `Browser.setWindowBounds`; `browser_resize` resizes the target
+  browser's window the same way. A new tab (`browser_tabs new`) is made after `bring_to_front` on the browser's current tab, so
+  Chromium places it in that window; popups are attributed through `page.opener()`.
+- **`browser_pdf_save`** uses CDP `Page.printToPDF` (Playwright's `page.pdf` is headless-only).
+- **Gateway:** `browser_end_session` upstream returns `{"remaining": n}`; the gateway ends the session when it reaches 0.
+  `parse_result` (any JSON) was split out of `parse_eval_result` (string only).

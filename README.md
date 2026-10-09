@@ -25,7 +25,10 @@ for LB health checks). Auth is an external OIDC provider (`OIDC_ISSUER`, Keycloa
 - `$PUBLIC_SCHEME://$PUBLIC_HOST/tor/mcp` — browsers egress via Tor only
 - `$PUBLIC_SCHEME://$PUBLIC_HOST/clear/mcp` — direct egress, public internet only
 
-Tools: everything `@playwright/mcp` exposes, plus `browser_request_human_help`,
+Tools: the browser tools of the Python tool server in `mcp-research/toolserver/` (a `@playwright/mcp`-compatible set plus cookie /
+localStorage / sessionStorage tools; one Chromium per session, several browser windows via `browser_start_session` and a `browser` id
+on every call, `main` being the shared default; see
+[the plan](docs/implemented-plans/python-browser-tool-server.md)), plus `browser_request_human_help`,
 `browser_save_page`, `browser_end_session`, `ingest_page`, `get_upload_link`,
 `list_files`, `get_file_text`, `get_file_url`.
 

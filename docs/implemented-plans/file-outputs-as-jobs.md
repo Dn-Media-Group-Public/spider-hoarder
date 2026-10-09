@@ -4,7 +4,7 @@
 
 Proxied Playwright tools (`browser_take_screenshot`, `browser_pdf_save`, and the
 `filename=` option on `browser_snapshot`, `browser_evaluate`,
-`browser_console_messages`, `browser_network_request(s)`, `browser_run_code_unsafe`)
+`browser_console_messages`, `browser_network_request(s)`, `browser_run_code_unsafe`; the latter was dropped and `browser_storage_state` added when `@playwright/mcp` was replaced, See also: [Plan: Python browser tool server](python-browser-tool-server.md))
 write files into the session's homedir on the upstream side. The agent cannot
 reach them, and the homedir is wiped on `stop()`. Only `ingest_page` and
 `browser_save_page` store anything under a `job_id`.
@@ -46,8 +46,9 @@ output dir and copies it into blob storage; it never moves or deletes (the
 2. **Gateway membership.** The gateway process is a member of `gw-collect`
    (container user setup in `Dockerfile` / `entrypoint.sh`). Sessions are not, and
    have no access to the central data store.
-3. **Playwright output dir.** `playwright-mcp` is started with its output dir set
-   to `$HOME/out` (`session-group.sh` / `mcp.json`).
+3. **Playwright output dir.** The tool server is started with its output dir set
+   to `$HOME/out` (`session-group.sh` / `toolserver.json`; originally `playwright-mcp`/`mcp.json`).
+   See also: [Plan: Python browser tool server](python-browser-tool-server.md).
 4. **Proxy rewrite (`call_tool`).** For a file-producing call, the gateway ignores
    any agent-supplied path: it takes `basename(filename)` (or a default such as
    `screenshot.png`, `page.pdf`) as the *job-internal name*, passes upstream a
