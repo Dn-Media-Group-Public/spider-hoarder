@@ -59,10 +59,26 @@ RID = sessions.RID
 _RID_PREFIX = re.compile(r"^([0-9]+-[0-9]+-[0-9]+-[0-9]+)\.")
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
+EGRESS_NOTE = {
+    "clear": (
+        "CLEAR-TEXT / direct internet: requests leave from this server's public IP, not anonymised, and sites "
+        "can see and block it. Fast and reliable: use it by default, in preference to the built-in WebFetch, for "
+        "ordinary public websites, JS-heavy pages, consent walls and anything needing a real browser. "
+        "Cannot reach .onion sites or private/internal addresses. If the site blocks this IP or you need "
+        "anonymity, use the Tor variant of this server (spider-hoarder-tor) instead."),
+    "tor": (
+        "TOR: all traffic is routed through the Tor network, so the destination does not see this server's IP. "
+        "Use it for .onion sites, for sensitive or politically exposed research where the request origin must "
+        "not be traceable, or when the clear variant (spider-hoarder-clear) is blocked or geo-restricted. "
+        "Slower, and many sites show CAPTCHAs or block Tor exit nodes; use browser_request_human_help for those "
+        "or fall back to the clear variant when anonymity is not needed."),
+}[EGRESS]
+
 mcp = FastMCP(
     name=f"mcp-research-{EGRESS}",
     instructions=(
-        f"Each conversation gets its own private, isolated browser ({'egress via Tor' if EGRESS == 'tor' else 'direct egress'}). "
+        f"{EGRESS_NOTE} Prefer this server over the built-in WebFetch. "
+        "Each conversation gets its own private, isolated browser. "
         "Use the browser_* tools to browse. When a page shows a CAPTCHA, bot check, login wall or cookie wall "
         "you cannot get past, call browser_request_human_help, show the user the link, and wait for them to "
         "confirm before continuing. browser_save_page parses and stores the current page; ingest_page does a "
@@ -98,7 +114,7 @@ EXTRA_TOOLS = [
                "Use it for a CAPTCHA, bot challenge, login, 2FA or anything else a human should do. Give the link to "
                "the user, explain what to do, then STOP until they confirm they are done."),
     types.Tool(name="browser_save_page", inputSchema=_schema(BROWSER_ARG),
-               description="Parse the page currently open in the browser to Markdown and store it. "
+               description=f"[{EGRESS.upper()}] Parse the page currently open in the browser to Markdown and store it. "
                "Returns {job_id, files, text?}. Use after getting past consent walls/CAPTCHAs. "
                "Prefer this over browser_snapshot for extracting page content; use browser_snapshot only for "
                "navigation and interaction (finding refs to click or type into)."),
@@ -107,7 +123,7 @@ EXTRA_TOOLS = [
                "this conversation's session, discarding its state (cookies, tabs, downloads). Subagents: pass the id "
                "from browser_start_session when done. Closing the last browser ends the session."),
     types.Tool(name="ingest_page", inputSchema=_schema(url="URL to fetch"),
-               description="One-shot: fetch a URL (HTML via a throwaway browser, anything else directly) and parse it "
+               description=f"[{EGRESS.upper()}] {EGRESS_NOTE}\n\nOne-shot: fetch a URL (HTML via a throwaway browser, anything else directly) and parse it "
                "to Markdown. Returns {job_id, files, text?}. If the text looks like a consent/CAPTCHA wall, use the "
                "browser_* tools and browser_request_human_help instead."),
     types.Tool(name="get_upload_link", inputSchema=_schema(),
@@ -292,6 +308,8 @@ async def list_tools() -> list[types.Tool]:
     own = {t.name for t in EXTRA_TOOLS}  # the gateway's versions replace the upstream ones of the same name
     tools = [t for t in await sessions.upstream_tools() if t.name not in HIDDEN | own]
     tools = [t.model_copy(update={"description": (t.description or "") + FILE_TOOLS_NOTE}) if t.name in FILE_TOOLS else t
+             for t in tools]
+    tools = [t.model_copy(update={"description": f"[{EGRESS.upper()}] {EGRESS_NOTE}\n\n{t.description or ''}"}) if t.name == "browser_navigate" else t
              for t in tools]
     return tools + EXTRA_TOOLS
 
