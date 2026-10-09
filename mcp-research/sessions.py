@@ -26,6 +26,7 @@ log = logging.getLogger("sessions")
 
 EGRESS = os.environ.get("EGRESS", "clear")  # "tor" | "clear"
 IDLE_TIMEOUT = int(os.environ.get("IDLE_TIMEOUT", "1800"))
+DISCONNECT_TIMEOUT = float(os.environ.get("DISCONNECT_TIMEOUT_MINUTES", "5")) * 60  # no open request this long = client gone
 MAX_PER_USER = int(os.environ.get("MAX_SESSIONS_PER_USER", "3"))
 UPSTREAM_HOST = "mcp-upstream"  # must match the allow-list in toolserver/server.py
 
@@ -72,6 +73,7 @@ class Reservation:
 by_mcp: dict[int, BrowserSession] = {}   # id(ServerSession) -> session
 by_view: dict[str, BrowserSession] = {}  # view id -> session
 reserved: dict[str, Reservation] = {}    # MCP session id -> uid held for its first browser
+conn: dict[str, list] = {}               # MCP session id -> [requests in flight (open SSE stream counts), last activity]
 _lock = asyncio.Lock()
 _tools_cache: list[types.Tool] | None = None
 _tools_lock = asyncio.Lock()
@@ -152,6 +154,17 @@ def reserve(owner: str) -> int:
 
 def register(sid: str, owner: str, uid: int) -> None:
     reserved[sid] = Reservation(owner, uid)
+    conn[sid] = [0, time.time()]
+
+
+def conn_open(sid: str) -> None:
+    conn.setdefault(sid, [0, time.time()])[0] += 1
+
+
+def conn_close(sid: str) -> None:
+    if c := conn.get(sid):
+        c[0] -= 1
+        c[1] = time.time()
 
 
 async def unreserve(sid: str) -> None:
@@ -161,6 +174,7 @@ async def unreserve(sid: str) -> None:
 
 async def end_mcp_session(sid: str) -> None:
     """MCP session closed (DELETE): free its reservation and any browser."""
+    conn.pop(sid, None)
     await unreserve(sid)
     for bs in [b for b in by_mcp.values() if b.sid == sid]:
         await close(bs)
@@ -303,6 +317,10 @@ async def reaper() -> None:
             if now - bs.last_used > IDLE_TIMEOUT:
                 log.info("reaping idle session %s", bs.id[:8])
                 await close(bs)
+        for sid, (inflight, last) in list(conn.items()):
+            if inflight <= 0 and now - last > DISCONNECT_TIMEOUT:
+                log.info("reaping disconnected MCP session %s", sid[:8])
+                await end_mcp_session(sid)
         for sid, r in list(reserved.items()):
             if now - r.created > IDLE_TIMEOUT:
                 log.info("reaping unused reservation for %s", r.owner)

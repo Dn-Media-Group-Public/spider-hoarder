@@ -33,6 +33,7 @@ x-research: &research
     MAX_SESSIONS_TOTAL: ${MAX_SESSIONS_TOTAL:-18}
     MAX_SESSIONS_PER_USER: ${MAX_SESSIONS_PER_USER:-3}
     IDLE_TIMEOUT: ${IDLE_TIMEOUT:-1800}
+    DISCONNECT_TIMEOUT_MINUTES: ${DISCONNECT_TIMEOUT_MINUTES:-5}
     GATEWAY_PORT: ${GATEWAY_PORT}
     MAX_REPLICAS: ${MAX_REPLICAS:-4}
     REPLICA_SLOT: "{{.Task.Slot}}"   # expanded per task by stack deploy: this replica's slice of tor's SocksPorts

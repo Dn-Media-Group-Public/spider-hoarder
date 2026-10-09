@@ -18,6 +18,8 @@ import time
 import uuid
 from typing import Any
 
+import anyio
+
 from mcp import types
 from mcp.server.auth.provider import AccessToken
 from mcp.server.auth.settings import AuthSettings
@@ -535,13 +537,23 @@ class ReplicaSessions:
                     reserve_uid = None
             await send(msg)
 
+        if sid_hdr is not None:
+            sessions.conn_open(sid)
+        done = False
         try:
             await self.inner(scope, receive, send_)
+            done = True
         finally:
-            if reserve_uid is not None:  # not an initialize after all, or it failed
-                await sessions.pool.release(reserve_uid)
-            if sid_hdr is not None and scope["method"] == "DELETE":
-                await sessions.end_mcp_session(sid)
+            with anyio.CancelScope(shield=True):  # the client may have aborted: cleanup must still finish
+                if sid_hdr is not None:
+                    sessions.conn_close(sid)
+                if owner is not None and not done and new_sid:  # initialize died after its session was registered
+                    await sessions.unreserve(new_sid)
+                    sessions.conn.pop(new_sid, None)
+                if reserve_uid is not None:  # not an initialize after all, or it failed
+                    await sessions.pool.release(reserve_uid)
+                if sid_hdr is not None and scope["method"] == "DELETE":
+                    await sessions.end_mcp_session(sid)
 
 
 app = mcp.streamable_http_app()

@@ -147,3 +147,56 @@ def test_metadata_advertises_basic_and_enforced_scope():
     r = TestClient(app.app, base_url=f"https://{app.PUBLIC_HOST}").get("/.well-known/oauth-protected-resource" + app.MCP_PATH)
     assert {"basic", "email"} <= set(r.json()["scopes_supported"]) and set(app._ENFORCED_SCOPES) <= set(r.json()["scopes_supported"])
     assert _mcp_route().app.required_scopes == app._ENFORCED_SCOPES  # basic is advertised, not enforced
+
+
+def test_disconnected_session_is_reaped():
+    _setup(total=1, per_user=1)
+    sessions.conn.clear()
+    _call(_initialize)  # reserves + tracks "abc"
+    sessions.conn_open("abc")  # an open SSE stream keeps it alive
+    sessions.conn["abc"][1] -= 10 * sessions.DISCONNECT_TIMEOUT
+
+    async def reap_once():
+        real, calls = asyncio.sleep, []
+
+        async def fake_sleep(_):
+            calls.append(1)
+            if len(calls) > 1:
+                raise asyncio.CancelledError
+        sessions.asyncio.sleep = fake_sleep
+        try:
+            await sessions.reaper()
+        except asyncio.CancelledError:
+            pass
+        finally:
+            sessions.asyncio.sleep = real
+    asyncio.run(reap_once())
+    assert "abc" in sessions.conn and sessions.reserved  # still connected
+    sessions.conn_close("abc")
+    sessions.conn["abc"][1] -= 10 * sessions.DISCONNECT_TIMEOUT
+    asyncio.run(reap_once())
+    assert "abc" not in sessions.conn and not sessions.reserved and sessions.pool.free == [0]
+
+
+def test_failed_initialize_frees_reservation_immediately():
+    _setup(total=1, per_user=1)
+    sessions.conn.clear()
+
+    async def die_after_start(scope, receive, send):  # session id minted, then the request is cut
+        await send({"type": "http.response.start", "status": 200, "headers": [(b"mcp-session-id", b"zzz")]})
+        raise RuntimeError("client went away")
+
+    try:
+        _call(die_after_start)
+    except RuntimeError:
+        pass
+    assert not sessions.reserved and not sessions.conn and sessions.pool.free == [0]
+
+    async def cancelled(scope, receive, send):  # aborted before any response: uid must not leak
+        raise asyncio.CancelledError
+
+    try:
+        _call(cancelled)
+    except BaseException:
+        pass
+    assert sessions.pool.free == [0]
