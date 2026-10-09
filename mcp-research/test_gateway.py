@@ -13,7 +13,6 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 os.environ.setdefault("BLOB_TOKEN_SECRET", "test-secret")
 os.environ.setdefault("PUBLIC_HOST", "h.example")
 os.environ.setdefault("OIDC_ISSUER", "https://kc.example/realms/r")
-os.environ.setdefault("MCP_AUDIENCE", "aud")
 os.environ.setdefault("REPLICA_RID", "10-0-0-5")
 
 import auth
@@ -21,20 +20,21 @@ import cmp_rules
 import netguard
 import sessions
 
-ISS, AUD = "https://kc.example/realms/r", "aud"
+ISS = "https://kc.example/realms/r"
 KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-verifier = auth.KeycloakVerifier(ISS, AUD, "/inv", signing_key=lambda t: types.SimpleNamespace(key=KEY.public_key()))
+verifier = auth.KeycloakVerifier(ISS, "mcp", "/inv", signing_key=lambda t: types.SimpleNamespace(key=KEY.public_key()))
 
 
 def _tok(**over):
-    claims = {"iss": ISS, "aud": AUD, "sub": "u", "exp": int(time.time()) + 60, "email": "a@b.c", "groups": ["/inv"], **over}
+    claims = {"iss": ISS, "aud": "whatever", "sub": "u", "exp": int(time.time()) + 60, "email": "a@b.c", "groups": ["/inv"], "scope": "openid mcp", **over}
     return jwt.encode({k: v for k, v in claims.items() if v is not None}, KEY, algorithm="RS256")
 
 
 def test_jwt():
     ok = lambda t: asyncio.run(verifier.verify_token(t))
     assert ok(_tok()).claims["email"] == "a@b.c"
-    assert ok(_tok(aud="other")) is None
+    assert ok(_tok(aud="anything")) and ok(_tok(aud=None))
+    assert ok(_tok(scope="openid")) is None
     assert ok(_tok(iss="https://evil")) is None
     assert ok(_tok(exp=int(time.time()) - 5)) is None
     assert ok(_tok(groups=[])) is None

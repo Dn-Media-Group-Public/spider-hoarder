@@ -9,7 +9,7 @@ import sys
 import types
 
 for k, v in dict(BLOB_TOKEN_SECRET="test-secret", PUBLIC_HOST="h.example", OIDC_ISSUER="https://kc.example/realms/r",
-                 MCP_AUDIENCE="aud", REPLICA_RID="10-0-0-5").items():
+                 REPLICA_RID="10-0-0-5").items():
     os.environ.setdefault(k, v)
 
 import app

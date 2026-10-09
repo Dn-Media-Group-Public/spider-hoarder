@@ -68,7 +68,7 @@ dev hostnames would not work without TLS.)
 
 - the group `ALLOWED_GROUP` (default `/investigations`) that gates MCP use and the live view;
 - two **realm-default client scopes**, so every client, including the ones Claude registers
-  dynamically, gets them: `mcp-audience` (`aud` = `MCP_AUDIENCE`) and `mcp-groups` (`groups`);
+  dynamically, gets them: `MCP_SCOPE` (if set; the gateway requires it in the token's `scope` claim and advertises it so Claude requests it; `aud` is not checked) and `mcp-groups` (`groups`);
 - the confidential client `O2P_CLIENT_ID` for the live-view login (oauth2-proxy);
 - **Dynamic Client Registration (DCR)** for Claude: anonymous registration is allowed, and the
   realm's *Trusted Hosts* policy only accepts redirect URIs on `claude.ai`, `claude.com` and
@@ -84,7 +84,7 @@ anywhere that can reach the admin API, using the script from the Keycloak image:
 set -a; source .env; set +a
 docker run --rm -v $PWD/keycloak:/s -e KC_URL=https://keycloak.example.org \
   -e KC_ADMIN=admin -e KC_ADMIN_PASSWORD=... -e KC_REALM -e KC_USER -e KC_USER_PASSWORD \
-  -e PUBLIC_HOST -e PUBLIC_SCHEME -e MCP_AUDIENCE -e ALLOWED_GROUP -e O2P_CLIENT_ID -e O2P_CLIENT_SECRET \
+  -e PUBLIC_HOST -e PUBLIC_SCHEME -e MCP_SCOPE -e ALLOWED_GROUP -e O2P_CLIENT_ID -e O2P_CLIENT_SECRET \
   --entrypoint bash quay.io/keycloak/keycloak:26.0 /s/setup.sh
 ```
 

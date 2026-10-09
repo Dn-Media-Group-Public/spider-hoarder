@@ -88,9 +88,10 @@ mcp = FastMCP(
         "Call browser_end_session when finished."
     ),
     token_verifier=auth.KeycloakVerifier(
-        OIDC_ISSUER, os.environ["MCP_AUDIENCE"], os.environ.get("ALLOWED_GROUP", ""),
+        OIDC_ISSUER, os.environ.get("MCP_SCOPE", ""), os.environ.get("ALLOWED_GROUP", ""),
         jwks_url=os.environ.get("OIDC_JWKS_URL", "")),  # optional: fetch keys over an internal address
-    auth=AuthSettings(issuer_url=OIDC_ISSUER, resource_server_url=f"{SCHEME}://{PUBLIC_HOST}{MCP_PATH}"),
+    auth=AuthSettings(issuer_url=OIDC_ISSUER, resource_server_url=f"{SCHEME}://{PUBLIC_HOST}{MCP_PATH}",
+                      required_scopes=[os.environ["MCP_SCOPE"]] if os.environ.get("MCP_SCOPE") else None),  # advertised so Claude requests it
     streamable_http_path=MCP_PATH,
     transport_security=TransportSecuritySettings(
         enable_dns_rebinding_protection=True,

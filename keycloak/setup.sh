@@ -6,11 +6,11 @@
 #   KC_URL KC_ADMIN KC_ADMIN_PASSWORD   admin access to Keycloak (master realm)
 #   KC_REALM        realm to create/use (default: newsroom)
 #   KC_USER KC_USER_PASSWORD [KC_USER_EMAIL]   the initial user (KC_USER default: researcher)
-#   plus from .env: PUBLIC_HOST MCP_AUDIENCE ALLOWED_GROUP O2P_CLIENT_ID O2P_CLIENT_SECRET
+#   plus from .env: PUBLIC_HOST MCP_SCOPE ALLOWED_GROUP O2P_CLIENT_ID O2P_CLIENT_SECRET
 set -euo pipefail
 export PATH="$PATH:/opt/keycloak/bin"
 : "${KC_URL:?}" "${KC_ADMIN:?}" "${KC_ADMIN_PASSWORD:?}" "${KC_USER_PASSWORD:?}"
-: "${PUBLIC_HOST:?}" "${MCP_AUDIENCE:?}" "${O2P_CLIENT_ID:?}" "${O2P_CLIENT_SECRET:?}"
+: "${PUBLIC_HOST:?}" "${O2P_CLIENT_ID:?}" "${O2P_CLIENT_SECRET:?}"
 REALM=${KC_REALM:-newsroom}
 USERNAME=${KC_USER:-researcher}
 EMAIL=${KC_USER_EMAIL:-$USERNAME@example.org}
@@ -44,10 +44,16 @@ mkscope() { # name mapper-type claim-config...
     $K update "default-default-client-scopes/$sid" -r "$REALM" -n
   fi
 }
-mkscope mcp-audience oidc-audience-mapper \
-  -s "config.\"included.custom.audience\"=$MCP_AUDIENCE" -s 'config."access.token.claim"=true' -s 'config."id.token.claim"=false'
 mkscope mcp-groups oidc-group-membership-mapper \
   -s 'config."claim.name"=groups' -s 'config."full.path"=true' -s 'config."access.token.claim"=true' -s 'config."id.token.claim"=true'
+
+# Optional MCP_SCOPE: a realm-default scope that appears in the token's "scope" claim; the gateway
+# requires it. (No audience mapper: the gateway does not check "aud".)
+if [ -n "${MCP_SCOPE:-}" ] && [ -z "$(id_of client-scopes name "$MCP_SCOPE" || true)" ]; then
+  $K create client-scopes -r "$REALM" -s name="$MCP_SCOPE" -s protocol=openid-connect \
+     -s attributes.'"include.in.token.scope"'=true -s attributes.'"display.on.consent.screen"'=false
+  $K update "default-default-client-scopes/$(id_of client-scopes name "$MCP_SCOPE")" -r "$REALM" -n
+fi
 
 # Group that gates MCP use and the live view
 [ -n "$(id_of groups name "$GROUP" || true)" ] || $K create groups -r "$REALM" -s name="$GROUP"
