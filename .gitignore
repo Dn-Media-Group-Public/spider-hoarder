@@ -2,3 +2,4 @@ __pycache__/
 *.pyc
 data/
 cmp_blocklist.txt
+.env
