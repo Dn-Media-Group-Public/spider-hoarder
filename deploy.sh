@@ -22,7 +22,7 @@ source "${ENV_FILE:-.env}"
 set +a
 
 FILES=(-c docker-compose.yml)
-REQUIRED=(PUBLIC_HOST OIDC_ISSUER MCP_AUDIENCE O2P_CLIENT_ID O2P_CLIENT_SECRET O2P_COOKIE_SECRET BLOB_TOKEN_SECRET)
+REQUIRED=(PUBLIC_HOST OIDC_ISSUER MCP_AUDIENCE O2P_CLIENT_ID O2P_CLIENT_SECRET O2P_COOKIE_SECRET BLOB_TOKEN_SECRET GATEWAY_PORT)
 if [ "$DEV" -eq 1 ]; then
   echo "Deploying in DEV mode (local Keycloak, http://localhost, no TLS)"
   export PUBLIC_HOST=localhost PUBLIC_SCHEME=http
@@ -49,7 +49,7 @@ docker info --format '{{.Swarm.LocalNodeState}}' | grep -q active || docker swar
 
 docker stack deploy --resolve-image never "${FILES[@]}" "$STACK"
 
-# Force restart so freshly-built :local images (and an edited Caddyfile) are picked up.
-for s in caddy research-tor research-clear tor; do
+# Force restart so freshly-built :local images (and an edited nginx.conf.template) are picked up.
+for s in nginx research-tor research-clear tor; do
   docker service update --force --no-resolve-image "${STACK}_$s"
 done

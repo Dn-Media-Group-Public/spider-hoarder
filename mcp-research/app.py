@@ -2,8 +2,9 @@
 toolserver) plus fetch/parse/blob tools. See
 docs/implemented-plans/browser-sessions-plan.md.
 
-Everything is served under /<egress>/ (Caddy routes by that prefix), except
-/authz which Caddy's forward_auth calls on the internal network."""
+Everything is served under /<egress>/ (nginx routes by that prefix and by the replica id `rid`
+in ids and URLs), except /authz which nginx's auth_request calls on the internal network.
+See docs/implemented-plans/research-replicas.md."""
 
 import asyncio
 import contextlib
@@ -54,6 +55,8 @@ FILE_TOOLS = {
 FILE_TOOLS_NOTE = ("\n\nWhen this writes a file, the result is {job_id, files, text?}; fetch with get_file_text / "
                    "get_file_url. `filename` only names the file inside the job.")
 
+RID = sessions.RID
+_RID_PREFIX = re.compile(r"^([0-9]+-[0-9]+-[0-9]+-[0-9]+)\.")
 _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 mcp = FastMCP(
@@ -127,15 +130,24 @@ EXTRA_TOOLS = [
 HIDDEN = {"browser_install", "browser_bring_to_front"}
 
 
-def _caller() -> tuple[Any, str]:
+def _caller() -> tuple[Any, str, str | None]:
     ctx = server.request_context
     token: AccessToken = ctx.request.scope["user"].access_token
-    return ctx.session, token.claims["email"].lower()
+    # the SDK sees the bare id: ReplicaSessions strips the `<rid>.` prefix from requests
+    return ctx.session, token.claims["email"].lower(), ctx.request.headers.get("mcp-session-id")
+
+
+def _new_job_id() -> str:
+    return f"{RID}.{uuid.uuid4()}"
 
 
 def _key(owner: str, job_id: str) -> str:
-    """Storage key: jobs live under <owner>/<job_id>, so callers only see their own."""
-    if not _UUID_RE.match(job_id):
+    """Storage key: jobs live under <owner>/<uuid>, so callers only see their own. The job_id
+    is `<rid>.<uuid>`; storage is per replica, so another replica's job is not reachable."""
+    rid, _, job_id = job_id.rpartition(".")
+    if rid != RID and _RID_PREFIX.match(f"{rid}."):
+        raise ValueError("job lives on another replica and is not reachable from this session")
+    if rid != RID or not _UUID_RE.match(job_id):
         raise ValueError("invalid job_id")
     safe = re.sub(r"[^a-z0-9._@-]", "_", owner)
     if "@" not in safe:  # also keeps '..' from being an owner dir
@@ -239,7 +251,7 @@ async def _file_tool(bs: sessions.BrowserSession, name: str, arguments: dict) ->
     if default is None and not arguments.get("filename"):
         return None
     jname = _job_name(arguments.get("filename"), default or "output")
-    job_id = str(uuid.uuid4())
+    job_id = _new_job_id()
     private = f"{uuid.uuid4()}-{jname}"  # gateway-chosen, relative: lands in out/, never an agent-chosen path
     res = await bs.client.call_tool(name, {**arguments, "filename": private})
     if res.isError:
@@ -252,7 +264,7 @@ async def _file_tool(bs: sessions.BrowserSession, name: str, arguments: dict) ->
 
 
 async def _ingest_page(owner: str, url: str, live: sessions.BrowserSession | None = None) -> dict:
-    job_id = str(uuid.uuid4())
+    job_id = _new_job_id()
     kw = {}
     if live:  # preflight/download as the real browser session: its cookies, its Tor circuit
         kw = {"cookies": await sessions.cookies_for(live, url), "socks_port": ports.socks_port(live.uid)}
@@ -266,7 +278,7 @@ async def _ingest_page(owner: str, url: str, live: sessions.BrowserSession | Non
 
 
 async def _save_page(bs: sessions.BrowserSession, browser: str | None = None) -> dict:
-    job_id = str(uuid.uuid4())
+    job_id = _new_job_id()
     raw = (await sessions.page_html(bs, browser)).encode()
     return {"job_id": job_id, **_store_and_parse(_key(bs.owner, job_id), "page.html", raw, "text/html")}
 
@@ -286,7 +298,7 @@ async def list_tools() -> list[types.Tool]:
 
 @server.call_tool(validate_input=False)
 async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
-    mcp_session, owner = _caller()
+    mcp_session, owner, sid = _caller()
     args = arguments or {}
     if name in HIDDEN:
         return _text(f"{name} is disabled", True)
@@ -304,9 +316,9 @@ async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
             return _text(json.dumps(await _ingest_page(
                 owner, args["url"], await sessions.get_session(mcp_session, owner, create=False))))
         if name == "get_upload_link":
-            job_id = str(uuid.uuid4())
+            job_id = _new_job_id()
             token = blobtoken.mint(_key(owner, job_id), UPLOAD_MARK, ttl=3600)
-            return _text(json.dumps({"url": f"{BASE}/upload/{token}", "job_id": job_id}))
+            return _text(json.dumps({"url": f"{BASE}/upload/{RID}/{token}", "job_id": job_id}))
         if name in ("list_files", "get_file_text", "get_file_url"):
             key = _key(owner, args["job_id"])
             if name == "list_files":
@@ -324,9 +336,9 @@ async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
                 return _text(f"[Showing characters {off}-{end} of {len(text)}."
                              + (f" Truncated: call again with offset={end} to continue." if end < len(text) else "")
                              + f"]\n\n{text[off:end]}")
-            return _text(json.dumps({"url": f"{BASE}/blob/{blobtoken.mint(key, path)}"}))
+            return _text(json.dumps({"url": f"{BASE}/blob/{RID}/{blobtoken.mint(key, path)}"}))
 
-        bs = await sessions.get_session(mcp_session, owner)
+        bs = await sessions.get_session(mcp_session, owner, sid)
         bs.last_used = time.time()
         if name == "browser_request_human_help":
             reason = args.get("reason", "help with the page")
@@ -335,7 +347,7 @@ async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
                 if res.isError:
                     return res
             return _text(
-                f"Live view of this conversation's browser: {BASE}/view/{bs.id}/start\n"
+                f"Live view of this conversation's browser: {BASE}/view/{RID}/{bs.id}/start\n"
                 f"Ask the user to open it (they sign in with their newsroom account) and to: {reason}. "
                 "Only the user who owns this conversation can open it. "
                 "Do not take further browser actions until the user confirms they are done.")
@@ -349,12 +361,12 @@ async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
 
 
 # ------------------------------------------------------ live view / web ----
-VIEW_RE = re.compile(rf"^/{EGRESS}/view/([A-Za-z0-9_-]+)(/|$)")
+VIEW_RE = re.compile(rf"^/{EGRESS}/view/{RID}/([A-Za-z0-9_-]+)(/|$)")  # a foreign rid never matches
 
 
 def _owned_session(request: Request, view_id: str) -> sessions.BrowserSession | None:
-    # X-Auth-Request-Email is set by Caddy after oauth2-proxy (client values stripped);
-    # the gateway port is only reachable from Caddy, and session uids are firewalled off loopback.
+    # X-Auth-Request-Email is set by nginx after oauth2-proxy (client values replaced);
+    # the gateway port is only meant for nginx, and session uids are firewalled off loopback.
     email = request.headers.get("x-auth-request-email", "").lower()
     bs = sessions.by_view.get(view_id)
     if not bs or not email or bs.owner != email:
@@ -365,22 +377,28 @@ def _owned_session(request: Request, view_id: str) -> sessions.BrowserSession | 
 
 @mcp.custom_route("/authz", methods=["GET"])
 async def authz(request: Request) -> Response:
-    """Caddy forward_auth: is this SSO user the owner of the session in the URL?"""
+    """nginx auth_request: is this SSO user the owner of the session in the URL?"""
     m = VIEW_RE.match(request.headers.get("x-forwarded-uri", ""))
     bs = _owned_session(request, m.group(1)) if m else None
     if not bs:
         return PlainTextResponse("forbidden", status_code=403)
-    return Response(status_code=200, headers={"X-Upstream": f"research-{EGRESS}:{ports.ws_port(bs.uid)}"})
+    return Response(status_code=200, headers={"X-Upstream": f"{RID.replace('-', '.')}:{ports.ws_port(bs.uid)}"})  # this replica, not the service
 
 
-@mcp.custom_route(f"/{EGRESS}/view/{{view_id}}/start", methods=["GET"])
+def _own(request: Request) -> None:
+    if request.path_params["rid"] != RID:
+        raise HTTPException(404, "not found")  # nginx routes by rid, so this is only defence in depth
+
+
+@mcp.custom_route(f"/{EGRESS}/view/{{rid}}/{{view_id}}/start", methods=["GET"])
 async def view_start(request: Request) -> Response:
     """Landing link handed to the user; reveals the VNC password only to the owner."""
+    _own(request)
     view_id = request.path_params["view_id"]
     bs = _owned_session(request, view_id)
     if not bs:
         return PlainTextResponse("This browser session does not exist or is not yours.", status_code=403)
-    base = f"/{EGRESS}/view/{view_id}"
+    base = f"/{EGRESS}/view/{RID}/{view_id}"
     return RedirectResponse(
         f"{base}/vnc.html?path={base.lstrip('/')}/websockify&autoconnect=1&reconnect=1"
         f"&resize=scale&password={bs.vnc_password}", status_code=302)
@@ -410,8 +428,9 @@ async def index_page(request: Request) -> Response:
         "<b>clear</b> browses directly; <b>tor</b> browses via Tor.</p></body></html>")
 
 
-@mcp.custom_route(f"/{EGRESS}/upload/{{token}}", methods=["GET"])
+@mcp.custom_route(f"/{EGRESS}/upload/{{rid}}/{{token}}", methods=["GET"])
 async def upload_page(request: Request) -> Response:
+    _own(request)
     _upload_key(request.path_params["token"])
     return HTMLResponse(
         '<!doctype html><html><body><h1>Upload files</h1>'
@@ -419,8 +438,9 @@ async def upload_page(request: Request) -> Response:
         '<input type="file" name="files" multiple><button type="submit">Upload</button></form></body></html>')
 
 
-@mcp.custom_route(f"/{EGRESS}/upload/{{token}}", methods=["POST"])
+@mcp.custom_route(f"/{EGRESS}/upload/{{rid}}/{{token}}", methods=["POST"])
 async def upload_submit(request: Request) -> Response:
+    _own(request)
     key = _upload_key(request.path_params["token"])
     form = await request.form()
     previews = []
@@ -436,8 +456,9 @@ async def upload_submit(request: Request) -> Response:
     return HTMLResponse(f"<!doctype html><html><body><h1>Uploaded</h1>{body}</body></html>")
 
 
-@mcp.custom_route(f"/{EGRESS}/blob/{{token}}", methods=["GET"])
+@mcp.custom_route(f"/{EGRESS}/blob/{{rid}}/{{token}}", methods=["GET"])
 async def get_blob(request: Request) -> Response:
+    _own(request)
     try:
         data = blobtoken.verify(request.path_params["token"])
     except ValueError as e:
@@ -449,7 +470,64 @@ async def get_blob(request: Request) -> Response:
 
 
 # ---------------------------------------------------------------- app ------
+def _header(scope: dict, name: bytes) -> str | None:
+    return next((v.decode("latin-1") for k, v in scope["headers"] if k == name), None)
+
+
+class ReplicaSessions:
+    """Wraps the MCP endpoint (inside auth, so the caller is known). Makes the MCP session id
+    `<rid>.<sdk id>` for clients (nginx routes on it) while the SDK only ever sees the bare id,
+    and reserves a browser uid at `initialize` so a full replica answers 503 (nginx tries the next)."""
+
+    def __init__(self, inner):
+        self.inner = inner
+
+    async def __call__(self, scope, receive, send):
+        sid_hdr = _header(scope, b"mcp-session-id")
+        reserve_uid = owner = None
+        if sid_hdr is not None:
+            rid, _, sid = sid_hdr.partition(".")
+            if rid != RID:  # nginx routes by rid, so this is a stale or foreign id
+                return await Response('{"jsonrpc":"2.0","id":"server-error","error":{"code":-32600,"message":"Session not found"}}',
+                                      status_code=404, media_type="application/json")(scope, receive, send)
+            scope = {**scope, "headers": [(k, sid.encode() if k == b"mcp-session-id" else v) for k, v in scope["headers"]]}
+        elif scope["method"] == "POST":  # ponytail: any POST without a session id is treated as initialize
+            owner = scope["user"].access_token.claims["email"].lower()
+            try:
+                reserve_uid = sessions.reserve(owner)
+            except RuntimeError as e:
+                return await Response(json.dumps({"error": "full", "message": str(e)}), status_code=503,
+                                      media_type="application/json")(scope, receive, send)
+        new_sid = None
+
+        async def send_(msg):
+            nonlocal new_sid, reserve_uid
+            if msg["type"] == "http.response.start":
+                hs = []
+                for k, v in msg["headers"]:
+                    if k.lower() == b"mcp-session-id":
+                        new_sid = v.decode()
+                        v = f"{RID}.{new_sid}".encode()
+                    hs.append((k, v))
+                msg = {**msg, "headers": hs}
+                if reserve_uid is not None and new_sid and msg["status"] < 300:
+                    sessions.register(new_sid, owner, reserve_uid)
+                    reserve_uid = None
+            await send(msg)
+
+        try:
+            await self.inner(scope, receive, send_)
+        finally:
+            if reserve_uid is not None:  # not an initialize after all, or it failed
+                await sessions.pool.release(reserve_uid)
+            if sid_hdr is not None and scope["method"] == "DELETE":
+                await sessions.end_mcp_session(sid)
+
+
 app = mcp.streamable_http_app()
+for _r in app.routes:  # the MCP route's endpoint is the auth-wrapped streamable-http app
+    if getattr(_r, "path", None) == MCP_PATH:
+        _r.app = ReplicaSessions(_r.app)
 _inner_lifespan = app.router.lifespan_context
 
 

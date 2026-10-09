@@ -65,6 +65,8 @@ output dir and copies it into blob storage; it never moves or deletes (the
 
 ### Result shape (all file-returning tools)
 
+See also: [Plan: Scale research containers (sticky replicas)](research-replicas.md) — `job_id` is now `<rid>.<uuid>`; jobs are per replica.
+
 `{job_id, files: [...manifest entries...], text?}`, the same as `ingest_page` and
 `browser_save_page` today.
 

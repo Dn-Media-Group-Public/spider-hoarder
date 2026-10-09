@@ -1,0 +1,127 @@
+# Replaces Caddy. Routes by egress (/tor, /clear) and, once a session exists, by the replica id
+# `rid` (the research task's IP, dashes for dots) carried in the MCP session id and in blob / upload /
+# view URLs. nginx proxies straight to that IP on ${GATEWAY_PORT}. envsubst fills in ${GATEWAY_PORT} only.
+# TLS is terminated by the load balancer in front (Google LB in prod); dev has none.
+# See docs/implemented-plans/research-replicas.md.
+
+resolver 127.0.0.11 valid=5s;   # Swarm DNS, re-resolved on every request (variable proxy_pass)
+
+map $http_upgrade $connection_upgrade { default upgrade; "" ""; }
+
+# rid in an `<rid>.<sdk id>` MCP session id -> dotted IP ("" = no header, "invalid" = malformed)
+map $http_mcp_session_id $sid_ip {
+    ""      "";
+    default invalid;
+    "~^(?<a>[0-9]{1,3})-(?<b>[0-9]{1,3})-(?<c>[0-9]{1,3})-(?<d>[0-9]{1,3})\." "$a.$b.$c.$d";
+}
+
+# rid in /<egress>/{blob,upload,view}/<rid>/... -> dotted IP ("" = none/malformed)
+map $request_uri $url_ip {
+    default "";
+    "~^/(?:tor|clear)/(?:blob|upload|view)/(?<a>[0-9]{1,3})-(?<b>[0-9]{1,3})-(?<c>[0-9]{1,3})-(?<d>[0-9]{1,3})/" "$a.$b.$c.$d";
+}
+
+server {
+    listen 80;
+
+    proxy_http_version 1.1;
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+
+    # SSO 401 -> login (auth_request failures only: proxied 401s, e.g. the MCP bearer challenge, pass through)
+    error_page 401 = @login;
+    location @login { return 302 /oauth2/start?rd=$uri; }
+
+    location = /healthz { return 200; }
+
+    location /oauth2/ { proxy_pass http://oauth2-proxy:4180; }
+
+    # Human SSO check. oauth2-proxy answers 202 + X-Auth-Request-Email, or 401.
+    location = /_sso {
+        internal;
+        proxy_pass http://oauth2-proxy:4180/oauth2/auth;
+        proxy_pass_request_body off;
+        proxy_set_header Content-Length "";
+        proxy_set_header Upgrade "";
+        proxy_set_header Connection "";
+        proxy_set_header X-Forwarded-Uri $request_uri;
+        proxy_set_header X-Forwarded-Host $http_host;
+    }
+
+    # The replica's own ownership check (/authz), stage 2 of the live view. Answers with
+    # X-Upstream: <replica ip>:<ws port>. $email comes from the SSO check of stage 1.
+    location = /_authz {
+        internal;
+        proxy_pass http://$url_ip:${GATEWAY_PORT}/authz;
+        proxy_pass_request_body off;
+        proxy_set_header Host $http_host;
+        proxy_set_header Content-Length "";
+        proxy_set_header Upgrade "";        # the subrequest is a plain GET even when the browser asks for a websocket
+        proxy_set_header Connection "";
+        proxy_set_header X-Auth-Request-Email $email;   # replaces any client-supplied value
+        proxy_set_header X-Forwarded-Uri $request_uri;
+    }
+
+    # MCP endpoint (bearer auth is done by the gateway itself). Without a session id (initialize):
+    # any replica, next one on 503 = full (no side effects yet). With one: the replica in its prefix.
+    location ~ ^/(?<egress>tor|clear)/mcp {
+        if ($sid_ip = invalid) { return 400; }
+        set $target $sid_ip;
+        if ($sid_ip = "") { set $target tasks.research-$egress; }
+        proxy_pass http://$target:${GATEWAY_PORT};
+        proxy_buffering off;
+        proxy_read_timeout 1h;   # SSE
+        proxy_next_upstream error timeout http_503 non_idempotent;
+        proxy_next_upstream_tries 0;
+    }
+
+    location ~ ^/\.well-known/oauth-protected-resource/(?<egress>tor|clear)/mcp$ {
+        proxy_pass http://tasks.research-$egress:${GATEWAY_PORT};
+    }
+
+    # Signed capability links: the gateway checks the token.
+    location ~ ^/(tor|clear)/(blob|upload)/ {
+        if ($url_ip = "") { return 400; }
+        proxy_pass http://$url_ip:${GATEWAY_PORT};
+    }
+
+    # Handoff link: SSO, then that replica checks ownership and redirects to noVNC.
+    location ~ ^/(tor|clear)/view/[0-9-]+/[A-Za-z0-9_-]+/start$ {
+        if ($url_ip = "") { return 400; }
+        auth_request /_sso;
+        auth_request_set $email $upstream_http_x_auth_request_email;
+        proxy_pass http://$url_ip:${GATEWAY_PORT};
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Auth-Request-Email $email;   # replaces any client-supplied value
+    }
+
+    # Live view (noVNC page + websocket). nginx has one auth_request per request and none in subrequests, so:
+    # stage 1 = SSO (sets $email), then try_files hops to @view2 = ownership via the replica's /authz,
+    # then straight to that session's websockify port. $upstream only ever comes from /authz's answer.
+    location ~ ^/(tor|clear)/view/[0-9-]+/[A-Za-z0-9_-]+/ {
+        if ($url_ip = "") { return 400; }
+        auth_request /_sso;
+        auth_request_set $email $upstream_http_x_auth_request_email;
+        try_files /_never_exists @view2;
+    }
+
+    location @view2 {
+        auth_request /_authz;
+        auth_request_set $upstream $upstream_http_x_upstream;
+        rewrite ^/(?:tor|clear)/view/[0-9-]+/[A-Za-z0-9_-]+(/.*)$ $1 break;
+        proxy_pass http://$upstream;
+        proxy_read_timeout 1h;
+    }
+
+    location ~ ^/(tor|clear)/(blob|upload|view)/ { return 400; }   # malformed rid
+
+    location = / {
+        set $any tasks.research-clear;
+        proxy_pass http://$any:${GATEWAY_PORT};
+    }
+
+    location / { return 404; }
+}

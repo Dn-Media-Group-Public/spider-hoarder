@@ -8,6 +8,11 @@ UID_BASE=${UID_BASE:-20000}
 MAX_SESSIONS_TOTAL=${MAX_SESSIONS_TOTAL:-18}
 POOL=$((MAX_SESSIONS_TOTAL + 2))
 export UID_BASE MAX_SESSIONS_TOTAL
+: "${GATEWAY_PORT:?}"
+# this replica's slice of tor's SocksPorts (same formula as ports.py)
+SLOT=${REPLICA_SLOT:-1}
+[ "$SLOT" -ge 1 ] && [ "$SLOT" -le "${MAX_REPLICAS:-4}" ] || { echo "REPLICA_SLOT $SLOT outside 1..MAX_REPLICAS" >&2; exit 1; }
+SOCKS_BASE=$((9050 + (SLOT - 1) * (POOL + 1)))
 
 # --- egress firewall, per session uid: only its own loopback ports (so sessions
 # cannot reach the gateway or each other), replies on accepted connections, the
@@ -27,7 +32,7 @@ while [ "$i" -lt "$POOL" ]; do
   iptables -A OUTPUT -m owner --uid-owner "$U" -o lo -p tcp -m multiport --dports "$((5900+i)),$((9100+i))" -j ACCEPT
   iptables -A OUTPUT -m owner --uid-owner "$U" -o lo -d 127.0.0.11 -j ACCEPT
   if [ "$EGRESS" = tor ]; then
-    iptables -A OUTPUT -m owner --uid-owner "$U" -d "$TORIP" -p tcp --dport "$((9050+i))" -j ACCEPT
+    iptables -A OUTPUT -m owner --uid-owner "$U" -d "$TORIP" -p tcp --dport "$((SOCKS_BASE+i))" -j ACCEPT
   fi
   i=$((i+1))
 done
@@ -55,7 +60,7 @@ i=0; while [ ! -S /run/sessiond.sock ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i
 # --- gateway: uid 1000, no caps, restarted on exit
 while :; do
   setpriv --no-new-privs --reuid=1000 --regid=1000 --groups="${GW_COLLECT_GID:-1500}" --bounding-set=-all --inh-caps=-all \
-    uvicorn app:app --host 0.0.0.0 --port 8000 || true
+    uvicorn app:app --host 0.0.0.0 --port "$GATEWAY_PORT" || true
   echo "gateway exited, restarting" >&2
   sleep 1
 done

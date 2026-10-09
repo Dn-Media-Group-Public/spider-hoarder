@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import secrets
+import socket
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -28,6 +29,17 @@ IDLE_TIMEOUT = int(os.environ.get("IDLE_TIMEOUT", "1800"))
 MAX_PER_USER = int(os.environ.get("MAX_SESSIONS_PER_USER", "3"))
 UPSTREAM_HOST = "mcp-upstream"  # must match the allow-list in toolserver/server.py
 
+
+
+def _own_rid() -> str:
+    """This replica's IP on the network it shares with nginx, dashes for dots (ids and URLs carry it)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.connect((socket.gethostbyname("nginx"), 9))  # UDP connect: picks the route, sends nothing
+        return s.getsockname()[0].replace(".", "-")
+
+
+RID = os.environ.get("REPLICA_RID") or _own_rid()  # REPLICA_RID: tests / single-host runs without nginx
+
 pool = Pool(Sessiond(os.environ.get("SESSIOND_SOCKET", "/run/sessiond.sock")))
 _HOST_RULES = cmp_rules.host_rules()
 
@@ -46,10 +58,20 @@ class BrowserSession:
     closing: asyncio.Event = field(default_factory=asyncio.Event)
     task: asyncio.Task | None = None
     last_used: float = field(default_factory=time.time)
+    sid: str | None = None  # SDK MCP session id (no replica prefix)
+
+
+@dataclass
+class Reservation:
+    """A uid set aside at MCP `initialize`, so capacity is decided before any tool call."""
+    owner: str
+    uid: int
+    created: float = field(default_factory=time.time)
 
 
 by_mcp: dict[int, BrowserSession] = {}   # id(ServerSession) -> session
 by_view: dict[str, BrowserSession] = {}  # view id -> session
+reserved: dict[str, Reservation] = {}    # MCP session id -> uid held for its first browser
 _lock = asyncio.Lock()
 _tools_cache: list[types.Tool] | None = None
 _tools_lock = asyncio.Lock()
@@ -114,10 +136,40 @@ async def close(bs: BrowserSession) -> None:
     log.info("session %s closed", bs.id[:8])
 
 
-async def new_session(owner: str, mcp_session: Any = None) -> BrowserSession:
-    """Take a uid and start a session on it (registered only if mcp_session given)."""
-    uid = pool.take()
-    bs = BrowserSession(owner=owner, uid=uid, mcp_session=mcp_session)
+def _count(owner: str | None = None) -> int:
+    return sum(1 for o in [s.owner for s in by_mcp.values()] + [r.owner for r in reserved.values()]
+               if owner is None or o == owner)
+
+
+def reserve(owner: str) -> int:
+    """Hold a uid for a new MCP session (not yet keyed: see register). RuntimeError = full."""
+    if _count(owner) >= MAX_PER_USER:
+        raise RuntimeError(f"you already have {MAX_PER_USER} browser sessions; end one first")
+    if _count() >= ports.MAX_SESSIONS_TOTAL:
+        raise RuntimeError("browser capacity reached; try again later")
+    return pool.take()
+
+
+def register(sid: str, owner: str, uid: int) -> None:
+    reserved[sid] = Reservation(owner, uid)
+
+
+async def unreserve(sid: str) -> None:
+    if r := reserved.pop(sid, None):
+        await pool.release(r.uid)  # the browser was never started: stop() just wipes the uid
+
+
+async def end_mcp_session(sid: str) -> None:
+    """MCP session closed (DELETE): free its reservation and any browser."""
+    await unreserve(sid)
+    for bs in [b for b in by_mcp.values() if b.sid == sid]:
+        await close(bs)
+
+
+async def new_session(owner: str, mcp_session: Any = None, uid: int | None = None, sid: str | None = None) -> BrowserSession:
+    """Start a session on a uid (taken here unless reserved); registered only if mcp_session given."""
+    uid = pool.take() if uid is None else uid
+    bs = BrowserSession(owner=owner, uid=uid, mcp_session=mcp_session, sid=sid)
     if mcp_session is not None:
         by_mcp[id(mcp_session)] = bs
         by_view[bs.id] = bs
@@ -128,7 +180,7 @@ async def new_session(owner: str, mcp_session: Any = None) -> BrowserSession:
         raise
 
 
-async def get_session(mcp_session: Any, owner: str, create: bool = True) -> BrowserSession | None:
+async def get_session(mcp_session: Any, owner: str, sid: str | None = None, create: bool = True) -> BrowserSession | None:
     async with _lock:
         bs = by_mcp.get(id(mcp_session))
         if bs and bs.mcp_session is mcp_session:
@@ -140,11 +192,11 @@ async def get_session(mcp_session: Any, owner: str, create: bool = True) -> Brow
                 return bs
         if not create:
             return None
-        if sum(1 for s in by_mcp.values() if s.owner == owner) >= MAX_PER_USER:
-            raise RuntimeError(f"you already have {MAX_PER_USER} browser sessions; end one first")
-        if len(by_mcp) >= ports.MAX_SESSIONS_TOTAL:
-            raise RuntimeError("browser capacity reached; try again later")
-        return await new_session(owner, mcp_session)
+        # normally the uid was reserved at initialize; otherwise (browser ended earlier, reservation reaped)
+        # reserve now, which can fail with "capacity reached"
+        r = reserved.pop(sid or "", None)
+        uid = r.uid if r else reserve(owner)
+        return await new_session(owner, mcp_session, uid, sid)
 
 
 async def upstream_tools() -> list[types.Tool]:
@@ -251,3 +303,7 @@ async def reaper() -> None:
             if now - bs.last_used > IDLE_TIMEOUT:
                 log.info("reaping idle session %s", bs.id[:8])
                 await close(bs)
+        for sid, r in list(reserved.items()):
+            if now - r.created > IDLE_TIMEOUT:
+                log.info("reaping unused reservation for %s", r.owner)
+                await unreserve(sid)

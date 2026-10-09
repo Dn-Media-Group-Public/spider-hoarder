@@ -281,3 +281,23 @@ There is no `docs/architecture/` or `docs/api/` yet; the affected docs are:
   shape (`job_id` now carries `rid`).
 - On implementation: move this file to `docs/implemented-plans/research-replicas.md`
   and add it to `docs/implemented-plans/index.md`.
+
+## Implementation notes (2026-10-09)
+
+- **Live view needs two stages in nginx.** nginx runs one `auth_request` per request and none inside
+  subrequests, so the plan's "SSO, then `auth_request` to `/authz`" is: stage 1 `auth_request /_sso`
+  (sets `$email`), `try_files` hop to `@view2`, stage 2 `auth_request /_authz` (the replica's `/authz`,
+  sent `X-Auth-Request-Email: $email`), then rewrite + `proxy_pass $upstream`. Behaviour as planned.
+- **Unreserved session on a tool call** (browser ended earlier, reservation reaped, gateway restart with
+  the SDK session still alive): instead of failing as "unknown session", `get_session` reserves on demand
+  (still subject to the per-user and capacity limits, which can fail with "capacity reached"). This keeps
+  "browse again after `browser_end_session`" working; only `initialize` is guaranteed capacity.
+- `proxy_set_header` in a location drops the server-level ones, so `Host` is repeated where needed.
+- `ReplicaSessions` wraps the MCP route *inside* the SDK's auth wrapper (the owner is needed to reserve).
+  Any POST without `Mcp-Session-Id` is treated as `initialize`; one that is not gives its uid back.
+- `MAX_REPLICAS` is also checked in `mcp-research/entrypoint.sh` (container refuses to start if
+  `REPLICA_SLOT` is out of range). `GATEWAY_PORT` is added to `.env` (7298).
+- Verified here: `docker stack config` (prod + dev), nginx routing against fake replicas on a docker
+  network (round-robin, try-next on 503, rid routing, 400 malformed, 502 unknown IP, SSO redirect, ignored
+  spoofed `X-Upstream` / `X-Auth-Request-Email`, `Host` kept). **Not run:** a real 2-replica
+  `docker stack deploy` with Tor and the websocket live view (the plan's stack and Tor tests).

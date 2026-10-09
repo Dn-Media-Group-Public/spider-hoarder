@@ -32,6 +32,8 @@ no second Playwright integration.
 
 ## Architecture
 
+See also: [Plan: Scale research containers (sticky replicas)](research-replicas.md) — nginx replaces Caddy; several replicas per egress, routed by replica id.
+
 ```
 Claude ─Bearer JWT─▶ Caddy ─▶ research-tor ──▶ tor ──▶ internet
 Journalist ─SSO──▶  Caddy ─▶ research-clear ─────────▶ internet
@@ -135,6 +137,8 @@ network namespace.
 
 ## Tor
 
+See also: [Plan: Scale research containers (sticky replicas)](research-replicas.md) — SocksPort ranges are offset per replica slot.
+
 - Container `research-tor` is on an `internal` network with `tor` only; no
   other route (belt and braces with the uid firewall).
 - `torrc` exposes a pool of SocksPorts (`9050..9069`, one per uid index). Tor
@@ -148,6 +152,8 @@ network namespace.
   still apply.
 
 ## Tools and flows
+
+See also: [Plan: Scale research containers (sticky replicas)](research-replicas.md) — live view / blob / upload links and `/authz` carry the replica id.
 
 Tools the model sees: everything the toolserver exposes (tool list cached
 from the first session, `browser_bring_to_front` hidden) plus (`browser_request_human_help`,
@@ -198,6 +204,8 @@ page/route, which goes away.
   or drop the blocklist and rely on the click script. Decide after measuring.
 
 ## Deployment
+
+See also: [Plan: Scale research containers (sticky replicas)](research-replicas.md) — nginx service, `GATEWAY_PORT`, `RESEARCH_*_REPLICAS`, scaling.
 
 One image (`Dockerfile`): Debian bookworm + Python, `playwright`
 (pinned) with its Chromium (was Node + `@playwright/mcp`; See also: [Plan: Python browser tool server](python-browser-tool-server.md)), `xvfb x11vnc novnc websockify`, fonts, `iptables`,

@@ -3,11 +3,17 @@
 #   $PUBLIC_SCHEME://$PUBLIC_HOST/clear/mcp   browsers egress directly (public internet only)
 # Auth: an external OIDC IdP (OIDC_ISSUER, Keycloak); `./deploy.sh --dev` adds a local one
 # (docker-compose.dev.yml). Set it up with keycloak/setup.sh (realm, scopes, DCR for Claude, a user).
-# TLS is terminated in front of Caddy (Google LB in prod: PUBLIC_SCHEME=https; dev: http, no TLS).
+# TLS is terminated in front of nginx (Google LB in prod: PUBLIC_SCHEME=https; dev: http, no TLS).
 # Docker Swarm stack (`./deploy.sh`). Swarm notes: `build:` is ignored (deploy.sh builds
 # the images), `shm_size`/`security_opt` are unsupported (Chromium runs with
 # --disable-dev-shm-usage; entrypoint.sh sets no_new_privs itself).
 version: "3.8"
+
+# per replica: memory limit applies to each task; scale with `docker service scale` or RESEARCH_*_REPLICAS
+x-research-deploy: &research-deploy
+  restart_policy: { condition: any }
+  resources:
+    limits: { memory: 12g }   # a runaway session can OOM all sessions on this task
 
 x-research: &research
   image: mcp-research:local
@@ -15,11 +21,6 @@ x-research: &research
   # NET_ADMIN: entrypoint firewall only, dropped before sessiond/gateway start.
   # The rest is sessiond's (setuid/setgid/chown/kill, DAC_OVERRIDE+FOWNER to sweep session files).
   cap_add: [NET_ADMIN, SETUID, SETGID, CHOWN, KILL, DAC_OVERRIDE, FOWNER]
-  deploy:
-    replicas: 1
-    restart_policy: { condition: any }
-    resources:
-      limits: { memory: 12g }   # a runaway session can OOM all sessions on this egress
   volumes:
     - research_data:/data
   environment: &research-env
@@ -33,15 +34,22 @@ x-research: &research
     MAX_SESSIONS_TOTAL: ${MAX_SESSIONS_TOTAL:-18}
     MAX_SESSIONS_PER_USER: ${MAX_SESSIONS_PER_USER:-3}
     IDLE_TIMEOUT: ${IDLE_TIMEOUT:-1800}
+    GATEWAY_PORT: ${GATEWAY_PORT}
+    MAX_REPLICAS: ${MAX_REPLICAS:-4}
+    REPLICA_SLOT: "{{.Task.Slot}}"   # expanded per task by stack deploy: this replica's slice of tor's SocksPorts
 
 services:
-  caddy:
-    image: caddy:2.11
+  # Routes by egress and by replica id (see nginx.conf.template). Not on `public`: it connects to IPs taken
+  # from URLs, so it may only reach the research replicas, tor and oauth2-proxy (sessions_*, auth).
+  nginx:
+    image: nginx:1.27
     deploy: { replicas: 1, restart_policy: { condition: any } }
     ports: ["80:80"]
+    environment:
+      GATEWAY_PORT: ${GATEWAY_PORT}
     volumes:
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-    networks: [public, sessions_tor, sessions_clear]
+      - ./nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
+    networks: [auth, sessions_tor, sessions_clear]
 
   # Human SSO for the live view (MCP bearer tokens are verified by the gateways)
   oauth2-proxy:
@@ -65,10 +73,13 @@ services:
       OAUTH2_PROXY_SET_XAUTHREQUEST: "true"
       OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
       OAUTH2_PROXY_CODE_CHALLENGE_METHOD: S256
-    networks: [public]
+    networks: [public, auth]   # public: the IdP; auth: nginx
 
   research-tor:
     <<: *research
+    deploy:
+      <<: *research-deploy
+      replicas: ${RESEARCH_TOR_REPLICAS:-1}
     environment:
       <<: *research-env
       EGRESS: tor
@@ -76,6 +87,9 @@ services:
 
   research-clear:
     <<: *research
+    deploy:
+      <<: *research-deploy
+      replicas: ${RESEARCH_CLEAR_REPLICAS:-1}
     environment:
       <<: *research-env
       EGRESS: clear
@@ -86,11 +100,13 @@ services:
     deploy: { replicas: 1, restart_policy: { condition: any } }
     environment:
       MAX_SESSIONS_TOTAL: ${MAX_SESSIONS_TOTAL:-18}
+      MAX_REPLICAS: ${MAX_REPLICAS:-4}   # one SocksPort range per research replica
     volumes: [tor_data:/var/lib/tor]
     networks: [tor_egress, sessions_tor]
 
 networks:
   public: { driver: overlay }
+  auth: { driver: overlay, internal: true }           # nginx <-> oauth2-proxy only
   tor_egress: { driver: overlay }
   sessions_tor: { driver: overlay, internal: true }   # tor browsers: no internet, only tor:9050+
   sessions_clear: { driver: overlay }                 # clear browsers -> internet (uid firewall blocks private ranges)

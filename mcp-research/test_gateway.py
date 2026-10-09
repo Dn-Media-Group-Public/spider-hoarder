@@ -14,6 +14,7 @@ os.environ.setdefault("BLOB_TOKEN_SECRET", "test-secret")
 os.environ.setdefault("PUBLIC_HOST", "h.example")
 os.environ.setdefault("OIDC_ISSUER", "https://kc.example/realms/r")
 os.environ.setdefault("MCP_AUDIENCE", "aud")
+os.environ.setdefault("REPLICA_RID", "10-0-0-5")
 
 import auth
 import cmp_rules
@@ -75,7 +76,7 @@ def test_filter_proxy():
 
 def test_owner_scoping():
     import app
-    j = "123e4567-e89b-12d3-a456-426614174000"
+    j = f"{app.RID}.123e4567-e89b-12d3-a456-426614174000"
     assert app._key("A@x.y", j) != app._key("b@x.y", j)
     for bad in ("..", "x", ""):
         try:
@@ -118,7 +119,7 @@ def test_file_outputs():
         n = app._job_name(given, "d")
         assert "/" not in n and "\\" not in n and n not in ("", ".", ".."), (given, n)
     assert app._job_name("../../x.png", "d") == "x.png"
-    j = "123e4567-e89b-12d3-a456-426614174000"
+    j = f"{app.RID}.123e4567-e89b-12d3-a456-426614174000"
     key = app._key("a@x.y", j)
     r = app._store_file(key, "shot.png", b"\x89PNG\0\0")
     assert "text" not in r and any(f["path"] == "original/shot.png" for f in r["files"]), r
@@ -174,7 +175,7 @@ def test_store_terse():
     import app, storage, tempfile
     storage.BLOB_URL = "file://" + tempfile.mkdtemp()
     app.INLINE_LIMIT = 50_000
-    key = app._key("a@x.y", "123e4567-e89b-12d3-a456-426614174001")
+    key = app._key("a@x.y", f"{app.RID}.123e4567-e89b-12d3-a456-426614174001")
     paths = lambda r: {f["path"] for f in r["files"]}
     r = app._store_and_parse(key, "p.html", b"<html><body><article><h1>Title</h1><p>" + b"Some long article text here. " * 20 + b"</p><h2>Part</h2><p>" + b"More article text. " * 20 + b"</p></article></body></html>", "text/html")
     assert {"original/p.html", "parsed/p.html.md", "terse/p.html.md"} <= paths(r), paths(r)
@@ -218,7 +219,7 @@ def test_multi_browser_routing():
     async def close(b):
         closed.append(b)
 
-    app._caller = lambda: (None, "a@b.c")
+    app._caller = lambda: (None, "a@b.c", None)
     sessions.get_session, sessions.close = get_session, close
     run = lambda n, **a: asyncio.run(app.call_tool(n, a))
     run("browser_end_session", browser="x")

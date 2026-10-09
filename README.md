@@ -6,7 +6,7 @@ egress, and fetch/parse/blob tools that return Markdown. No knowledge of any
 downstream graph.
 
 Design: [docs/implemented-plans/browser-sessions-plan.md](docs/implemented-plans/browser-sessions-plan.md)
-(builds on [agentic-research-mcp.md](docs/plans/agentic-research-mcp.md); Keycloak/Caddy/Tor
+(builds on [agentic-research-mcp.md](docs/plans/agentic-research-mcp.md); Keycloak/Tor
 background in [newsroom-browsers-plan.md](docs/plans/newsroom-browsers-plan.md)).
 
 ## Run
@@ -17,13 +17,26 @@ cp .env.example .env   # fill in PUBLIC_HOST, OIDC_ISSUER and the secrets
 ./deploy.sh --dev      # local: same stack + a local Keycloak, http://localhost, no TLS
 ```
 
-The stack is Caddy, oauth2-proxy, `research-tor`, `research-clear` and `tor`. It only speaks
-**http**: TLS ends at the Google load balancer in front of Caddy (`PUBLIC_SCHEME=https` tells the
+The stack is nginx, oauth2-proxy, `research-tor`, `research-clear` and `tor`. It only speaks
+**http**: TLS ends at the Google load balancer in front of nginx (`PUBLIC_SCHEME=https` tells the
 services which URLs users see; the LB must forward `X-Forwarded-Proto`; `/healthz` answers 200
 for LB health checks). Auth is an external OIDC provider (`OIDC_ISSUER`, Keycloak).
 
 - `$PUBLIC_SCHEME://$PUBLIC_HOST/tor/mcp` — browsers egress via Tor only
 - `$PUBLIC_SCHEME://$PUBLIC_HOST/clear/mcp` — direct egress, public internet only
+
+### Scaling
+
+`research-tor` and `research-clear` can run several replicas, each with its own browser pool
+(`MAX_SESSIONS_TOTAL`): set `RESEARCH_TOR_REPLICAS` / `RESEARCH_CLEAR_REPLICAS` in `.env`, or
+`docker service scale spider-hoarder_research-clear=3`. New MCP sessions are spread over the
+replicas (nginx tries the next one when a replica is full; every one full gives HTTP 503). A session
+sticks to the replica that created it: its MCP session id, `job_id`s and blob / upload / live-view
+links carry the replica id (the task's IP), and nginx routes on it. Consequences: files and jobs are
+per replica (a `job_id` from another replica is not readable), and a replica that restarts loses its
+sessions and links. `tor` stays a single service with one SocksPort range per replica slot; scaling
+past `MAX_REPLICAS` (default 4) needs a larger `MAX_REPLICAS` and a redeploy of `tor`.
+See [the plan](docs/implemented-plans/research-replicas.md).
 
 Tools: the browser tools of the Python tool server in `mcp-research/toolserver/` (a `@playwright/mcp`-compatible set plus cookie /
 localStorage / sessionStorage tools; one Chromium per session, several browser windows via `browser_start_session` and a `browser` id
