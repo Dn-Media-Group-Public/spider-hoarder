@@ -34,7 +34,6 @@ services:
       PUBLIC_HOST: ${PUBLIC_HOST}
       PUBLIC_SCHEME: ${PUBLIC_SCHEME}
       MCP_SCOPE: ${MCP_SCOPE:-}
-      ALLOWED_GROUP: ${ALLOWED_GROUP:-/investigations}
       O2P_CLIENT_ID: ${O2P_CLIENT_ID}
       O2P_CLIENT_SECRET: ${O2P_CLIENT_SECRET}
     configs:

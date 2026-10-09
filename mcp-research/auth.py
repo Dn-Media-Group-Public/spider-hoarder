@@ -1,4 +1,4 @@
-"""Keycloak JWT verification for the MCP endpoint (email, optional group and scope; the audience is not checked)."""
+"""Keycloak JWT verification for the MCP endpoint (email, optional scope; the audience is not checked)."""
 
 import asyncio
 import logging
@@ -12,8 +12,8 @@ log = logging.getLogger("auth")
 
 
 class KeycloakVerifier(TokenVerifier):
-    def __init__(self, issuer: str, scope: str = "", group: str = "", signing_key=None, jwks_url: str = ""):
-        self.issuer, self.scope, self.group = issuer.rstrip("/"), scope, group
+    def __init__(self, issuer: str, scope: str = "", signing_key=None, jwks_url: str = ""):
+        self.issuer, self.scope = issuer.rstrip("/"), scope
         # signing_key: test hook, token -> key object (default: Keycloak's JWKS)
         self.signing_key = signing_key or PyJWKClient(
             jwks_url or f"{self.issuer}/protocol/openid-connect/certs", cache_keys=True
@@ -33,9 +33,6 @@ class KeycloakVerifier(TokenVerifier):
             return None
         if self.scope and self.scope not in claims.get("scope", "").split():
             log.info("token rejected: %s lacks scope %s", claims.get("email"), self.scope)
-            return None
-        if self.group and self.group not in claims.get("groups", []):
-            log.info("token rejected: %s not in %s", claims.get("email"), self.group)
             return None
         if not claims.get("email"):
             log.info("token rejected: no email claim")

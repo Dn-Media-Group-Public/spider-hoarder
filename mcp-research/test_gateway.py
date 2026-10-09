@@ -22,11 +22,11 @@ import sessions
 
 ISS = "https://kc.example/realms/r"
 KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-verifier = auth.KeycloakVerifier(ISS, "mcp", "/inv", signing_key=lambda t: types.SimpleNamespace(key=KEY.public_key()))
+verifier = auth.KeycloakVerifier(ISS, "mcp", signing_key=lambda t: types.SimpleNamespace(key=KEY.public_key()))
 
 
 def _tok(**over):
-    claims = {"iss": ISS, "aud": "whatever", "sub": "u", "exp": int(time.time()) + 60, "email": "a@b.c", "groups": ["/inv"], "scope": "openid mcp", **over}
+    claims = {"iss": ISS, "aud": "whatever", "sub": "u", "exp": int(time.time()) + 60, "email": "a@b.c", "scope": "openid mcp", **over}
     return jwt.encode({k: v for k, v in claims.items() if v is not None}, KEY, algorithm="RS256")
 
 
@@ -37,7 +37,6 @@ def test_jwt():
     assert ok(_tok(scope="openid")) is None
     assert ok(_tok(iss="https://evil")) is None
     assert ok(_tok(exp=int(time.time()) - 5)) is None
-    assert ok(_tok(groups=[])) is None
     assert ok(_tok(email=None)) is None
 
 

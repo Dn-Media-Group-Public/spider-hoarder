@@ -66,15 +66,14 @@ dev hostnames would not work without TLS.)
 
 `keycloak/setup.sh` initializes a realm (`KC_REALM`, default `newsroom`), idempotently:
 
-- the group `ALLOWED_GROUP` (default `/investigations`) that gates MCP use and the live view;
-- two **realm-default client scopes**, so every client, including the ones Claude registers
-  dynamically, gets them: `MCP_SCOPE` (if set; the gateway requires it in the token's `scope` claim and advertises it so Claude requests it; `aud` is not checked) and `mcp-groups` (`groups`);
+- if `MCP_SCOPE` is set, a **realm-default client scope** of that name, so every client, including the ones Claude registers
+  dynamically, gets it ( the gateway requires it in the token's `scope` claim and advertises it so Claude requests it; `aud` is not checked);
 - the confidential client `O2P_CLIENT_ID` for the live-view login (oauth2-proxy);
 - **Dynamic Client Registration (DCR)** for Claude: anonymous registration is allowed, and the
   realm's *Trusted Hosts* policy only accepts redirect URIs on `claude.ai`, `claude.com` and
   `localhost` (Claude Code). Anything else (e.g. `https://evil.example/cb`) gets a 403;
 - **one user who can use spider-hoarder**: username `researcher`, password `researcher-pw`
-  (`KC_USER` / `KC_USER_PASSWORD`), in the allowed group. The password is reset to
+  (`KC_USER` / `KC_USER_PASSWORD`). The password is reset to
   `KC_USER_PASSWORD` on every run, so **change it in `.env` outside dev**.
 
 `--dev` runs it for you. For a real Keycloak run it once (re-run after changing `.env`), from
@@ -84,7 +83,7 @@ anywhere that can reach the admin API, using the script from the Keycloak image:
 set -a; source .env; set +a
 docker run --rm -v $PWD/keycloak:/s -e KC_URL=https://keycloak.example.org \
   -e KC_ADMIN=admin -e KC_ADMIN_PASSWORD=... -e KC_REALM -e KC_USER -e KC_USER_PASSWORD \
-  -e PUBLIC_HOST -e PUBLIC_SCHEME -e MCP_SCOPE -e ALLOWED_GROUP -e O2P_CLIENT_ID -e O2P_CLIENT_SECRET \
+  -e PUBLIC_HOST -e PUBLIC_SCHEME -e MCP_SCOPE -e O2P_CLIENT_ID -e O2P_CLIENT_SECRET \
   --entrypoint bash quay.io/keycloak/keycloak:26.0 /s/setup.sh
 ```
 

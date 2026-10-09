@@ -31,8 +31,7 @@ threading.Thread(target=srv.serve_forever, daemon=True).start()
 
 
 def token(email):
-    return jwt.encode({"iss": ISS, "aud": AUD, "sub": email, "email": email, "exp": int(time.time()) + 600,
-                       "groups": []}, key, algorithm="RS256", headers={"kid": "k1"})
+    return jwt.encode({"iss": ISS, "aud": AUD, "sub": email, "email": email, "exp": int(time.time()) + 600}, key, algorithm="RS256", headers={"kid": "k1"})
 
 
 async def call(cs, name, **args):
