@@ -44,7 +44,7 @@ services:
   nginx:
     image: nginx:1.27
     deploy: { replicas: 1, restart_policy: { condition: any } }
-    ports: ["80:80"]
+    ports: ["${HTTP_PORT}:80"]
     environment:
       GATEWAY_PORT: ${GATEWAY_PORT}
     volumes:

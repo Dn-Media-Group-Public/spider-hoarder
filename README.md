@@ -14,7 +14,7 @@ background in [newsroom-browsers-plan.md](docs/plans/newsroom-browsers-plan.md))
 ```bash
 cp .env.example .env   # fill in PUBLIC_HOST, OIDC_ISSUER and the secrets
 ./deploy.sh            # prod: builds the images and deploys the stack (Docker Swarm)
-./deploy.sh --dev      # local: same stack + a local Keycloak, http://localhost, no TLS
+./deploy.sh --dev      # local: same stack + a local Keycloak, http://localhost:7297, no TLS
 ```
 
 The stack is nginx, oauth2-proxy, `research-tor`, `research-clear` and `tor`. It only speaks
@@ -50,12 +50,12 @@ on every call, `main` being the shared default; see
 Adds `docker-compose.dev.yml`: a throwaway Keycloak (`start-dev`, no TLS) plus a `keycloak-init`
 job that runs `keycloak/setup.sh` against it, and `extra_hosts: localhost:host-gateway` so the
 gateways and oauth2-proxy reach it at the same `localhost` URL as your browser. Forces
-`PUBLIC_HOST=localhost`, `PUBLIC_SCHEME=http`, issuer `http://localhost:8085/realms/newsroom`
-(`KC_DEV_PORT` to change the port). Ports 80 and 8085 must be free.
+`PUBLIC_HOST=localhost:$HTTP_PORT`, `PUBLIC_SCHEME=http`, issuer `http://localhost:8085/realms/newsroom`
+(`KC_DEV_PORT` to change the port). Ports `HTTP_PORT` (7297) and 8085 must be free.
 
 | | |
 |---|---|
-| MCP | `http://localhost/clear/mcp`, `http://localhost/tor/mcp` |
+| MCP | `http://localhost:7297/clear/mcp`, `http://localhost:7297/tor/mcp` |
 | Keycloak admin console | <http://localhost:8085> — `admin` / `admin` |
 | **User that can use spider-hoarder** | **`researcher` / `researcher-pw`** |
 
@@ -104,7 +104,7 @@ of the egress you want, then sign in as the Keycloak user above (a consent scree
 **Claude Code:**
 
 ```bash
-claude mcp add --transport http spider-hoarder $PUBLIC_SCHEME://$PUBLIC_HOST/clear/mcp   # dev: http://localhost/clear/mcp
+claude mcp add --transport http spider-hoarder $PUBLIC_SCHEME://$PUBLIC_HOST/clear/mcp   # dev: http://localhost:7297/clear/mcp
 # then in Claude Code: /mcp -> spider-hoarder -> Authenticate (opens the Keycloak login)
 ```
 

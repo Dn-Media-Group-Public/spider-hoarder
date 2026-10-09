@@ -37,12 +37,12 @@ server {
 
     location = /healthz { return 200; }
 
-    location /oauth2/ { proxy_pass http://oauth2-proxy:4180; }
+    location /oauth2/ { set $o2p oauth2-proxy; proxy_pass http://$o2p:4180; }
 
     # Human SSO check. oauth2-proxy answers 202 + X-Auth-Request-Email, or 401.
     location = /_sso {
         internal;
-        proxy_pass http://oauth2-proxy:4180/oauth2/auth;
+        set $o2p oauth2-proxy; proxy_pass http://$o2p:4180/oauth2/auth;
         proxy_pass_request_body off;
         proxy_set_header Content-Length "";
         proxy_set_header Upgrade "";

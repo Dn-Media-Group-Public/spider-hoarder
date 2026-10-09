@@ -22,10 +22,10 @@ source "${ENV_FILE:-.env}"
 set +a
 
 FILES=(-c docker-compose.yml)
-REQUIRED=(PUBLIC_HOST OIDC_ISSUER MCP_AUDIENCE O2P_CLIENT_ID O2P_CLIENT_SECRET O2P_COOKIE_SECRET BLOB_TOKEN_SECRET GATEWAY_PORT)
+REQUIRED=(PUBLIC_HOST OIDC_ISSUER MCP_AUDIENCE O2P_CLIENT_ID O2P_CLIENT_SECRET O2P_COOKIE_SECRET BLOB_TOKEN_SECRET GATEWAY_PORT HTTP_PORT)
 if [ "$DEV" -eq 1 ]; then
   echo "Deploying in DEV mode (local Keycloak, http://localhost, no TLS)"
-  export PUBLIC_HOST=localhost PUBLIC_SCHEME=http
+  export PUBLIC_HOST=localhost:$HTTP_PORT PUBLIC_SCHEME=http
   export OIDC_ISSUER="http://localhost:${KC_DEV_PORT:-8085}/realms/${KC_REALM:-newsroom}"
   FILES+=(-c docker-compose.dev.yml)
   REQUIRED+=(KC_USER_PASSWORD)
