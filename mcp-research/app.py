@@ -74,6 +74,7 @@ EGRESS_NOTE = {
         "or fall back to the clear variant when anonymity is not needed."),
 }[EGRESS]
 
+_ENFORCED_SCOPES = [os.environ["MCP_SCOPE"]] if os.environ.get("MCP_SCOPE") else []
 mcp = FastMCP(
     name=f"mcp-research-{EGRESS}",
     instructions=(
@@ -91,7 +92,7 @@ mcp = FastMCP(
         OIDC_ISSUER, os.environ.get("MCP_SCOPE", ""),
         jwks_url=os.environ.get("OIDC_JWKS_URL", "")),  # optional: fetch keys over an internal address
     auth=AuthSettings(issuer_url=OIDC_ISSUER, resource_server_url=f"{SCHEME}://{PUBLIC_HOST}{MCP_PATH}",
-                      required_scopes=[os.environ["MCP_SCOPE"]] if os.environ.get("MCP_SCOPE") else None),  # advertised so Claude requests it
+                      required_scopes=["basic", *_ENFORCED_SCOPES]),  # = advertised; enforcement is narrowed below
     streamable_http_path=MCP_PATH,
     transport_security=TransportSecuritySettings(
         enable_dns_rebinding_protection=True,
@@ -544,9 +545,13 @@ class ReplicaSessions:
 
 
 app = mcp.streamable_http_app()
-for _r in app.routes:  # the MCP route's endpoint is the auth-wrapped streamable-http app
-    if getattr(_r, "path", None) == MCP_PATH:
-        _r.app = ReplicaSessions(_r.app)
+# The SDK both advertises and enforces required_scopes. We advertise "basic" too (a realm-default scope that
+# carries email, as Ariadne/Demeter do: Claude registers its client with exactly the advertised scopes, and
+# without it the token has no email claim) but enforce only MCP_SCOPE.
+for _r in app.routes:
+    if getattr(_r, "path", None) == MCP_PATH:  # RequireAuthMiddleware: wrap what is inside it so unauthenticated calls get its 401
+        _r.app.required_scopes = _ENFORCED_SCOPES
+        _r.app.app = ReplicaSessions(_r.app.app)
 _inner_lifespan = app.router.lifespan_context
 
 

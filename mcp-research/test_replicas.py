@@ -128,3 +128,22 @@ def test_foreign_job_id():
             app._key("a@x.y", bad); assert False, bad
         except ValueError as e:
             assert msg in str(e), (bad, e)
+
+
+def _mcp_route():
+    return next(r for r in app.app.routes if getattr(r, "path", None) == app.MCP_PATH)
+
+
+def test_unauthenticated_mcp_post_is_401_not_500():
+    """ReplicaSessions must sit inside RequireAuthMiddleware, else anonymous callers crash it (500)."""
+    from starlette.testclient import TestClient
+    r = TestClient(app.app, base_url=f"https://{app.PUBLIC_HOST}").post(app.MCP_PATH, json={})
+    assert r.status_code == 401 and "resource_metadata" in r.headers["www-authenticate"]
+    assert isinstance(_mcp_route().app.app, app.ReplicaSessions)
+
+
+def test_metadata_advertises_basic_and_enforced_scope():
+    from starlette.testclient import TestClient
+    r = TestClient(app.app, base_url=f"https://{app.PUBLIC_HOST}").get("/.well-known/oauth-protected-resource" + app.MCP_PATH)
+    assert "basic" in r.json()["scopes_supported"] and set(app._ENFORCED_SCOPES) <= set(r.json()["scopes_supported"])
+    assert _mcp_route().app.required_scopes == app._ENFORCED_SCOPES  # basic is advertised, not enforced
