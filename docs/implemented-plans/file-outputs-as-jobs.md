@@ -26,7 +26,8 @@ A proxied call becomes a job iff the upstream would write a file:
 - Any other tool that accepts `filename` (`browser_snapshot`, `browser_evaluate`,
   `browser_console_messages`, `browser_network_request`, `browser_network_requests`,
   `browser_run_code_unsafe`): only when the agent passes `filename`. Without it they
-  return inline as today.
+  return inline as today. **Superseded:** `browser_snapshot`, `browser_find`, `browser_evaluate`, console and
+  network tools are now always jobs (default names `snapshot.yml`, `matches.txt`, ...). See also: [Plan: jobs for all tools](../implemented-plans/jobs-for-all-tools.md).
 
 The set is a constant in `app.py` (`FILE_TOOLS`: name -> always|if-filename).
 

@@ -36,6 +36,7 @@ import fetch
 import ports
 import sessions
 import storage
+from toolserver.textcap import DEFAULT_TEXT_CAP
 
 EGRESS = sessions.EGRESS
 DEFAULT_TEXT_LENGTH = 20000  # chars; keeps get_file_text results LLM-sized
@@ -47,15 +48,21 @@ MCP_PATH = f"/{EGRESS}/mcp"
 UPLOAD_MARK = "@upload"  # blobtoken path marking an upload-link token (never a real file path)
 INLINE_LIMIT = 50_000
 MAX_FILE_BYTES = int(os.environ.get("MAX_FILE_BYTES", 50 * 1024 * 1024))
-# Proxied tools whose upstream writes a file: name -> default job-internal file name when the agent gives no
-# `filename`; None = only a file when the agent passes `filename`, else it returns inline as upstream does.
+# Proxied tools whose output is a file in a job: name -> default job-internal file name when the agent gives
+# no `filename`.
 FILE_TOOLS = {
     "browser_take_screenshot": "screenshot.png", "browser_pdf_save": "page.pdf",
-    "browser_snapshot": None, "browser_evaluate": None, "browser_console_messages": None,
-    "browser_network_request": None, "browser_network_requests": None, "browser_storage_state": "storage-state.json",
+    "browser_snapshot": "snapshot.yml", "browser_find": "matches.txt", "browser_evaluate": "evaluate.json",
+    "browser_console_messages": "console.txt", "browser_network_request": "network-request.txt",
+    "browser_network_requests": "network-requests.txt", "browser_storage_state": "storage-state.json",
 }
-FILE_TOOLS_NOTE = ("\n\nWhen this writes a file, the result is {job_id, files, text?}; fetch with get_file_text / "
-                   "get_file_url. `filename` only names the file inside the job.")
+CAPPED_TOOLS = ("browser_snapshot", "browser_find")  # take `text_cap`
+FILE_TOOLS_NOTE = ("\n\nThe result is {job_id, files, text?}: `text` is the content if small, else page through it "
+                   "with get_file_text or search it with grep_file; get_file_url for a link. `filename` only names "
+                   "the file inside the job.")
+CAPPED_NOTE = (" Refs stay valid until the page re-renders or navigates: after an action that changes the page, "
+               "call browser_find / browser_snapshot again (actions no longer return a snapshot). "
+               "`text_cap` cuts long text nodes (default 128 characters, null = no cap).")
 
 RID = sessions.RID
 _RID_PREFIX = re.compile(r"^([0-9]+-[0-9]+-[0-9]+-[0-9]+)\.")
@@ -85,8 +92,10 @@ mcp = FastMCP(
         "Use the browser_* tools to browse. When a page shows a CAPTCHA, bot check, login wall or cookie wall "
         "you cannot get past, call browser_request_human_help, show the user the link, and wait for them to "
         "confirm before continuing. browser_save_page parses and stores the current page; ingest_page does a "
-        "one-shot fetch of a URL. Tools that write files (screenshots, PDFs, anything given a `filename`) return "
-        "{job_id, files, text?} instead; fetch them with list_files / get_file_text / get_file_url. "
+        "one-shot fetch of a URL. Tools with bulk output (snapshots, finds, screenshots, PDFs, evaluate, console, network) return "
+        "{job_id, files, text?}; text is inline only when small, otherwise use get_file_text to page or grep_file to "
+        "search, or list_files / get_file_url. Refs from browser_snapshot / browser_find stay valid until the page "
+        "re-renders or navigates; actions do not return a snapshot, so call browser_find again after one. "
         "terse/<name>.md is an outline (headings, links, images) of parsed/<name>.md; simplified/<name>.md is an "
         "automatic main-content extraction that may omit text. Before browser_save_page, use browser_find to "
         "locate the main content element and pass its ref as `target`. "
@@ -152,6 +161,17 @@ EXTRA_TOOLS = [
                description="Return one parsed file's Markdown text inline, or a slice of it "
                "(offset/length in characters). If truncated, a header gives the total size and the next offset. "
                "terse/<name>.md is an outline (headings, links, images) of parsed/<name>.md."),
+    types.Tool(name="grep_file", inputSchema={
+                   "type": "object", "required": ["job_id", "path", "pattern"],
+                   "properties": {
+                       "job_id": {"type": "string", "description": "Job id"},
+                       "path": {"type": "string", "description": "Text file path from the manifest"},
+                       "pattern": {"type": "string", "description": "Python regular expression, or /pattern/i for case-insensitive"},
+                       "context": {"type": "integer", "minimum": 0, "default": 2, "description": "Lines of context around each match (default 2)"},
+                       "max_matches": {"type": "integer", "minimum": 1, "default": 50, "description": "Max matches to show (default 50)"}}},
+               description="Search one text file of a job (e.g. a stored snapshot, matches or parsed page) with a regular "
+               "expression. Returns matching lines with context, line numbers and the character offset of each block "
+               "(usable as get_file_text offset). Binary files are refused."),
     types.Tool(name="get_file_url", inputSchema=_schema(job_id="Job id", path="File path from the manifest"),
                description="Mint a short-lived opaque signed URL for one blob (original or parsed)."),
 ]
@@ -236,8 +256,8 @@ def _read_out(uid: int, name: str) -> bytes:
     component is opened O_NOFOLLOW relative to the previous fd (a session owns out/ and could swap it for
     a symlink), O_NONBLOCK so a planted FIFO cannot hang us, regular files only, size-capped."""
     fds = []
-    try:
-        fds.append(os.open(ports.home(uid), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW))
+    try:  # O_PATH: the session home is 0o710 (traverse only), which O_RDONLY cannot open
+        fds.append(os.open(ports.home(uid), os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW))
         fds.append(os.open("out", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fds[-1]))
         fds.append(os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fds[-1]))
         st = os.fstat(fds[-1])
@@ -276,12 +296,9 @@ def _store_file(key: str, name: str, raw: bytes) -> dict:
     return _job_result(key)
 
 
-async def _file_tool(bs: sessions.BrowserSession, name: str, arguments: dict) -> types.CallToolResult | None:
-    """Run a file-writing upstream tool; the file ends up under a new job_id. None = not a file call."""
-    default = FILE_TOOLS[name]
-    if default is None and not arguments.get("filename"):
-        return None
-    jname = _job_name(arguments.get("filename"), default or "output")
+async def _file_tool(bs: sessions.BrowserSession, name: str, arguments: dict) -> types.CallToolResult:
+    """Run a file-producing upstream tool; the file ends up under a new job_id."""
+    jname = _job_name(arguments.get("filename"), FILE_TOOLS[name])
     job_id = _new_job_id()
     private = f"{uuid.uuid4()}-{jname}"  # gateway-chosen, relative: lands in out/, never an agent-chosen path
     res = await bs.client.call_tool(name, {**arguments, "filename": private})
@@ -291,7 +308,17 @@ async def _file_tool(bs: sessions.BrowserSession, name: str, arguments: dict) ->
         raw = await asyncio.to_thread(_read_out, bs.uid, private)
     except (OSError, ValueError) as e:
         return _text(f"{name} produced no readable output file ({e}). Upstream said: {sessions.result_text(res)}", True)
-    return _text(json.dumps({"job_id": job_id, **_store_file(_key(bs.owner, job_id), jname, raw)}))
+    key = _key(bs.owner, job_id)
+    result = _store_file(key, jname, raw)
+    meta = {}
+    if name in CAPPED_TOOLS:
+        m = re.search(r"^- Page URL: (.+)$", sessions.result_text(res), re.M)
+        meta = {"url": m and m.group(1), "target": arguments.get("target"), "depth": arguments.get("depth"),
+                "text_cap": arguments.get("text_cap", DEFAULT_TEXT_CAP)}
+        if name == "browser_find":
+            meta["query"] = {k: arguments[k] for k in ("text", "regex") if arguments.get(k)}
+    storage.set_meta(key, keep_none=("text_cap",), **meta)
+    return _text(json.dumps({"job_id": job_id, **result}))
 
 
 async def _ingest_page(owner: str, url: str, live: sessions.BrowserSession | None = None, target: str | None = None) -> dict:
@@ -333,8 +360,8 @@ def _text(msg: str, error: bool = False) -> types.CallToolResult:
 async def list_tools() -> list[types.Tool]:
     own = {t.name for t in EXTRA_TOOLS}  # the gateway's versions replace the upstream ones of the same name
     tools = [t for t in await sessions.upstream_tools() if t.name not in HIDDEN | own]
-    tools = [t.model_copy(update={"description": (t.description or "") + FILE_TOOLS_NOTE}) if t.name in FILE_TOOLS else t
-             for t in tools]
+    tools = [t.model_copy(update={"description": (t.description or "") + FILE_TOOLS_NOTE + (CAPPED_NOTE if t.name in CAPPED_TOOLS else "")})
+             if t.name in FILE_TOOLS else t for t in tools]
     tools = [t.model_copy(update={"description": f"[{EGRESS.upper()}] {EGRESS_NOTE}\n\n{t.description or ''}"}) if t.name == "browser_navigate" else t
              for t in tools]
     return tools + EXTRA_TOOLS
@@ -363,13 +390,20 @@ async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
             job_id = _new_job_id()
             token = blobtoken.mint(_key(owner, job_id), UPLOAD_MARK, ttl=3600)
             return _text(json.dumps({"url": f"{BASE}/upload/{RID}/{token}", "job_id": job_id}))
-        if name in ("list_files", "get_file_text", "get_file_url"):
+        if name in ("list_files", "get_file_text", "get_file_url", "grep_file"):
             key = _key(owner, args["job_id"])
             if name == "list_files":
                 return _text(json.dumps(storage.get_manifest(key)))
             path = _check_rel_path(args["path"])
             if not storage.exists(key, path):
                 return _text("file not found", True)
+            if name == "grep_file":
+                raw = storage.read_bytes(key, path)
+                if b"\0" in raw[:1024]:
+                    return _text("binary file: grep_file only searches text files", True)
+                return _text(extract.grep_text(
+                    raw.decode("utf-8", errors="replace"), args["pattern"], int(args.get("context", 2)),
+                    int(args.get("max_matches", 50)), limit=INLINE_LIMIT))
             if name == "get_file_text":
                 text = storage.read_text(key, path)
                 off = max(int(args.get("offset") or 0), 0)
@@ -397,8 +431,8 @@ async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
                 "Do not take further browser actions until the user confirms they are done.")
         if name == "browser_save_page":
             return _text(json.dumps(await _save_page(bs, args.get("browser"), args.get("target"))))
-        if name in FILE_TOOLS and (res := await _file_tool(bs, name, args)):
-            return res
+        if name in FILE_TOOLS:
+            return await _file_tool(bs, name, args)
         return await bs.client.call_tool(name, arguments)
     except Exception as e:  # noqa: BLE001
         return _text(f"{type(e).__name__}: {e}", True)

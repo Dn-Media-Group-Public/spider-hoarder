@@ -8,6 +8,7 @@ import os
 import re
 import threading
 import time
+from urllib.parse import quote
 from functools import partial
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 
@@ -37,6 +38,8 @@ def token(email):
 async def call(cs, name, **args):
     r = await cs.call_tool(name, args)
     text = "".join(c.text for c in r.content if hasattr(c, "text"))
+    if r.isError:
+        print("ERROR", name, text[:300])
     return r.isError, text
 
 
@@ -52,18 +55,59 @@ async def main():
 
             err, text = await call(cs, "ingest_page", url="https://example.com")
             ing = json.loads(text)
-            print("ingest_page:", err, ing["files"][0]["path"], "Example Domain" in ing.get("text", ""))
+            print("ingest_page:", err, ing["files"][0]["path"], "This domain" in ing.get("text", ""))
 
             err, text = await call(cs, "browser_navigate", url="https://example.org")
             err, text = await call(cs, "browser_save_page")
             saved = json.loads(text)
-            print("save_page:", err, "Example Domain" in saved.get("text", ""))
-            err, text = await call(cs, "browser_save_page", target="h1")
+            print("save_page:", err, "This domain" in saved.get("text", ""))
+            err, text = await call(cs, "browser_save_page", target="p:nth-of-type(1)")
             saved = json.loads(text)
-            print("save_page target:", err, saved.get("target"), saved.get("url"), "Example Domain" in saved.get("text", ""), "More information" not in saved.get("text", ""))
+            print("save_page target:", err, saved.get("target"), saved.get("url"), "This domain" in saved.get("text", ""), "Данный" not in saved.get("text", ""))
+
+            # jobs for all tools (a data: page: no internet dependence): navigate, find, click by ref, find again, grep
+            page = "data:text/html," + quote("<title>E2E</title><p>" + "word " * 100 + "NEEDLE " + "tail " * 100 + "</p><button onclick=\"document.title='clicked';document.body.insertAdjacentHTML('beforeend','<a href=#x>Fresh link</a>')\">Go</button>")
+            err, text = await call(cs, "browser_navigate", url=page)
+            assert not err and "### Page" in text and "Snapshot" not in text, text  # no post-action snapshot
+            err, text = await call(cs, "browser_find", text="needle")
+            found = json.loads(text)
+            m = json.loads((await call(cs, "list_files", job_id=found["job_id"]))[1])
+            print("find job:", found["files"][0]["path"], m["url"][:20], m["text_cap"], m["query"])
+            assert found["files"][0]["path"] == "original/matches.txt" and m["text_cap"] == 128 and m["query"] == {"text": "needle"}
+            assert m["url"].startswith("data:text/html") and "NEEDLE" in found["text"] and "..." in found["text"]  # window around the match
+            err, text = await call(cs, "browser_find", text="go")
+            ref = re.search(r'button "Go".*?\[ref=((?:f\d+)?e\d+)\]', json.loads(text)["text"]).group(1)
+            err, text = await call(cs, "browser_snapshot", text_cap=None, depth=3)
+            snap = json.loads(text)
+            m = json.loads((await call(cs, "list_files", job_id=snap["job_id"]))[1])
+            assert snap["files"][0]["path"] == "original/snapshot.yml" and m["text_cap"] is None and m["depth"] == 3, m
+            assert "NEEDLE" in snap["text"]
+            err, text = await call(cs, "browser_snapshot")
+            capped = json.loads(text)
+            assert "NEEDLE" not in capped["text"] and "..." in capped["text"]
+            err, text = await call(cs, "grep_file", job_id=snap["job_id"], path="original/snapshot.yml", pattern="/needle/i", context=0)
+            print("grep_file:", err, text[:120].replace("\n", " | "))
+            assert not err and "NEEDLE" in text and text.startswith("-- line 2, offset ")
+            err, text = await call(cs, "grep_file", job_id=snap["job_id"], path="original/snapshot.yml", pattern="(")
+            assert err
+            err, text = await call(cs, "browser_click", target=ref)
+            assert not err and "Page Title: clicked" in text and "Snapshot" not in text, text
+            err, text = await call(cs, "browser_find", text="fresh link")
+            assert "Fresh link" in json.loads(text)["text"]
+            err, text = await call(cs, "browser_click", target=ref)  # a ref survives an action that changes the page
+            assert not err
+            err, text = await call(cs, "browser_navigate", url="data:text/html,<title>other</title><p>x</p>")
+            err, text = await call(cs, "browser_click", target=ref)  # stale after navigation
+            print("stale ref:", err, text[:80])
+            assert err and "not found" in text
+            err, text = await call(cs, "browser_evaluate", function="() => 1+1")
+            assert json.loads(text)["text"] == "2"
+            err, text = await call(cs, "get_file_text", job_id=snap["job_id"], path="original/snapshot.yml", offset=0, length=30)
+            assert text.startswith("[Showing characters 0-30")
+            err, text = await call(cs, "browser_navigate", url="https://example.org")
 
             err, text = await call(cs, "browser_request_human_help", reason="solve the captcha")
-            view = re.search(r"/clear/view/([A-Za-z0-9_-]+)/start", text).group(1)
+            view = re.search(r"/clear/view/([0-9-]+/[A-Za-z0-9_-]+)/start", text).group(1)
             h = lambda email, **x: {"x-auth-request-email": email, **x}
             uri = f"/clear/view/{view}/vnc.html"
             ok = requests.get(f"{HOST}/authz", headers=h(alice, **{"x-forwarded-uri": uri}))
@@ -81,7 +125,7 @@ async def main():
             err, text = await call(cs, "list_files", job_id=up["job_id"])
             print("uploaded:", [f["path"] for f in json.loads(text)["files"]])
             err, text = await call(cs, "get_file_text", job_id=up["job_id"], path="parsed/note.txt.md")
-            print("file text:", json.loads(text))
+            print("file text:", text)
             err, text = await call(cs, "get_file_url", job_id=up["job_id"], path="parsed/note.txt.md")
             blob = requests.get(json.loads(text)["url"].replace("https://localhost:8000", HOST))
             print("blob:", blob.status_code, blob.text)

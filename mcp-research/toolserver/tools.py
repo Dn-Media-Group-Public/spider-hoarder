@@ -1,5 +1,5 @@
 """The tool set. Each handler is `async (R, bid, args) -> str` returning response sections
-(`### Result`, `### Page`, `### Snapshot`; errors are raised and formatted by server.py).
+(`### Result`, `### Page`; errors are raised and formatted by server.py).
 Schemas for the playwright-mcp tools come from golden_tools.json (0.0.83), see server.py."""
 
 import asyncio
@@ -12,6 +12,7 @@ import time
 from playwright.async_api import Error as PWError
 
 from .browsers import MAIN, Registry, ToolError, locator
+from .textcap import DEFAULT_TEXT_CAP, cap_found_line, cap_snapshot
 
 OUT = os.environ.get("TOOLSERVER_OUT", "out")
 ACT_TIMEOUT = 10_000  # ms; a stale ref or hidden element fails fast
@@ -63,7 +64,8 @@ async def snapshot_text(page, target=None, depth=None, boxes=None) -> str:
 
 
 async def post(R: Registry, bid: str, text: str = "") -> str:
-    """Response after an action: optional result, page, modal state and the snapshot as a linked file."""
+    """Response after an action: optional result, page and modal state. No snapshot: refs come from
+    browser_snapshot / browser_find."""
     await R.settle()
     page = R.page(bid)
     st = R.state.get(page)
@@ -71,12 +73,6 @@ async def post(R: Registry, bid: str, text: str = "") -> str:
     if st and (st.dialog or st.chooser):
         out += "### Modal state\n" + (f"- [{st.dialog.type} dialog]: {st.dialog.message!r} (use browser_handle_dialog)\n" if st.dialog else "") \
             + ("- [file chooser] (use browser_file_upload)\n" if st.chooser else "")
-        return out
-    try:
-        name = write_out(stamp("yml"), await snapshot_text(page))
-        out += f"### Snapshot\n- [Snapshot](out/{name})\n"
-    except PWError:
-        pass
     return out
 
 
@@ -92,7 +88,8 @@ async def act(page, target, fn):
     try:
         return await fn(l.first if not re.match(r"^(f\d+)?e\d+$", target) else l)
     except PWError as e:
-        if "Timeout" in str(e) and re.match(r"^(f\d+)?e\d+$", target) and await l.count() == 0:
+        is_ref = re.match(r"^(f\d+)?e\d+$", target)
+        if is_ref and ("Invalid frame in aria-ref" in str(e) or "Timeout" in str(e) and await l.count() == 0):  # stale ref: its frame is gone, or nothing matches
             raise ToolError(f"Ref {target} not found in the current page snapshot. Try capturing new snapshot.")
         raise
 
@@ -134,10 +131,20 @@ async def resize(R, bid, a):
 
 
 # --------------------------------------------------------------- interaction
+def text_cap(a) -> int | None:
+    """`text_cap`: omitted = default, null = no cap."""
+    cap = a.get("text_cap", DEFAULT_TEXT_CAP)
+    if cap is None:
+        return None
+    if int(cap) < 1:
+        raise ToolError("text_cap must be at least 1, or null for no cap")
+    return int(cap)
+
+
 @tool("browser_snapshot")
 async def snapshot(R, bid, a):
     page = R.page(bid)
-    snap = await snapshot_text(page, a.get("target"), a.get("depth"), a.get("boxes"))
+    snap = cap_snapshot(await snapshot_text(page, a.get("target"), a.get("depth"), a.get("boxes")), text_cap(a))
     if a.get("filename"):
         return await page_info(page) + f"### Snapshot\n- [Snapshot](out/{write_out(a['filename'], snap)})\n"
     return await page_info(page) + f"### Snapshot\n```yaml\n{snap}\n```\n"
@@ -158,12 +165,15 @@ def _ancestors(lines: list[str], indents: list[int], index: int) -> list[int]:
     return out[::-1]
 
 
-def find_snippets(snap: str, match, query: str) -> str:
+def find_snippets(snap: str, match, query: str, cap: int | None = None) -> str:
     """Matching snapshot lines with FIND_CONTEXT lines of context, each window under its ancestor chain
-    (the lines that enclose it, so the refs of its containers are visible); `...` marks skipped lines."""
+    (the lines that enclose it, so the refs of its containers are visible); `...` marks skipped lines.
+    `match(line)` is falsy, or truthy (a (start, end) tuple centers the `cap` window on the match)."""
     lines = snap.split("\n")
     indents = [len(l) - len(l.lstrip()) for l in lines]
-    hits = [i for i, l in enumerate(lines) if match(l)]
+    found = {i: match(l) for i, l in enumerate(lines)}
+    hits = [i for i, r in found.items() if r]
+    spans = {i: found[i] if isinstance(found[i], tuple) else None for i in hits}
     if not hits:
         return f"No matches found for {query}."
     windows: list[list[int]] = []
@@ -181,7 +191,7 @@ def find_snippets(snap: str, match, query: str) -> str:
         for k, i in enumerate(idx):
             if k and i > idx[k - 1] + 1 and i not in on_path and idx[k - 1] not in on_path:
                 rows.append(" " * indents[i] + "...")
-            rows.append(lines[i])
+            rows.append(cap_found_line(lines[i], spans.get(i), cap))
         snippets.append("\n".join(rows))
     return f"Found {len(hits)} {'match' if len(hits) == 1 else 'matches'} for {query}:\n\n" + "\n\n----\n\n".join(snippets)
 
@@ -193,15 +203,16 @@ async def find(R, bid, a):
     snap = await snapshot_text(R.page(bid))
     if a.get("text"):
         needle = a["text"].lower()
-        match, query = (lambda l: needle in l.lower()), f'"{a["text"]}"'
+        match, query = (lambda l: (j, j + len(needle)) if (j := l.lower().find(needle)) >= 0 else None), f'"{a["text"]}"'
     else:
         m = re.fullmatch(r"/(.*)/([a-z]*)", a["regex"], re.S)
         rx = re.compile(m.group(1) if m else a["regex"], re.I if m and "i" in m.group(2) else 0)
-        match, query = rx.search, f"/{m.group(1) if m else a['regex']}/{m.group(2) if m else ''}"
-    body = find_snippets(snap, match, query)
+        match, query = (lambda l: m_.span() if (m_ := rx.search(l)) else None), f"/{m.group(1) if m else a['regex']}/{m.group(2) if m else ''}"
+    body = find_snippets(snap, match, query, text_cap(a))
+    page = await page_info(R.page(bid))
     if a.get("filename"):
-        return file_result("Matches", write_out(a["filename"], body))
-    return result(body)
+        return page + file_result("Matches", write_out(a["filename"], body))
+    return page + result(body)
 
 
 @tool("browser_click")

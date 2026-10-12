@@ -54,6 +54,8 @@ def test_schemas_match_golden():
         if n in ours:
             props = dict(ours[n].inputSchema["properties"])
             assert props.pop("browser")
+            if n in ("browser_snapshot", "browser_find"):
+                assert props.pop("text_cap")["default"] == 128
             assert props == g["inputSchema"].get("properties", {}), n
     assert {"browser_start_session", "browser_cookie_list", "browser_localstorage_set", "browser_set_storage_state"} <= set(ours)
     assert len([n for n in ours if "cookie" in n or "storage" in n]) == 17
@@ -63,7 +65,8 @@ def test_schemas_match_golden():
 def test_interaction_and_refs(env):
     R = env
     out = call(R, "browser_navigate", url=PAGE)
-    assert "### Page" in out and "[Snapshot](out/page-" in out and "Ran Playwright" not in out
+    assert "### Page" in out and "Snapshot" not in out and "Ran Playwright" not in out
+    assert not [f for f in os.listdir(tools.OUT) if f.startswith("page-")]  # no post-action snapshot file
     snap = call(R, "browser_snapshot")
     assert '```yaml' in snap and 'button "Go"' in snap
     ref = [l for l in snap.splitlines() if 'button "Go"' in l][0].split("[ref=")[1].split("]")[0]
@@ -112,9 +115,33 @@ def test_find_via_tool(env):
     R = env
     call(R, "browser_navigate", url=PAGE)
     out = call(R, "browser_find", text="go")
-    assert out.startswith("### Result\nFound 1 match for \"go\":") and 'button "Go"' in out
+    assert out.startswith("### Page\n- Page URL: ") and "### Result\nFound 1 match for \"go\":" in out and 'button "Go"' in out
     assert "Found 1 match for /GO/i:" in call(R, "browser_find", regex="/GO/i")
     assert "No matches found" in call(R, "browser_find", text="nothing-like-this")
+
+
+def test_find_refs_survive_actions_and_fail_after_navigation(env):
+    R = env
+    call(R, "browser_navigate", url=PAGE)
+    ref = lambda out, label: out.split(label, 1)[1].split("[ref=")[1].split("]")[0]
+    go = ref(call(R, "browser_find", text="Go"), 'button "Go"')
+    call(R, "browser_evaluate", function="() => document.body.insertAdjacentHTML('beforeend', '<button>New</button>')")
+    assert 'button "New"' in call(R, "browser_find", text="New")
+    assert "Page Title: clicked" in call(R, "browser_click", target=go)  # the old ref still resolves
+    call(R, "browser_navigate", url="data:text/html,<title>other</title><button>x</button>")
+    with pytest.raises(tools.ToolError, match="not found in the current page snapshot"):
+        call(R, "browser_click", target=go)
+
+
+def test_text_cap_via_tools(env):
+    R = env
+    call(R, "browser_navigate", url="data:text/html,<p>" + "word " * 100 + "NEEDLE " + "tail " * 100 + "</p>")
+    assert "..." in call(R, "browser_snapshot") and "NEEDLE" not in call(R, "browser_snapshot")
+    assert "NEEDLE" in call(R, "browser_snapshot", text_cap=None)
+    out = call(R, "browser_find", text="needle", text_cap=40)
+    assert "...NEEDLE" in out or "NEEDLE" in out and out.count("...") == 2, out  # window around the match
+    with pytest.raises(tools.ToolError):
+        call(R, "browser_snapshot", text_cap=0)
 
 
 def test_file_outputs(env, tmp_path):

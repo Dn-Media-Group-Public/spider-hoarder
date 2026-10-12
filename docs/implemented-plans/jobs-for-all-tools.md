@@ -23,6 +23,12 @@ Depends on [save-page-target.md](save-page-target.md) for `storage.set_meta` and
    for reading needs the read bit. Reproduced locally: `O_RDONLY|O_DIRECTORY` on an x-only directory fails with
    `EACCES`; `O_PATH|O_DIRECTORY|O_NOFOLLOW` succeeds, and `openat` through it reads `out/` and its files.
 
+> **Implementation note (problem 5):** the `O_PATH` fix was necessary but not sufficient. `sessiond` did `chown` then
+> `chmod 2750` on `out/`; without CAP_FSETID the kernel drops the setgid bit when the caller is not in the directory's
+> group, so session files came out group `<uid>` instead of `gw-collect` and the gateway could not read them. `sessiond`
+> now does `chmod` first (while `out/` is still in its own group) and `chown` after; no capability is added.
+> `test_sessiond.py` must be run with the deployed capability set to catch this (see README).
+
 Goal: every tool that returns bulk text returns a job, with inline text only under the existing limit; snapshots
 and finds get a text cap so navigation output stays small; stored files are searchable; refs come only from the
 tools the client calls.

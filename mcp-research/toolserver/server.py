@@ -11,6 +11,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from playwright.async_api import Error as PWError
 
 from . import tools
+from .textcap import DEFAULT_TEXT_CAP
 from .browsers import launch
 
 GOLDEN = os.path.join(os.path.dirname(__file__), "..", "golden_tools.json")  # playwright-mcp 0.0.83
@@ -20,6 +21,10 @@ BROWSER = {"type": "string", "description": (
     "Browser id returned by browser_start_session. Omit to use the shared 'main' browser, which belongs to the "
     "main agent and the human: if you are a subagent, never use 'main'; call browser_start_session first and "
     "pass the id it returns on every call.")}
+TEXT_CAP = {"type": ["integer", "null"], "minimum": 1, "default": DEFAULT_TEXT_CAP, "description": (
+    f"Cut every pure text node (`- text: …`, `paragraph [ref=…]: …`) to this many characters, adding `...` "
+    f"(default {DEFAULT_TEXT_CAP}); null = no cap. Names (`link \"…\"`) are never cut. For browser_find the match is "
+    "searched in the full text and the shown text is cut to a window around it.")}
 s_, i_, b_ = {"type": "string"}, {"type": "integer"}, {"type": "boolean"}
 
 
@@ -62,7 +67,8 @@ def build_tools() -> list[types.Tool]:
     for t in json.load(open(GOLDEN)):
         if t["name"] in DROPPED:
             continue
-        sch = {**t["inputSchema"], "properties": {**t["inputSchema"].get("properties", {}), "browser": BROWSER}}
+        extra = {"text_cap": TEXT_CAP} if t["name"] in ("browser_snapshot", "browser_find") else {}
+        sch = {**t["inputSchema"], "properties": {**t["inputSchema"].get("properties", {}), **extra, "browser": BROWSER}}
         out.append(types.Tool(name=t["name"], description=t.get("description", ""), inputSchema=sch))
     for name, (desc, sch, with_browser) in NEW.items():
         sch = {**sch, "properties": {**sch["properties"], **({"browser": BROWSER} if with_browser else {})}}

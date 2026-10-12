@@ -215,7 +215,10 @@ Deviations and details settled while implementing:
 - **Schemas:** the 25 kept tools are served from `mcp-research/golden_tools.json` (captured from `@playwright/mcp` 0.0.83
   with `--caps pdf`, 26 tools incl. `browser_run_code_unsafe`) plus a `browser` property; `test_toolserver.py` checks them against it.
 - **Snapshot delivery** (derived detail 1): as before, post-action responses link `- [Snapshot](out/page-<ts>.yml)`; an explicit
-  `browser_snapshot` inlines a yaml block unless given `filename`.
+  `browser_snapshot` inlines a yaml block unless given `filename`. **Superseded:** post-action responses no longer carry a
+  snapshot (only `### Page` and modal state); `browser_snapshot` / `browser_find` gain `text_cap` (default 128, null = none; cuts
+  pure text nodes, `find` centers the window on the match) and `browser_find` also returns `### Page`. The gateway always
+  stores their output as a job. See also: [Plan: jobs for all tools](../implemented-plans/jobs-for-all-tools.md).
 - **`browser_set_storage_state`** (2): takes the state inline as `state` (object or JSON string).
 - **Closing `main`** (3): `browser_end_session(browser="main")` follows the last-browser rule. `browser_close` on the last tab of the
   last browser navigates it to `about:blank` instead of closing it (headed Chromium exits with its last window and would kill the

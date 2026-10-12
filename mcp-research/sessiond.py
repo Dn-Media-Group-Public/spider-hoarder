@@ -154,8 +154,8 @@ def start(uid: int, env: dict, files: dict) -> None:
         os.chmod(home, 0o710)  # gateway may traverse to out/, not list the home
         out = os.path.join(home, "out")  # file outputs the gateway copies into blob storage
         os.mkdir(out)
-        os.chown(out, uid, GW_COLLECT_GID)
-        os.chmod(out, 0o2750)  # setgid: files created inside inherit gw-collect
+        os.chmod(out, 0o2750)  # setgid: files created inside inherit gw-collect. Before the chown: while out/ is still in
+        os.chown(out, uid, GW_COLLECT_GID)  # our own group the bit sticks (no CAP_FSETID needed); chown keeps it on directories
         for name, content in files.items():
             if "/" in name or name.startswith("."):
                 raise ValueError(f"bad file name {name!r}")

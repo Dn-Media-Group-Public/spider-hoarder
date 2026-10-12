@@ -121,6 +121,12 @@ blocks Tor.
 ```bash
 cd mcp-research
 python test_pool.py && python test_security.py && python test_gateway.py   # host
-# needs root + the image's tools:
-docker run --rm -v $PWD:/app -w /app --entrypoint python mcp-research:local test_sessiond.py
+# needs root + the image's tools; run with the deployed capability set, plain root hides permission bugs:
+docker run --rm --cap-drop ALL --cap-add NET_ADMIN --cap-add SETUID --cap-add SETGID --cap-add CHOWN --cap-add KILL \
+  --cap-add DAC_OVERRIDE --cap-add FOWNER -v $PWD:/app -w /app --entrypoint python mcp-research:local test_sessiond.py
+# end to end (stub Keycloak inside one container; restart it per run, the gateway caches the signing key):
+docker run -d --name e2e --add-host nginx:172.17.0.1 <same caps> -e EGRESS=clear -e GATEWAY_PORT=8000 \
+  -e PUBLIC_HOST=localhost:8000 -e PUBLIC_SCHEME=https -e OIDC_ISSUER=http://127.0.0.1:9999/realms/r \
+  -e BLOB_TOKEN_SECRET=x mcp-research:local
+docker exec -u 1000 -w /app e2e python e2e_auth.py
 ```

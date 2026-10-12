@@ -110,7 +110,7 @@ storage URL, e.g. `gs://bucket/prefix`):
     report.pdf.md                # e.g. for a zip: same relative paths, +.md
     subdir/notes.docx.md
   simplified/**                  # trafilatura guess for HTML jobs (may omit text)
-  index.json                     # manifest: files, plus optional url/target for page jobs (See also: [Plan: save-page target](../implemented-plans/save-page-target.md))
+  index.json                     # manifest: files, plus optional url/target for page jobs (See also: [Plan: save-page target](../implemented-plans/save-page-target.md)); snapshot/find jobs also `depth`, `text_cap`, `query` (See also: [Plan: jobs for all tools](../implemented-plans/jobs-for-all-tools.md))
 ```
 
 Deployment will most likely use GCS with a service-account credential
@@ -126,6 +126,7 @@ needed later, it's a bucket lifecycle rule, not app code.
 | `get_upload_link()` | Mints a job UUID, returns `{url, job_id}`. |
 | `list_files(job_id)` | Returns that job's `index.json`. |
 | `get_file_text(job_id, path)` | Returns one parsed file's Markdown inline — for small files the agent wants to read directly. Also serves `terse/<name>.md` outlines. See also: [Plan: Terse outline view](../implemented-plans/terse-view.md) |
+| `grep_file(job_id, path, pattern, context=2, max_matches=50)` | Regex search of one text file: matching lines with context, line numbers and character offsets (for `get_file_text`). See also: [Plan: jobs for all tools](../implemented-plans/jobs-for-all-tools.md) |
 | `get_file_url(job_id, path)` | Mints a short-lived **opaque** signed URL for one blob (original or parsed) — for large files the agent wants to hand to Ariadne by reference instead of pasting inline. |
 
 All file-producing tools (screenshots, PDFs, any `filename=` output) also return `{job_id, files, text?}`. See also: [Plan: Tool file outputs become jobs](../implemented-plans/file-outputs-as-jobs.md)

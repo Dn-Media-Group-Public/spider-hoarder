@@ -109,6 +109,9 @@ def test_file_outputs():
             app._read_out(1, bad); assert False, bad
         except (ValueError, OSError):
             pass
+    os.chmod(home, 0o100)  # sessiond's home is traverse-only for the gateway: still readable via O_PATH
+    assert app._read_out(1, "ok.txt") == b"hi"
+    os.chmod(home, 0o700)
     shutil.move(home + "/out", home + "/real"); os.symlink(home + "/real", home + "/out")  # swapped out/ dir
     try:
         app._read_out(1, "ok.txt"); assert False
@@ -126,6 +129,85 @@ def test_file_outputs():
     assert r["text"] == "# page"
     app.INLINE_LIMIT = 3
     assert "text" not in app._store_file(key, "snap2.md", b"# page")
+
+
+def test_text_cap_and_grep():
+    from toolserver.textcap import cap_snapshot as cs, cap_found_line as cf
+    long = "x" * 200
+    assert cs(f"- text: {long}", 10) == "- text: " + "x" * 10 + "..."
+    assert cs(f"- paragraph [ref=e2]: {long}", 10).endswith("x" * 10 + "...")
+    assert cs(f'- link "{long}" [ref=e3]\n  - /url: {long}', 10) == f'- link "{long}" [ref=e3]\n  - /url: {long}'
+    assert cs(f"- text: {long}", None) == f"- text: {long}" and cs("- text: abc", 128) == "- text: abc"
+    assert cs("- text: abcdef", 1) == "- text: a..."
+    t = "a" * 100 + "NEEDLE" + "b" * 100
+    line = f"- paragraph [ref=e1]: {t}"
+    s = line.index("NEEDLE")
+    out = cf(line, (s, s + 6), 20)
+    assert "NEEDLE" in out and out.startswith("- paragraph [ref=e1]: ...") and out.endswith("...")
+    assert cf(line, (0, 3), 20) == "- paragraph [ref=e1]: " + "a" * 20 + "..."  # match in the ref: cut from the start
+    assert cf(line, (s, s + 6), 300) == line and cf("- text: hi", None, 5) == "- text: hi"
+    assert cf(line, (len(line) - 3, len(line)), 20).startswith("- paragraph [ref=e1]: ...") and cf(line, (len(line) - 3, len(line)), 20).endswith("b" * 17 + "")
+
+    import extract
+    text = "\n".join(f"line {i}" for i in range(100)) + "\nTAIL " + "z" * 500
+    g = extract.grep_text(text, "line 5$", context=1)
+    assert g.startswith("-- line 5, offset ") and "5- line 4" in g and "6: line 5" in g and "7- line 6" in g and "line 7" not in g
+    assert extract.grep_text(text, "/LINE 9$/i", 0).splitlines()[1] == "10: line 9"
+    assert extract.grep_text(text, "line 1.$", 0, max_matches=2).endswith("[showing 2 of 10 matches]")
+    assert extract.grep_text(text, "nope") == "No matches for nope."
+    assert "..." in extract.grep_text(text, "TAIL").splitlines()[-1] and len(extract.grep_text(text, "TAIL").splitlines()[-1]) < 320
+    off = int(extract.grep_text(text, "line 50$", 0).split("offset ")[1].split(" ")[0])
+    assert text[off:].startswith("line 50")
+    try:
+        extract.grep_text(text, "("); assert False
+    except ValueError:
+        pass
+
+
+def test_file_tools_are_jobs():
+    import app, storage, tempfile, json
+    from mcp import types as mt
+    storage.BLOB_URL = "file://" + tempfile.mkdtemp()
+    home = tempfile.mkdtemp()
+    os.mkdir(home + "/out")
+    app.ports.home = lambda uid: home
+    snap = "- generic [ref=e1]:\n  - text: hello"
+
+    class Client:
+        async def call_tool(self, name, args):
+            open(f"{home}/out/{args['filename']}", "w").write(snap)
+            return mt.CallToolResult(content=[mt.TextContent(type="text", text="### Page\n- Page URL: http://p/\n### Snapshot\n- [Snapshot](out/x)\n")])
+
+    bs = types.SimpleNamespace(client=Client(), owner="a@b.c", id="v", uid=1, last_used=0)
+
+    async def get_session(*a, **k):
+        return bs
+    app._caller = lambda: (None, "a@b.c", None)
+    sessions.get_session = get_session
+    app.INLINE_LIMIT = 50_000
+    run = lambda name, **a: asyncio.run(app.call_tool(name, a))
+
+    r = run("browser_snapshot", target="e5", depth=2)
+    out = json.loads(r.content[0].text)
+    assert out["text"] == snap and out["files"][0]["path"] == "original/snapshot.yml", out
+    m = storage.get_manifest(app._key("a@b.c", out["job_id"]))
+    assert m["url"] == "http://p/" and m["target"] == "e5" and m["depth"] == 2 and m["text_cap"] == 128 and "query" not in m, m
+    r = run("browser_find", regex="/x/i", text_cap=None, filename="m.txt")
+    out = json.loads(r.content[0].text)
+    m = storage.get_manifest(app._key("a@b.c", out["job_id"]))
+    assert out["files"][0]["path"] == "original/m.txt" and m["text_cap"] is None and m["query"] == {"regex": "/x/i"} and "target" not in m, m
+    assert json.loads(run("browser_evaluate", function="() => 1").content[0].text)["files"][0]["path"] == "original/evaluate.json"
+
+    key = app._key("a@b.c", out["job_id"])
+    storage.write_bytes(key, "original/b.bin", b"\0\1", "application/octet-stream")
+    g = lambda **a: asyncio.run(app.call_tool("grep_file", {"job_id": out["job_id"], **a}))
+    ok = g(path="original/m.txt", pattern="ref=e1")
+    assert not ok.isError and "ref=e1" in ok.content[0].text and "text: hello" in ok.content[0].text
+    assert g(path="original/b.bin", pattern="x").isError and g(path="original/m.txt", pattern="(").isError
+    assert g(path="original/none", pattern="x").content[0].text == "file not found"
+    app._caller = lambda: (None, "other@b.c", None)
+    assert g(path="original/m.txt", pattern="x").isError  # another owner's job is not reachable
+    app._caller = lambda: (None, "a@b.c", None)
 
 
 def test_terse():

@@ -50,10 +50,10 @@ def get_manifest(job_id: str) -> dict:
         return json.load(f)
 
 
-def set_meta(job_id: str, **kw) -> None:
-    """Merge top-level keys (e.g. url, target) into index.json; None values are skipped."""
+def set_meta(job_id: str, keep_none: tuple = (), **kw) -> None:
+    """Merge top-level keys (e.g. url, target) into index.json; None values are skipped, except keys in `keep_none`."""
     manifest = get_manifest(job_id)
-    manifest.update({k: v for k, v in kw.items() if v is not None})
+    manifest.update({k: v for k, v in kw.items() if v is not None or k in keep_none})
     fs, _ = _fs()
     with fs.open(_job_path(job_id, "index.json"), "w") as f:
         json.dump(manifest, f)
