@@ -143,19 +143,62 @@ async def snapshot(R, bid, a):
     return await page_info(page) + f"### Snapshot\n```yaml\n{snap}\n```\n"
 
 
+FIND_CONTEXT = 3  # lines of context around each match (as playwright-mcp's browser_find)
+
+
+def _ancestors(lines: list[str], indents: list[int], index: int) -> list[int]:
+    """Indices of the lines above `index` that enclose it (strictly smaller indent), outermost first."""
+    out, indent = [], indents[index]
+    for i in range(index - 1, -1, -1):
+        if indent <= 0:
+            break
+        if lines[i].strip() and indents[i] < indent:
+            out.append(i)
+            indent = indents[i]
+    return out[::-1]
+
+
+def find_snippets(snap: str, match, query: str) -> str:
+    """Matching snapshot lines with FIND_CONTEXT lines of context, each window under its ancestor chain
+    (the lines that enclose it, so the refs of its containers are visible); `...` marks skipped lines."""
+    lines = snap.split("\n")
+    indents = [len(l) - len(l.lstrip()) for l in lines]
+    hits = [i for i, l in enumerate(lines) if match(l)]
+    if not hits:
+        return f"No matches found for {query}."
+    windows: list[list[int]] = []
+    for h in hits:
+        lo, hi = max(0, h - FIND_CONTEXT), min(len(lines) - 1, h + FIND_CONTEXT)
+        if windows and lo <= windows[-1][1] + 1:
+            windows[-1][1] = max(windows[-1][1], hi)
+        else:
+            windows.append([lo, hi])
+    on_path = set(hits).union(*(_ancestors(lines, indents, h) for h in hits))
+    snippets = []
+    for lo, hi in windows:
+        idx = _ancestors(lines, indents, lo) + list(range(lo, hi + 1))
+        rows = []
+        for k, i in enumerate(idx):
+            if k and i > idx[k - 1] + 1 and i not in on_path and idx[k - 1] not in on_path:
+                rows.append(" " * indents[i] + "...")
+            rows.append(lines[i])
+        snippets.append("\n".join(rows))
+    return f"Found {len(hits)} {'match' if len(hits) == 1 else 'matches'} for {query}:\n\n" + "\n\n----\n\n".join(snippets)
+
+
 @tool("browser_find")
 async def find(R, bid, a):
     if bool(a.get("text")) == bool(a.get("regex")):
         raise ToolError("Provide either text or regex, not both.")
     snap = await snapshot_text(R.page(bid))
     if a.get("text"):
-        match = lambda l: a["text"].lower() in l.lower()
+        needle = a["text"].lower()
+        match, query = (lambda l: needle in l.lower()), f'"{a["text"]}"'
     else:
         m = re.fullmatch(r"/(.*)/([a-z]*)", a["regex"], re.S)
         rx = re.compile(m.group(1) if m else a["regex"], re.I if m and "i" in m.group(2) else 0)
-        match = lambda l: rx.search(l)
-    lines = [l for l in snap.splitlines() if match(l)]
-    body = "\n".join(lines) or "No matches."
+        match, query = rx.search, f"/{m.group(1) if m else a['regex']}/{m.group(2) if m else ''}"
+    body = find_snippets(snap, match, query)
     if a.get("filename"):
         return file_result("Matches", write_out(a["filename"], body))
     return result(body)

@@ -77,6 +77,46 @@ def test_interaction_and_refs(env):
     assert val(call(R, "browser_evaluate", function="() => 'a'")) == "a"
 
 
+FIND_SNAP = """- generic [ref=e1]:
+  - article [ref=e2]:
+    - heading "Title" [level=1] [ref=e3]
+    - paragraph [ref=e4]: a
+    - paragraph [ref=e5]: b
+    - paragraph [ref=e6]: c
+    - paragraph [ref=e7]: d
+    - paragraph [ref=e8]: e
+    - paragraph [ref=e9]: f
+    - link "Needle" [ref=e10]
+  - navigation [ref=e11]:
+    - link "Home" [ref=e12]
+    - link "needle again" [ref=e13]"""
+
+
+def test_find_snippets_context_and_ancestors():
+    out = tools.find_snippets(FIND_SNAP, lambda l: "needle" in l.lower(), '"needle"')
+    assert out.startswith('Found 2 matches for "needle":\n\n')
+    assert out.count("\n\n----\n\n") == 0  # the two windows overlap and are merged
+    lines = out.split("\n\n", 1)[1].split("\n")
+    assert lines[:2] == ["- generic [ref=e1]:", "  - article [ref=e2]:"]  # ancestors of the window, with refs
+    assert 'paragraph [ref=e4]' not in out and 'paragraph [ref=e7]: d' in out  # 3 lines of context, not more
+    assert lines[-1] == '    - link "needle again" [ref=e13]'
+    one = tools.find_snippets(FIND_SNAP, lambda l: "title" in l.lower(), '"title"')
+    assert one.startswith('Found 1 match for "title":')
+    assert tools.find_snippets(FIND_SNAP, lambda l: False, '"x"') == 'No matches found for "x".'
+    far = "\n".join(["- root:"] + [f"  - item {i}" for i in range(30)])
+    out = tools.find_snippets(far, lambda l: l.endswith(("item 2", "item 25")), "q")
+    assert out.count("\n\n----\n\n") == 1 and out.startswith("Found 2 matches for q:")
+
+
+def test_find_via_tool(env):
+    R = env
+    call(R, "browser_navigate", url=PAGE)
+    out = call(R, "browser_find", text="go")
+    assert out.startswith("### Result\nFound 1 match for \"go\":") and 'button "Go"' in out
+    assert "Found 1 match for /GO/i:" in call(R, "browser_find", regex="/GO/i")
+    assert "No matches found" in call(R, "browser_find", text="nothing-like-this")
+
+
 def test_file_outputs(env, tmp_path):
     R = env
     call(R, "browser_navigate", url=PAGE)
