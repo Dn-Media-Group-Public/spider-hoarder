@@ -60,9 +60,6 @@ CAPPED_TOOLS = ("browser_snapshot", "browser_find")  # take `text_cap`
 FILE_TOOLS_NOTE = ("\n\nThe result is {job_id, files, text?}: `text` is the content if small, else page through it "
                    "with get_file_text or search it with grep_file; get_file_url for a link. `filename` only names "
                    "the file inside the job.")
-CAPPED_NOTE = (" Refs stay valid until the page re-renders or navigates: after an action that changes the page, "
-               "call browser_find / browser_snapshot again (actions no longer return a snapshot). "
-               "`text_cap` cuts long text nodes (default 128 characters, null = no cap).")
 
 RID = sessions.RID
 _RID_PREFIX = re.compile(r"^([0-9]+-[0-9]+-[0-9]+-[0-9]+)\.")
@@ -360,8 +357,8 @@ def _text(msg: str, error: bool = False) -> types.CallToolResult:
 async def list_tools() -> list[types.Tool]:
     own = {t.name for t in EXTRA_TOOLS}  # the gateway's versions replace the upstream ones of the same name
     tools = [t for t in await sessions.upstream_tools() if t.name not in HIDDEN | own]
-    tools = [t.model_copy(update={"description": (t.description or "") + FILE_TOOLS_NOTE + (CAPPED_NOTE if t.name in CAPPED_TOOLS else "")})
-             if t.name in FILE_TOOLS else t for t in tools]
+    tools = [t.model_copy(update={"description": (t.description or "") + FILE_TOOLS_NOTE}) if t.name in FILE_TOOLS else t
+             for t in tools]
     tools = [t.model_copy(update={"description": f"[{EGRESS.upper()}] {EGRESS_NOTE}\n\n{t.description or ''}"}) if t.name == "browser_navigate" else t
              for t in tools]
     return tools + EXTRA_TOOLS

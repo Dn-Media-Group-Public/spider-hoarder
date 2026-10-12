@@ -1,6 +1,6 @@
 """The tool set. Each handler is `async (R, bid, args) -> str` returning response sections
 (`### Result`, `### Page`; errors are raised and formatted by server.py).
-Schemas for the playwright-mcp tools come from golden_tools.json (0.0.83), see server.py."""
+Schemas for the playwright-mcp tools come from tools.json (from tools.json.upstream, 0.0.83), see server.py."""
 
 import asyncio
 import base64

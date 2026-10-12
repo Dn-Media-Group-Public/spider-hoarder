@@ -14,7 +14,8 @@ from . import tools
 from .textcap import DEFAULT_TEXT_CAP
 from .browsers import launch
 
-GOLDEN = os.path.join(os.path.dirname(__file__), "..", "golden_tools.json")  # playwright-mcp 0.0.83
+GOLDEN = os.path.join(os.path.dirname(__file__), "..", "tools.json.upstream")  # playwright-mcp 0.0.83, as captured
+TOOLS_FILE = os.path.join(os.path.dirname(__file__), "..", "tools.json")  # copy of it with our descriptions
 DROPPED = {"browser_run_code_unsafe"}  # JS snippets cannot run in a Python server; browser_evaluate stays
 
 BROWSER = {"type": "string", "description": (
@@ -64,7 +65,7 @@ for kind in ("localstorage", "sessionstorage"):
 
 def build_tools() -> list[types.Tool]:
     out = []
-    for t in json.load(open(GOLDEN)):
+    for t in json.load(open(TOOLS_FILE)):
         if t["name"] in DROPPED:
             continue
         extra = {"text_cap": TEXT_CAP} if t["name"] in ("browser_snapshot", "browser_find") else {}
