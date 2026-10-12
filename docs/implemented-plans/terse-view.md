@@ -99,6 +99,7 @@ today.
   not duplicated; bare autolinks; reference links; table/list/quote links;
   fenced code with `# comment` and links skipped; prose dropped; no dedup;
   empty result.
+- (HTML: terse is now computed from the markitdown `parsed/` output. See also: [Plan: save-page target](../implemented-plans/save-page-target.md))
 - `_store_and_parse`: HTML/PDF/zip members get `terse/`; `.md` original gets
   `terse/` and no `parsed/`; `.txt` gets none; empty terse not written.
 - Inline fallback: parsed small, parsed large + terse small (`text_path` is the

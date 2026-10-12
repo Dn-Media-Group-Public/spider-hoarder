@@ -109,7 +109,8 @@ storage URL, e.g. `gs://bucket/prefix`):
   terse/**                       # outline (headings, links, images) of each parsed/Markdown file
     report.pdf.md                # e.g. for a zip: same relative paths, +.md
     subdir/notes.docx.md
-  index.json                     # manifest: every file above, path/size/content-type
+  simplified/**                  # trafilatura guess for HTML jobs (may omit text)
+  index.json                     # manifest: files, plus optional url/target for page jobs (See also: [Plan: save-page target](../implemented-plans/save-page-target.md))
 ```
 
 Deployment will most likely use GCS with a service-account credential

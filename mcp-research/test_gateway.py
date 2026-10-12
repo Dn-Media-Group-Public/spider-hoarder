@@ -55,8 +55,8 @@ def test_ssrf():
 
 
 def test_parse_eval_result():
-    text = '### Result\n"<html>\\n<body>x</body></html>"\n### Page\n- Page URL: about:blank\n'
-    assert sessions.parse_eval_result(text) == "<html>\n<body>x</body></html>"
+    text = '### Result\n{"html": "<html>\\n<body>x</body></html>", "url": "http://u/"}\n### Page\n- Page URL: about:blank\n'
+    assert sessions.parse_eval_result(text) == ("<html>\n<body>x</body></html>", "http://u/")
     assert sessions.parse_result('### Result\n[{"name": "a"}]') == [{"name": "a"}]
 
 
@@ -177,7 +177,18 @@ def test_store_terse():
     key = app._key("a@x.y", f"{app.RID}.123e4567-e89b-12d3-a456-426614174001")
     paths = lambda r: {f["path"] for f in r["files"]}
     r = app._store_and_parse(key, "p.html", b"<html><body><article><h1>Title</h1><p>" + b"Some long article text here. " * 20 + b"</p><h2>Part</h2><p>" + b"More article text. " * 20 + b"</p></article></body></html>", "text/html")
-    assert {"original/p.html", "parsed/p.html.md", "terse/p.html.md"} <= paths(r), paths(r)
+    assert {"original/p.html", "parsed/p.html.md", "simplified/p.html.md", "terse/p.html.md"} <= paths(r), paths(r)
+    assert storage.read_text(key, "terse/p.html.md") == "# Title\n## Part"  # terse comes from parsed/
+    page = b"<html><body><p>" + b"Filler paragraph text. " * 40 + b"</p><div>Prose in a div with <a href='http://x'>a link</a> kept.</div></body></html>"
+    r = app._store_and_parse(key, "d.html", page, "text/html")
+    assert "Prose in a div with [a link](http://x) kept." in storage.read_text(key, "parsed/d.html.md")
+    storage.set_meta(key, url="http://u", target="main")
+    storage.write_bytes(key, "x.txt", b"x", "text/plain")  # a later manifest update keeps the meta
+    m = storage.get_manifest(key)
+    assert m["url"] == "http://u" and m["target"] == "main" and any(f["path"] == "d.html" or f["path"] == "x.txt" for f in m["files"]), m
+    k2 = app._key("a@x.y", f"{app.RID}.123e4567-e89b-12d3-a456-426614174002")
+    storage.write_bytes(k2, "a", b"a", "text/plain")
+    assert "url" not in storage.get_manifest(k2) and app._meta(k2) == {}
     r = app._store_and_parse(key, "n.md", b"# H\n[l](u)", "text/markdown")
     assert "terse/n.md" in paths(r) and not any(p.startswith("parsed/n") for p in paths(r))
     assert r["text_path"] == "original/n.md"

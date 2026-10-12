@@ -236,16 +236,17 @@ def parse_result(text: str):
     return json.loads(body.split("\n### ", 1)[0].strip())
 
 
-def parse_eval_result(text: str) -> str:
+def parse_eval_result(text: str) -> tuple[str, str]:
     value = parse_result(text)
-    if not isinstance(value, str):
-        raise ValueError("browser_evaluate did not return a string")
-    return value
+    if not isinstance(value, dict) or not isinstance(value.get("html"), str):
+        raise ValueError("browser_evaluate did not return {html, url}")
+    return value["html"], value.get("url", "")
 
 
 # Scroll to trigger lazy content, then wait until the DOM has been quiet for 1s (max 10s) so
 # client-side rendered pages are complete before we read them.
-SETTLE_JS = """async () => {
+# The function gets the `target` element as its argument (none = whole document).
+SETTLE_JS = """async (el) => {
   const sleep = ms => new Promise(r => setTimeout(r, ms));
   let last = Date.now();
   const obs = new MutationObserver(() => { last = Date.now(); });
@@ -259,12 +260,13 @@ SETTLE_JS = """async () => {
   const t0 = Date.now();
   while (Date.now() - last < 1000 && Date.now() - t0 < 10000) await sleep(100);
   obs.disconnect();
-  return document.documentElement.outerHTML;
+  return {html: (el || document.documentElement).outerHTML, url: location.href};
 }"""
 
 
-async def page_html(bs: BrowserSession, browser: str | None = None) -> str:
-    res = await bs.client.call_tool("browser_evaluate", {"function": SETTLE_JS, **_on(browser)})
+async def page_html(bs: BrowserSession, browser: str | None = None, target: str | None = None) -> tuple[str, str]:
+    """(outerHTML of target or the whole page, location.href)."""
+    res = await bs.client.call_tool("browser_evaluate", {"function": SETTLE_JS, **({"target": target} if target else {}), **_on(browser)})
     if res.isError:
         raise RuntimeError(result_text(res))
     return parse_eval_result(result_text(res))
@@ -278,7 +280,7 @@ async def cookies_for(bs: BrowserSession, url: str) -> dict:
     return {c["name"]: c["value"] for c in parse_result(result_text(res))}
 
 
-async def fetch_html(owner: str, url: str, live: BrowserSession | None = None) -> str:
+async def fetch_html(owner: str, url: str, live: BrowserSession | None = None, target: str | None = None) -> tuple[str, str]:
     """One-shot: navigate, read HTML. Without `live`: ephemeral session (own uid), destroyed after.
     With `live`: a temporary browser (window) in that session, so its cookies apply but nobody's page is clobbered."""
     if live:
@@ -287,12 +289,12 @@ async def fetch_html(owner: str, url: str, live: BrowserSession | None = None) -
             raise RuntimeError(result_text(res))
         browser = parse_result(result_text(res))
         try:
-            return await _navigate_read(live, url, browser)
+            return await _navigate_read(live, url, browser, target)
         finally:
             await live.client.call_tool("browser_end_session", {"browser": browser})
     bs = await new_session(owner)
     try:
-        return await _navigate_read(bs, url)
+        return await _navigate_read(bs, url, None, target)
     finally:
         await close(bs)
 
@@ -301,12 +303,12 @@ def _on(browser: str | None) -> dict:
     return {"browser": browser} if browser else {}
 
 
-async def _navigate_read(bs: BrowserSession, url: str, browser: str | None = None) -> str:
+async def _navigate_read(bs: BrowserSession, url: str, browser: str | None = None, target: str | None = None) -> tuple[str, str]:
     for tool, args in (("browser_navigate", {"url": url}), ("browser_wait_for", {"time": 2})):
         res = await bs.client.call_tool(tool, {**args, **_on(browser)})
         if res.isError:
             raise RuntimeError(result_text(res))
-    return await page_html(bs, browser)
+    return await page_html(bs, browser, target)
 
 
 async def reaper() -> None:

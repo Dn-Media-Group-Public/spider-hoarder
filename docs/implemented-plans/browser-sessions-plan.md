@@ -162,7 +162,7 @@ from the first session, `browser_bring_to_front` hidden) plus (`browser_request_
 | Tool | Behaviour |
 |---|---|
 | `browser_request_human_help(reason)` | link `https://HOST/<egress>/view/<id>/start`, owner-only via SSO |
-| `browser_save_page()` | calls upstream `browser_evaluate("document.documentElement.outerHTML")`, runs trafilatura, stores under a job, returns `{job_id, files, text?}`; replaces `finish_interactive_session` |
+| `browser_save_page()` | calls upstream `browser_evaluate("document.documentElement.outerHTML")`, runs trafilatura, stores under a job, returns `{job_id, files, text?}`; replaces `finish_interactive_session`. Now: optional `target`, markitdown as the main converter, trafilatura output in `simplified/`. See also: [Plan: save-page target](../implemented-plans/save-page-target.md) |
 | `browser_end_session()` | `stop(uid)` |
 | `ingest_page(url)` | one-shot: create an ephemeral session (same machinery, own uid), navigate, save, destroy. Non-HTML goes through `requests` as today |
 | `get_upload_link`, `list_files`, `get_file_text`, `get_file_url` | unchanged, but jobs are now owner-scoped (see Auth) |

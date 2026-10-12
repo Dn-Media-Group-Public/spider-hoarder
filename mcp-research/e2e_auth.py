@@ -58,6 +58,9 @@ async def main():
             err, text = await call(cs, "browser_save_page")
             saved = json.loads(text)
             print("save_page:", err, "Example Domain" in saved.get("text", ""))
+            err, text = await call(cs, "browser_save_page", target="h1")
+            saved = json.loads(text)
+            print("save_page target:", err, saved.get("target"), saved.get("url"), "Example Domain" in saved.get("text", ""), "More information" not in saved.get("text", ""))
 
             err, text = await call(cs, "browser_request_human_help", reason="solve the captcha")
             view = re.search(r"/clear/view/([A-Za-z0-9_-]+)/start", text).group(1)

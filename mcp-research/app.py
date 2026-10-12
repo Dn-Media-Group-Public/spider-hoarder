@@ -87,7 +87,9 @@ mcp = FastMCP(
         "confirm before continuing. browser_save_page parses and stores the current page; ingest_page does a "
         "one-shot fetch of a URL. Tools that write files (screenshots, PDFs, anything given a `filename`) return "
         "{job_id, files, text?} instead; fetch them with list_files / get_file_text / get_file_url. "
-        "terse/<name>.md is an outline (headings, links, images) of parsed/<name>.md. "
+        "terse/<name>.md is an outline (headings, links, images) of parsed/<name>.md; simplified/<name>.md is an "
+        "automatic main-content extraction that may omit text. Before browser_save_page, use browser_find to "
+        "locate the main content element and pass its ref as `target`. "
         "Call browser_end_session when finished."
     ),
     token_verifier=auth.KeycloakVerifier(
@@ -110,6 +112,7 @@ def _schema(optional: dict | None = None, **props: str) -> dict:
 
 
 BROWSER_ARG = {"browser": "Browser id from browser_start_session; omit for the shared 'main' browser"}
+SAVE_TARGET_ARG = "Element to convert: a ref from browser_snapshot/browser_find, or a unique selector; omit for the whole page"
 
 
 EXTRA_TOOLS = [
@@ -117,18 +120,23 @@ EXTRA_TOOLS = [
                description="Get a link that lets the user see and control THIS conversation's browser in a new tab. "
                "Use it for a CAPTCHA, bot challenge, login, 2FA or anything else a human should do. Give the link to "
                "the user, explain what to do, then STOP until they confirm they are done."),
-    types.Tool(name="browser_save_page", inputSchema=_schema(BROWSER_ARG),
-               description=f"[{EGRESS.upper()}] Parse the page currently open in the browser to Markdown and store it. "
-               "Returns {job_id, files, text?}. Use after getting past consent walls/CAPTCHAs. "
+    types.Tool(name="browser_save_page", inputSchema=_schema({**BROWSER_ARG, "target": SAVE_TARGET_ARG}),
+               description=f"[{EGRESS.upper()}] Convert the page currently open in the browser to Markdown and store it. "
+               "Returns {job_id, files, text?}. With `target` (an element ref from browser_snapshot or browser_find, or a "
+               "unique selector) only that element is converted; without it, the whole page, including navigation, teasers "
+               "and footers. To extract an article, first call browser_find (e.g. for `article`, `main`, or the headline) "
+               "to get the ref of the element that contains the content, then pass it as `target`. "
+               "`simplified/` holds an automatic main-content guess that may omit text. "
+               "Use after getting past consent walls/CAPTCHAs. "
                "Prefer this over browser_snapshot for extracting page content; use browser_snapshot only for "
                "navigation and interaction (finding refs to click or type into)."),
     types.Tool(name="browser_end_session", inputSchema=_schema(BROWSER_ARG),
                description="With `browser`: close just that browser (window and tabs). Without: close all browsers and end "
                "this conversation's session, discarding its state (cookies, tabs, downloads). Subagents: pass the id "
                "from browser_start_session when done. Closing the last browser ends the session."),
-    types.Tool(name="ingest_page", inputSchema=_schema(url="URL to fetch"),
+    types.Tool(name="ingest_page", inputSchema=_schema({"target": "Unique selector of the element to convert (refs do not work here: no snapshot exists); omit for the whole page"}, url="URL to fetch"),
                description=f"[{EGRESS.upper()}] {EGRESS_NOTE}\n\nOne-shot: fetch a URL (HTML via a throwaway browser, anything else directly) and parse it "
-               "to Markdown. Returns {job_id, files, text?}. If the text looks like a consent/CAPTCHA wall, use the "
+               "to Markdown. Returns {job_id, files, text?}. `target` (HTML only) converts just that element, and must be a selector. `simplified/` holds an automatic main-content guess that may omit text. If the text looks like a consent/CAPTCHA wall, use the "
                "browser_* tools and browser_request_human_help instead."),
     types.Tool(name="get_upload_link", inputSchema=_schema(),
                description="Mint a job id and a link for a human to upload files through a browser."),
@@ -195,8 +203,11 @@ def _store_and_parse(key: str, filename: str, raw: bytes, content_type: str) -> 
     if filename.lower().endswith((".md", ".markdown")):  # already Markdown: no parsed/, terse from the original
         text = raw.decode("utf-8", errors="replace")
         return _job_result(key, text, f"original/{filename}", _write_terse(key, filename, text), f"terse/{filename}")
-    text = extract.html_to_markdown(raw) if "html" in content_type else extract.file_to_markdown(raw, filename)
+    is_html = "html" in content_type
+    text = extract.html_to_markdown(raw) if is_html else extract.file_to_markdown(raw, filename)
     storage.write_bytes(key, f"parsed/{filename}.md", text.encode(), "text/markdown")
+    if is_html and (simple := extract.html_to_simplified(raw)):
+        storage.write_bytes(key, f"simplified/{filename}.md", simple.encode(), "text/markdown")
     return _job_result(key, text, f"parsed/{filename}.md", _write_terse(key, f"{filename}.md", text), f"terse/{filename}.md")
 
 
@@ -283,24 +294,35 @@ async def _file_tool(bs: sessions.BrowserSession, name: str, arguments: dict) ->
     return _text(json.dumps({"job_id": job_id, **_store_file(_key(bs.owner, job_id), jname, raw)}))
 
 
-async def _ingest_page(owner: str, url: str, live: sessions.BrowserSession | None = None) -> dict:
+async def _ingest_page(owner: str, url: str, live: sessions.BrowserSession | None = None, target: str | None = None) -> dict:
     job_id = _new_job_id()
     kw = {}
     if live:  # preflight/download as the real browser session: its cookies, its Tor circuit
         kw = {"cookies": await sessions.cookies_for(live, url), "socks_port": ports.socks_port(live.uid)}
     ctype = await asyncio.to_thread(fetch.content_type, url, **kw)
     if "text/html" in ctype or ctype == "":
-        raw, ctype = (await sessions.fetch_html(owner, url, live)).encode(), "text/html"
+        html, _ = await sessions.fetch_html(owner, url, live, target)
+        raw, ctype = html.encode(), "text/html"
     else:
         raw, ctype = await asyncio.to_thread(fetch.download, url, **kw)
     filename = os.path.basename(url.split("?")[0]) or "page"
-    return {"job_id": job_id, **_store_and_parse(_key(owner, job_id), filename, raw, ctype)}
+    key = _key(owner, job_id)
+    result = _store_and_parse(key, filename, raw, ctype)
+    storage.set_meta(key, url=url, target=target if "html" in ctype else None)
+    return {"job_id": job_id, **result, **_meta(key)}
 
 
-async def _save_page(bs: sessions.BrowserSession, browser: str | None = None) -> dict:
+def _meta(key: str) -> dict:
+    return {k: v for k, v in storage.get_manifest(key).items() if k in ("url", "target")}
+
+
+async def _save_page(bs: sessions.BrowserSession, browser: str | None = None, target: str | None = None) -> dict:
     job_id = _new_job_id()
-    raw = (await sessions.page_html(bs, browser)).encode()
-    return {"job_id": job_id, **_store_and_parse(_key(bs.owner, job_id), "page.html", raw, "text/html")}
+    html, url = await sessions.page_html(bs, browser, target)
+    key = _key(bs.owner, job_id)
+    result = _store_and_parse(key, "page.html", html.encode(), "text/html")
+    storage.set_meta(key, url=url, target=target)
+    return {"job_id": job_id, **result, **_meta(key)}
 
 
 def _text(msg: str, error: bool = False) -> types.CallToolResult:
@@ -336,7 +358,7 @@ async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
             return _text("Browser session closed.")
         if name == "ingest_page":
             return _text(json.dumps(await _ingest_page(
-                owner, args["url"], await sessions.get_session(mcp_session, owner, create=False))))
+                owner, args["url"], await sessions.get_session(mcp_session, owner, create=False), args.get("target"))))
         if name == "get_upload_link":
             job_id = _new_job_id()
             token = blobtoken.mint(_key(owner, job_id), UPLOAD_MARK, ttl=3600)
@@ -374,7 +396,7 @@ async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
                 "Only the user who owns this conversation can open it. "
                 "Do not take further browser actions until the user confirms they are done.")
         if name == "browser_save_page":
-            return _text(json.dumps(await _save_page(bs, args.get("browser"))))
+            return _text(json.dumps(await _save_page(bs, args.get("browser"), args.get("target"))))
         if name in FILE_TOOLS and (res := await _file_tool(bs, name, args)):
             return res
         return await bs.client.call_tool(name, arguments)

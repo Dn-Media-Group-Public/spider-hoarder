@@ -79,6 +79,8 @@ omitted and the agent reads it with `get_file_text(job_id, path)` (paging via
 (snapshot, console, network, evaluate) are stored as `original/<name>` and their
 text is the inline candidate; binary files have no inline text.
 
+See also: [Plan: save-page target](../implemented-plans/save-page-target.md) — HTML text inline is now the markitdown output of the whole page or the `target` element; `index.json` gains `url`/`target`.
+
 See also: [Plan: Terse outline view](terse-view.md) — when the full text is over the limit, the `terse/` outline is returned inline instead (with `text_path`).
 
 ### Tool descriptions

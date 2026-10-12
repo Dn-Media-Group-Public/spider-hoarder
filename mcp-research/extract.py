@@ -1,5 +1,5 @@
-"""Turn raw bytes into Markdown: trafilatura for HTML, markitdown for everything
-else, stdlib zipfile to unpack archives (preserving the internal tree)."""
+"""Turn raw bytes into Markdown: markitdown for everything (trafilatura additionally gives a
+simplified main-content guess for HTML), stdlib zipfile to unpack archives (preserving the internal tree)."""
 
 import io
 import os
@@ -7,7 +7,7 @@ import zipfile
 
 import trafilatura
 from markdown_it import MarkdownIt
-from markitdown import MarkItDown
+from markitdown import MarkItDown, StreamInfo
 
 _md = MarkItDown()
 _mdit = MarkdownIt("commonmark", {"linkify": True}).enable(["table", "linkify"])
@@ -18,6 +18,12 @@ def is_zip(content_type: str, filename: str) -> bool:
 
 
 def html_to_markdown(html_bytes: bytes) -> str:
+    """Lossless conversion of everything in the HTML (the client picks the container via `target`)."""
+    info = StreamInfo(extension=".html", charset="utf-8")  # always UTF-8 from the browser: no detection
+    return _md.convert_stream(io.BytesIO(html_bytes), stream_info=info).text_content
+
+
+def html_to_simplified(html_bytes: bytes) -> str:
     text = trafilatura.extract(html_bytes.decode("utf-8", errors="replace"), output_format="markdown")
     return text or ""
 

@@ -14,7 +14,7 @@ async def main():
     tools = await sessions.upstream_tools()
     names = {t.name for t in tools}
     print("tools:", len(names), "browser_evaluate" in names, "browser_install" in names)
-    html = await sessions.fetch_html("smoke@example.org", URL)
+    html = (await sessions.fetch_html("smoke@example.org", URL))[0]
     print("html:", len(html), html[:80].replace("\n", " "))
     bs = await sessions.new_session("smoke@example.org")
     try:
