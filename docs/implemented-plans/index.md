@@ -1,5 +1,7 @@
 # Implemented plans
 
+Back to the [documentation index](../index.md). Open plans: [plans](../plans/index.md).
+
 - [Browser sessions](browser-sessions-plan.md)
 - [Tool file outputs become jobs](file-outputs-as-jobs.md)
 - [Python browser tool server (multiple browsers per session)](python-browser-tool-server.md)

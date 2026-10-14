@@ -1,15 +1,17 @@
 # spider-hoarder
 
-`mcp-research`: per-user, isolated, real (headed) browser sessions for Claude
-over MCP, with a human handoff (live view) for CAPTCHAs/logins, optional Tor
-egress, and fetch/parse/blob tools that return Markdown. No knowledge of any
-downstream graph.
+Give Claude a real browser, safely. spider-hoarder is an MCP server that hands every user and conversation a private, isolated,
+real (headed) Chromium that Claude drives with a full set of browser tools: navigate, click, type, snapshot, find, cookies and
+storage, screenshots, PDFs. It copes with JavaScript-heavy sites, consent walls and logins. When Claude hits a CAPTCHA or login
+it cannot pass, it sends you a link to the *same* browser (live view) to solve it, then carries on. Egress is either direct or
+anonymised through Tor. Pages come back as Markdown and everything bulky is stored as a *job* Claude can page through, search
+(`grep_file`) or link to, so large pages never flood its context; Claude can also fetch a URL in one shot (`ingest_page`) or have
+you upload documents. Subagents can browse in parallel in their own windows while sharing logins. It knows nothing about any
+downstream database: Claude carries the text wherever it belongs.
 
-Design: [docs/implemented-plans/browser-sessions-plan.md](docs/implemented-plans/browser-sessions-plan.md)
-(builds on [agentic-research-mcp.md](docs/plans/agentic-research-mcp.md); Keycloak/Tor
-background in [newsroom-browsers-plan.md](docs/plans/newsroom-browsers-plan.md)).
+Documentation (architecture, API, design decisions): [docs/index.md](docs/index.md).
 
-## Run
+## Quick start
 
 ```bash
 cp .env.example .env   # fill in PUBLIC_HOST, OIDC_ISSUER and the secrets
@@ -17,41 +19,18 @@ cp .env.example .env   # fill in PUBLIC_HOST, OIDC_ISSUER and the secrets
 ./deploy.sh --dev      # local: same stack + a local Keycloak, http://localhost:7297, no TLS
 ```
 
-The stack is nginx, oauth2-proxy, `research-tor`, `research-clear` and `tor`. It only speaks
-**http**: TLS ends at the Google load balancer in front of nginx (`PUBLIC_SCHEME=https` tells the
-services which URLs users see; the LB must forward `X-Forwarded-Proto`; `/healthz` answers 200
-for LB health checks). Auth is an external OIDC provider (`OIDC_ISSUER`, Keycloak).
+Two MCP endpoints appear:
 
 - `$PUBLIC_SCHEME://$PUBLIC_HOST/tor/mcp` — browsers egress via Tor only
 - `$PUBLIC_SCHEME://$PUBLIC_HOST/clear/mcp` — direct egress, public internet only
 
-### Scaling
-
-`research-tor` and `research-clear` can run several replicas, each with its own browser pool
-(`MAX_SESSIONS_TOTAL`): set `RESEARCH_TOR_REPLICAS` / `RESEARCH_CLEAR_REPLICAS` in `.env`, or
-`docker service scale spider-hoarder_research-clear=3`. New MCP sessions are spread over the
-replicas (nginx tries the next one when a replica is full; every one full gives HTTP 503). A session
-sticks to the replica that created it: its MCP session id, `job_id`s and blob / upload / live-view
-links carry the replica id (the task's IP), and nginx routes on it. Consequences: files and jobs are
-per replica (a `job_id` from another replica is not readable), and a replica that restarts loses its
-sessions and links. `tor` stays a single service with one SocksPort range per replica slot; scaling
-past `MAX_REPLICAS` (default 4) needs a larger `MAX_REPLICAS` and a redeploy of `tor`.
-See [the plan](docs/implemented-plans/research-replicas.md).
-
-Tools: the browser tools of the Python tool server in `mcp-research/toolserver/` (a `@playwright/mcp`-compatible set plus cookie /
-localStorage / sessionStorage tools; one Chromium per session, several browser windows via `browser_start_session` and a `browser` id
-on every call, `main` being the shared default; see
-[the plan](docs/implemented-plans/python-browser-tool-server.md)), plus `browser_request_human_help`,
-`browser_save_page`, `browser_end_session`, `ingest_page`, `get_upload_link`,
-`list_files`, `get_file_text`, `get_file_url`.
+TLS must end in front of nginx (the stack only speaks http); auth is an external OIDC provider (Keycloak). More replicas:
+`docker service scale spider-hoarder_research-clear=3`. Details: [deploying and configuring](docs/operations/deploy-and-configure.md),
+[scaling](docs/architecture/scaling.md).
 
 ### Dev (`./deploy.sh --dev`)
 
-Adds `docker-compose.dev.yml`: a throwaway Keycloak (`start-dev`, no TLS) plus a `keycloak-init`
-job that runs `keycloak/setup.sh` against it, and `extra_hosts: localhost:host-gateway` so the
-gateways and oauth2-proxy reach it at the same `localhost` URL as your browser. Forces
-`PUBLIC_HOST=localhost:$HTTP_PORT`, `PUBLIC_SCHEME=http`, issuer `http://localhost:8085/realms/newsroom`
-(`KC_DEV_PORT` to change the port). Ports `HTTP_PORT` (7297) and 8085 must be free.
+Adds a throwaway Keycloak. Ports `HTTP_PORT` (7297) and 8085 must be free.
 
 | | |
 |---|---|
@@ -59,27 +38,12 @@ gateways and oauth2-proxy reach it at the same `localhost` URL as your browser. 
 | Keycloak admin console | <http://localhost:8085> — `admin` / `admin` |
 | **User that can use spider-hoarder** | **`researcher` / `researcher-pw`** |
 
-(Keycloak marks its cookies `Secure`; browsers still accept them on `http://localhost`. Other
-dev hostnames would not work without TLS.)
+## Keycloak setup
 
-## Keycloak
-
-The live-view login (oauth2-proxy) registers its own client through DCR on start and keeps it in the
-`o2p_state` volume (see [Plan: oauth2-proxy DCR](docs/implemented-plans/oauth2-proxy-dcr.md)).
-
-`keycloak/setup.sh` initializes a realm (`KC_REALM`, default `newsroom`), idempotently:
-
-- if `MCP_SCOPE` is set, a **realm-default client scope** of that name, so every client, including the ones Claude registers
-  dynamically, gets it ( the gateway requires it in the token's `scope` claim and advertises it so Claude requests it; `aud` is not checked);
-- **Dynamic Client Registration (DCR)** for Claude: anonymous registration is allowed, and the
-  realm's *Trusted Hosts* policy only accepts redirect URIs on `claude.ai`, `claude.com` and
-  `localhost` (Claude Code). Anything else (e.g. `https://evil.example/cb`) gets a 403;
-- **one user who can use spider-hoarder**: username `researcher`, password `researcher-pw`
-  (`KC_USER` / `KC_USER_PASSWORD`). The password is reset to
-  `KC_USER_PASSWORD` on every run, so **change it in `.env` outside dev**.
-
-`--dev` runs it for you. For a real Keycloak run it once (re-run after changing `.env`), from
-anywhere that can reach the admin API, using the script from the Keycloak image:
+`keycloak/setup.sh` initializes a realm (`KC_REALM`, default `newsroom`) idempotently: a default client scope, Dynamic Client
+Registration for Claude (redirects on `claude.ai`, `claude.com`, `localhost` only) and one user (`researcher`; its password is reset
+to `KC_USER_PASSWORD` on every run, so **change it in `.env` outside dev**). `--dev` runs it for you. For a real Keycloak, run it
+once (re-run after changing `.env`) using the script from the Keycloak image:
 
 ```bash
 set -a; source .env; set +a
@@ -89,7 +53,7 @@ docker run --rm -v $PWD/keycloak:/s -e KC_URL=https://keycloak.example.org \
   --entrypoint bash quay.io/keycloak/keycloak:26.0 /s/setup.sh
 ```
 
-## Connecting Claude
+## Using it
 
 Claude registers itself via DCR, so there is no client id or secret to configure. Give it the MCP URL
 of the egress you want, then sign in as the Keycloak user above (a consent screen appears once per client).
