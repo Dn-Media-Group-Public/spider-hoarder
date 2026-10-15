@@ -1,6 +1,6 @@
 # Plan: Android hoarder (`spider-hoarder-android-clear` / `-tor`)
 
-Status: plan, not implemented. Builds on [Browser sessions](../implemented-plans/browser-sessions-plan.md),
+Status: plan, not implemented. All spikes S1-S6 done (see "Spike results"); several design points were corrected by them. Builds on [Browser sessions](../implemented-plans/browser-sessions-plan.md),
 [Scale research containers](../implemented-plans/research-replicas.md) and
 [Tool file outputs become jobs](../implemented-plans/file-outputs-as-jobs.md).
 
@@ -85,8 +85,10 @@ A slot is `free`, `busy(session)` or `quarantined` (state kept by the owning gat
 **warm**: emulator booted from the clean snapshot, no VNC running.
 
 - `start(vnc_password)`: starts x11vnc/websockify with a fresh per-session password.
-- `reset()`: kills VNC/websockify and all session processes, discards the emulator's temp overlay by restarting the
-  emulator from snapshot `clean` (`-read-only -snapshot clean -no-snapshot-save`), wipes the slot's out dir, returns
+- `reset()`: kills VNC/websockify and all session processes, discards the emulator's temp overlay and the AVD changes it made by stopping the
+  emulator, wiping the slot's overlay upper directory (S2: the emulator modifies its AVD even with `-read-only`) and restarting the
+  emulator from snapshot `clean` (`-read-only -snapshot clean -no-snapshot-save`), then (re)starting the adb server
+  once the emulator is up (S6), wipes the slot's out dir, returns
   when booted. The gateway then verifies the wipe (adb up, third-party package list equals the baseline, no accounts,
   `/sdcard` empty). Failure or timeout: **quarantined** (never reused, logged loudly, capacity shrinks).
 - Both verbs are `POST /internal/*` on the slot, requiring `X-Slot-Secret` (`SLOT_SECRET`, shared by the wrapper
@@ -111,7 +113,7 @@ capabilities and starts everything unprivileged. The emulator's user-mode NAT ma
 emulator uid's own connections, so these rules are the guest's firewall:
 
 - replies on established connections accepted;
-- **loopback rejected entirely** for the emulator uid (the guest reaches the container's loopback services through the
+- **loopback rejected entirely** for the emulator uid (S6: this works only if the adb server is started after the emulator, never accepted on `127.0.0.1:5037`) (the guest reaches the container's loopback services through the
   emulator's `10.0.2.2` alias: tool server, adb, VNC, console), IPv6 rejected;
 - **clear:** the Docker resolver and configured resolvers allowed, then RFC1918, `169.254.0.0/16` (cloud metadata),
   `100.64.0.0/10`, `127.0.0.0/8` rejected (this includes the overlay, so a guest can neither reach other slots, the
@@ -122,11 +124,10 @@ emulator uid's own connections, so these rules are the guest's firewall:
   `android_tor` subnet only**: TCP -> `REDIRECT 9040`, UDP/53 -> `REDIRECT 5353`; `FORWARD` default `DROP`, no
   masquerade. Everything else (UDP, QUIC, ICMP) dies. The emulator is started with `-dns-server 8.8.8.8` (a dummy
   public address: the redirect catches it) so that no firewall exception for private addresses is needed.
-  **Risk:** TransPort needs the redirect on the Tor host, so the slot's traffic has to be routed through the `tor`
-  container (the Whonix pattern); routing arbitrary next-hop traffic over a Swarm overlay is unverified. Spike S4
-  decides. If it fails the fallback, **which needs a user decision**, is an in-slot transparent relay
-  (`iptables REDIRECT` to a local redsocks-style SOCKS client talking to per-slot SocksPorts of the existing `tor`
-  service, DNS to `DNSPort`).
+  Spike S4 verified routing through the `tor` container over an `internal` overlay (see "Spike results"); the
+  in-slot relay fallback is not needed. Because peers on that overlay are reachable directly, the emulator-uid
+  firewall also rejects the overlay subnet on `android-tor` (with an accept for Tor's `10.192.0.0/10` virtual
+  addresses placed first).
 
 ### Wrapper
 
@@ -139,7 +140,7 @@ Env: `ANDROID_CLEAR_SLOTS`, `ANDROID_TOR_SLOTS` (derived in compose as replicas 
   `spider-hoarder.android-slot`), recreate a slot whose spec hash label differs.
 - Spec (hardcoded except the env above): `--device /dev/kvm`, `--cap-drop ALL --cap-add NET_ADMIN`,
   `--security-opt no-new-privileges`, `--read-only` with tmpfs for `/tmp` and the emulator's temp dir, the
-  `android_snapshot` volume read-only, memory/cpu limits, `--restart unless-stopped`, name and network alias
+  per-slot overlay volume at `/avd` (lower = the golden `android_snapshot` volume, upper/work = a small per-slot volume; mounted by `dockerd` via the local volume driver, so the slot needs no extra capability, S2), the host's kvm group, memory/cpu limits, `--restart unless-stopped`, name and network alias
   `android-<egress>-<k>`, the egress network.
 - SIGTERM (stack removal): remove all labelled slots. After a crash the next start reconciles by label.
 - Threat model written in the wrapper's header: `docker.sock` is host root; the safety is that the wrapper takes
@@ -149,7 +150,7 @@ Env: `ANDROID_CLEAR_SLOTS`, `ANDROID_TOR_SLOTS` (derived in compose as replicas 
 
 `deploy.sh` builds `android-slot:local` (SDK, pinned emulator and `system-images;android-<API>;google_apis_playstore;x86_64`,
 F-Droid APK with sha256 check, `uiautomator2` + toolserver, noVNC) and then, **on the host that has KVM**, runs an init
-container with `--device /dev/kvm` and the `android_snapshot` volume: creates the AVD, boots it, installs the
+container with `--device /dev/kvm` and the `android_snapshot` volume: creates the AVD on **empty volumes** with a fixed, pre-generated adb key (S2), boots it, installs the
 `uiautomator2` on-device APKs and F-Droid, disables animations, sets stay-awake/locale, saves snapshot `clean`, shuts
 down, and writes a stamp with the image id. Skipped when the stamp matches. (Quickboot snapshots depend on the host
 CPU, which is why it is created where it runs.)
@@ -200,7 +201,7 @@ adds a second backend behind the same session interface:
 
 ## Implementation order
 
-0. **Spikes (go/no-go, results into this plan's notes):**
+0. **Spikes (done, results in "Spike results" below):**
    - S1 emulator boots as a non-root user with only `/dev/kvm`, `cap_drop ALL`, `no-new-privileges`, default seccomp.
    - S2 shared read-only AVD + quickboot snapshot restored by several slots at once; measure restore time and
      check the overlay is discarded on exit.
@@ -210,6 +211,139 @@ adds a second backend behind the same session interface:
    - S5 wrapper-created containers join the stack's attachable overlays and resolve by name/alias from gateway and nginx.
    - S6 firewall: from the emulator uid, metadata server, a peer slot, the gateway and the container loopback via
      `10.0.2.2` are unreachable; public internet works (clear).
+
+### Spike results (2026-10-14/15)
+
+S4 and S5 ran on the dev host (`aarch64`, single-node Swarm, no KVM). S1-S3 and the emulator part of S6 ran on a
+temporary GCE VM in `dngroup-eai-sandbox` (`n2-standard-8`, nested virtualisation, Ubuntu 24.04, Docker 29, emulator
+37.2, `google_apis_playstore` API 34 x86_64, swiftshader). The VM and its disks were deleted afterwards. Nothing in
+the repo was changed.
+
+| Spike | Result |
+|---|---|
+| S1 non-root emulator, only `/dev/kvm` | **PASS** (details below). |
+| S2 shared AVD + snapshot restored by several slots | **PASS, with a design change**: the AVD cannot be shared read-only; each slot gets an overlay mount (read-only golden lower layer + private writable upper). |
+| S3 `uiautomator2` on the image | **PASS**: Play Store, Settings, F-Droid, Chrome webview and Unicode input all work. |
+| S4 Tor via the `tor` container over an `internal` overlay | **PASS**, no fallback needed. |
+| S5 wrapper-created containers on the stack's attachable overlays | **PASS** (single node). |
+| S6 per-uid firewall | **PASS, with a design change**: the loopback reject must not block the emulator's own adb registration. |
+
+**S1 (PASS).** The emulator booted as uid 2000 with `--cap-drop ALL --security-opt no-new-privileges`, default
+seccomp/AppArmor, `--read-only` rootfs plus tmpfs, and only `--device /dev/kvm` (+ `--group-add <kvm gid>`: the device
+is `root:kvm 0660`, so the slot needs the host's kvm gid; the wrapper must look it up). Cold boot 37-43 s, snapshot
+`clean` saved with `adb emu avd snapshot save clean`. Details that must go into the entrypoint:
+- `setpriv --bounding-set=-all` needs `CAP_SETPCAP`; reading/copying the AVD as root with `cap_drop ALL` needs
+  `CHOWN`/`DAC_OVERRIDE`/`FOWNER` (or do those steps as the owning uid). The entrypoint capability set is therefore
+  `NET_ADMIN`, `SETUID`, `SETGID`, `SETPCAP` (+ the three file caps if root touches the files), all dropped for the
+  emulator and everything else.
+- The emulator process ends with an empty capability set (`CapEff/CapBnd = 0`).
+- 4 GB container memory limit **kills the emulator silently** (snapshot RAM is 3 GB, observed ~5.8 GB RSS):
+  `ANDROID_SLOT_MEMORY` default is raised to **6g**.
+
+**S2 (PASS, design change).**
+- Three slots started from the same snapshot concurrently (2 CPUs / 6 GB each): snapshot restore 7-11 s with the shared
+  volume, 11-21 s with the private-copy variant below; twice in a row per slot. Guest writes (`/sdcard` file, a
+  `settings put`) were gone after restarting from the snapshot, so the emulator's temp overlay is discarded.
+- **A read-only AVD mount does not work**: the emulator fails with "A snapshot operation for 'clean' is pending and
+  timeout has expired" and exits. Even with `-read-only` on a writable mount it rewrites `snapshot.pb`, lock files and
+  the userdata `qcow2` header, so the shared volume's checksum changes and three emulators write to one base image.
+- **Chosen design, overlay volume (verified):** the golden AVD volume stays the read-only base; each slot gets a
+  Docker local-driver volume of `type=overlay` (`device=overlay`,
+  `o=lowerdir=<golden mountpoint>,upperdir=<slot vol>/u,workdir=<slot vol>/w`), mounted by `dockerd` on the host, so
+  the slot gets no `SYS_ADMIN`. The wrapper creates a small plain volume per slot, `mkdir`s `u`/`w` (owned by the
+  emulator uid) with a one-shot helper container, and reads the golden mountpoint from `docker volume inspect`
+  (host-path coupling is acceptable for a root wrapper on the host, but it is a Docker implementation detail). Result,
+  three concurrent slots, twice (run 1 fresh, run 2 after wiping the upper directories):
+  - restore 12.3-13.6 s first start, 4.9-6.2 s on restart (one outlier 10.9 s) with three emulators at once; guest
+    writes gone after restart; `uiautomator2` works;
+  - the golden volume's checksum was identical before and after both runs;
+  - **upper layer is 752 MB per slot**, almost all of it the copied-up userdata `qcow2` (827 MB file; the emulator
+    opens it read-write). `ram.bin` (3 GB) is **not** copied up and is shared through one page cache, so the overlay
+    costs ~0.75 GB disk per slot instead of 3.8 GB;
+  - `reset()` = remove the container, `rm -rf` the upper and work directories (empty again: 4 KB), start again (verified,
+    run 2); no 3.8 GB copy.
+  - Caveat: a wipe must happen while the overlay is unmounted (no container using the volume).
+  - Superseded alternative (also verified, works but slower and bigger): a private per-slot volume into which the golden
+    AVD is `cp -a`'d at start (1.3 s warm, 10.7 s cold, 3.8 GB per slot, restore 11-21 s with three slots). AVD paths
+    are absolute in `clean.ini`, so the overlay must be mounted at `/avd` like the golden volume.
+  This replaces "the `android_snapshot` volume read-only" in the Wrapper spec.
+- **The adb key must be fixed and shared.** The guest only trusts the adb key present at the *first boot of a fresh
+  userdata*; a snapshot restored without that key shows the device as `unauthorized`. Generate the key
+  (`adb keygen`) *before* the init boot, in the home dir the emulator uses (`getpwuid` home, here `/home/emu/.android`;
+  `$HOME` overrides are ignored), and mount/copy the same key for every adb user. Re-running init on a non-fresh AVD
+  directory also fails (`unauthorized`): `deploy.sh` must start from empty volumes. The key is only a local adb
+  credential inside the slot; bake it into the image.
+
+**S4 (PASS).** Setup: `internal` + `attachable` overlay; a plain `tor` container on it (and on a normal bridge for
+internet) with `TransPort 0.0.0.0:9040`, `DNSPort 0.0.0.0:5353`, `AutomapHostsOnResolve 1`,
+`VirtualAddrNetworkIPv4 10.192.0.0/10`, `net.ipv4.ip_forward=1`, `NET_ADMIN`, and in the nat table
+`PREROUTING -i <overlay if> -p tcp -j REDIRECT --to-ports 9040` and `-p udp --dport 53 -j REDIRECT --to-ports 5353`,
+`FORWARD` policy DROP. A client container on the overlay only needed `ip route replace default via <tor ip>`
+(`NET_ADMIN`). Observed:
+- HTTPS to a public hostname exits via Tor (`IsTor: true`, exit IP differs from the host's).
+- DNS to the dummy resolver `8.8.8.8` is answered by Tor's `DNSPort` (so `-dns-server 8.8.8.8` works as designed).
+- Raw-IP TCP (`https://1.1.1.1`) also exits via Tor; `.onion` names resolve and connect.
+- UDP other than DNS and ICMP get no reply; the tor container's `FORWARD` DROP counter counted them.
+- Without the route change the same container has no egress at all (`internal` network works as the safety net).
+- Per-source-IP stream isolation: two clients consistently got different exit IPs (3 samples each).
+- No fallback (in-slot redsocks relay) needed; the "needs user decision" item for it is dropped.
+
+Findings that change the design:
+1. **Peers on the Tor overlay are reachable directly (L2), bypassing Tor**, and so is the tor container's own
+   address. The uid firewall must therefore also apply on `android-tor`: reject the overlay subnet and `127.0.0.0/8`
+   for the emulator uid, with an `ACCEPT` for the Tor virtual-address range `10.192.0.0/10` placed **before** the
+   RFC1918 reject (onion names are mapped into it). The text above ("tor: ... everything else dies") already assumes
+   this for loopback only; implement it for peers too. Risk: if Swarm ever allocates an overlay out of
+   `10.192.0.0/10`, choose a different `VirtualAddrNetworkIPv4`.
+2. The redirect needs the `-i <overlay interface>` match (the tor container also has a normal-bridge interface for
+   its own circuits); the plan's "android_tor subnet only" is satisfied that way.
+
+**S5 (PASS).** On a single node: a `--attachable` overlay, a Swarm service on it and a plain `docker run
+--network ... --network-alias android-clear-1` container (`cap_drop ALL` + `NET_ADMIN`, `no-new-privileges`,
+`--read-only`, tmpfs `/tmp`) resolved and connected to each other both ways, by alias and by `tasks.<service>`.
+Not tested: multi-node Swarm (wrapper on the KVM node, gateway elsewhere); VXLAN should make it work but it is
+unverified. Also note `docker cp` into a `--read-only` container fails: the slot entrypoint/test tooling must pipe
+files via stdin or use tmpfs.
+
+**S3 (PASS).** `uiautomator2` (device APKs auto-installed on first connect) as a separate uid from the emulator:
+- `dump_hierarchy()` takes 0.07-0.11 s; Launcher 58 nodes, Play Store 38 (signed-out screen, "Sign in"), Settings 86.
+- Unicode: `d.send_keys('Ünïcödé 日本語 😀')` round-trips exactly into an `EditText` (read back via `get_text()`).
+- **Webview content is in the accessibility tree**: Chrome showing `example.com` exposes "Example Domain" and the page
+  text, including Arabic and Chinese paragraphs. Chrome's first-run screens ("Use without an account", notification
+  prompts) must be clicked through; F-Droid also raises the runtime notification permission dialog.
+- F-Droid APK (`https://f-droid.org/F-Droid.apk`, 12.5 MB, sha256 `83d3fe522281c3cb89fce3bc05038f81b3c3b32c108536941f184c5f9bb53778`
+  on 2026-10-15) installs with `adb install` and launches (`org.fdroid.fdroid`). The checksum changes with each
+  F-Droid release: pin a versioned APK URL at build time, not this one.
+- Not tested: Google/Play login (needs a human), canvas/game UIs, `device_wait_for` semantics.
+
+**S6 (PASS, design change).** Per-uid OUTPUT rules installed by root with `NET_ADMIN`, then emulator started as uid
+2000 with an empty capability set, adb and `uiautomator2` as uid 3000, a stand-in tool server on `127.0.0.1:9000`
+(uid 3000), a peer container and the bridge gateway on a user-defined bridge (Docker resolver `127.0.0.11`).
+Results from inside the guest (`toybox nc`):
+- Public internet works (`ifconfig.me` answered; the guest also talked to Google services on its own); DNS works with
+  only `127.0.0.11` allowed.
+- Blocked: tool server via `10.0.2.2:9000`, the peer container, the bridge gateway `:22`, `169.254.169.254`. **Control:**
+  the same tool-server request returned its banner as soon as an accept for `127.0.0.1:9000` was added, and root in the
+  container reaches every one of these targets. This proves guest traffic appears as the emulator uid's connections and
+  that `10.0.2.2` maps to the container's loopback, so the uid firewall is the guest firewall.
+- **The "reject loopback entirely" rule breaks the emulator**: with it, the emulator's own loopback connections (797
+  rejected packets in a minute) kept the device from appearing in adb (`adb devices` empty for 5+ minutes while the
+  emulator was fully booted and the guest had internet). The emulator registers itself by connecting to the adb server
+  on `127.0.0.1:5037`. Allowing that makes the device appear, **but it also lets the guest reach the adb server
+  through `10.0.2.2:5037`** (verified: `host:version` answered), and a guest-issued `host:connect:<peer>:8000` was
+  accepted by the adb server, which runs un-firewalled as the tool-server uid (it reaches peers, gateway and metadata):
+  an SSRF/pivot out of the VM.
+- **Resolution (verified for discovery):** keep loopback rejected entirely. With the 5037 rule removed, restarting the
+  adb server *after* the emulator is up (`adb kill-server; adb start-server`) found the device within 10 s, because
+  the adb server scans the emulator ports itself. The slot supervisor must therefore start (or restart, until
+  `adb devices` lists the emulator) the adb server only after the emulator is listening. As defence in depth also give
+  the adb/tool-server uid its own OUTPUT rules (loopback and the gateway only), so a future hole cannot be used as a
+  pivot.
+- Test-harness notes: `adb shell` swallows the script from stdin (use `</dev/null`); `docker cp` into a tmpfs path
+  fails.
+
+## Implementation order (steps)
+
 1. `android-slot` image and `deploy.sh` build + snapshot init step.
 2. `android-toolserver/` with tests (against a real emulator; skipped without `/dev/kvm`).
 3. Slot entrypoint (firewall, route, privilege drop, supervisor, `start`/`reset`, `/internal/*`).
