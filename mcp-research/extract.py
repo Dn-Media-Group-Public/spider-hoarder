@@ -6,6 +6,7 @@ import os
 import re
 import zipfile
 
+import lxml.html
 import trafilatura
 from markdown_it import MarkdownIt
 from markitdown import MarkItDown, StreamInfo
@@ -16,6 +17,18 @@ _mdit = MarkdownIt("commonmark", {"linkify": True}).enable(["table", "linkify"])
 
 def is_zip(content_type: str, filename: str) -> bool:
     return filename.lower().endswith(".zip") or content_type == "application/zip"
+
+
+def absolutize(html_bytes: bytes, base_url: str) -> bytes:
+    """Resolve relative href/src against the page URL (honouring <base href>) so saved Markdown links work."""
+    if not base_url or not html_bytes.strip():
+        return html_bytes
+    try:
+        doc = lxml.html.fromstring(html_bytes.decode("utf-8", errors="replace"), base_url=base_url)
+        doc.make_links_absolute(base_url)
+        return lxml.html.tostring(doc, encoding="utf-8")
+    except Exception:  # ponytail: malformed HTML falls back to unresolved links
+        return html_bytes
 
 
 def html_to_markdown(html_bytes: bytes) -> str:

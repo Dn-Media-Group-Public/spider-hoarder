@@ -207,7 +207,7 @@ def _check_rel_path(path: str) -> str:
     return path
 
 
-def _store_and_parse(key: str, filename: str, raw: bytes, content_type: str) -> dict:
+def _store_and_parse(key: str, filename: str, raw: bytes, content_type: str, base_url: str = "") -> dict:
     storage.write_bytes(key, f"original/{filename}", raw, content_type)
     text = None
     if extract.is_zip(content_type, filename):
@@ -221,6 +221,8 @@ def _store_and_parse(key: str, filename: str, raw: bytes, content_type: str) -> 
         text = raw.decode("utf-8", errors="replace")
         return _job_result(key, text, f"original/{filename}", _write_terse(key, filename, text), f"terse/{filename}")
     is_html = "html" in content_type
+    if is_html:
+        raw = extract.absolutize(raw, base_url)  # parsed/ and simplified/ get absolute links; original/ is stored untouched above
     text = extract.html_to_markdown(raw) if is_html else extract.file_to_markdown(raw, filename)
     storage.write_bytes(key, f"parsed/{filename}.md", text.encode(), "text/markdown")
     if is_html and (simple := extract.html_to_simplified(raw)):
@@ -331,7 +333,7 @@ async def _ingest_page(owner: str, url: str, live: sessions.BrowserSession | Non
         raw, ctype = await asyncio.to_thread(fetch.download, url, **kw)
     filename = os.path.basename(url.split("?")[0]) or "page"
     key = _key(owner, job_id)
-    result = _store_and_parse(key, filename, raw, ctype)
+    result = _store_and_parse(key, filename, raw, ctype, url)
     storage.set_meta(key, url=url, target=target if "html" in ctype else None)
     return {"job_id": job_id, **result, **_meta(key)}
 
@@ -344,7 +346,7 @@ async def _save_page(bs: sessions.BrowserSession, browser: str | None = None, ta
     job_id = _new_job_id()
     html, url = await sessions.page_html(bs, browser, target)
     key = _key(bs.owner, job_id)
-    result = _store_and_parse(key, "page.html", html.encode(), "text/html")
+    result = _store_and_parse(key, "page.html", html.encode(), "text/html", url)
     storage.set_meta(key, url=url, target=target)
     return {"job_id": job_id, **result, **_meta(key)}
 
