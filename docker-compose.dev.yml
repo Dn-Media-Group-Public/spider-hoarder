@@ -39,12 +39,20 @@ services:
     deploy: { replicas: 1, restart_policy: { condition: on-failure, delay: 10s, max_attempts: 5 } }
     networks: [public]
 
+  # localhost-is-host.sh drops the loopback `localhost` entries, then execs the image's own entrypoint
   research-tor:
     extra_hosts: ["localhost:host-gateway"]
+    entrypoint: ["tini", "--", "/localhost-is-host.sh", "/app/entrypoint.sh"]
+    volumes: ["./dev/localhost-is-host.sh:/localhost-is-host.sh:ro"]
   research-clear:
     extra_hosts: ["localhost:host-gateway"]
+    entrypoint: ["tini", "--", "/localhost-is-host.sh", "/app/entrypoint.sh"]
+    volumes: ["./dev/localhost-is-host.sh:/localhost-is-host.sh:ro"]
   oauth2-proxy:
     extra_hosts: ["localhost:host-gateway"]
+    user: root   # for the /etc/hosts rewrite; su-exec drops back to the image's uid
+    entrypoint: ["/localhost-is-host.sh", "su-exec", "65532:65532", "/entrypoint.sh"]
+    volumes: ["./dev/localhost-is-host.sh:/localhost-is-host.sh:ro"]
 
 configs:
   keycloak_setup: { file: ./keycloak/setup.sh }

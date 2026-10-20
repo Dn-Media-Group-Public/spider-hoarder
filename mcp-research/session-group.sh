@@ -11,7 +11,7 @@ i=0; while [ ! -e "/tmp/.X11-unix/X$DISPLAY_NUM" ] && [ "$i" -lt 100 ]; do sleep
 # VNC password comes from a 0600 file, never argv (/proc/*/cmdline is world-readable)
 x11vnc -display "$DISPLAY" -passwdfile "$HOME/vncpass" -localhost -rfbport "$VNC_PORT" \
        -forever -shared -quiet -o "$HOME/x11vnc.log" &
-websockify --web /usr/share/novnc "0.0.0.0:$WS_PORT" "localhost:$VNC_PORT" &
+websockify --web /usr/share/novnc "0.0.0.0:$WS_PORT" "127.0.0.1:$VNC_PORT" &
 
 # Tor: Chromium talks to a local filtering SOCKS relay (blocklist), which forwards to Tor
 if [ -n "${UPSTREAM_SOCKS:-}" ]; then
