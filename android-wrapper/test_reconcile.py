@@ -80,7 +80,7 @@ def test_reconcile():
     spec = runs(log)[0]
     for must in ("--device /dev/kvm", "--group-add 993", "--cap-drop ALL", "--security-opt no-new-privileges", "--read-only", "--ulimit nofile=65536:65536",
                  "--network st_android_clear", "--network-alias android-clear-1", "-v st-android-clear-1-avd:/avd",
-                 "--memory 6g", "--cpus 2", "--tmpfs /tmp:rw,exec,nosuid,size=4g", "--label spider-hoarder.stack=st", "--restart no"):
+                 "--memory 8g", "--cpus 2", "--tmpfs /tmp:rw,exec,nosuid,size=4g", "--label spider-hoarder.stack=st", "--restart no"):
         assert must in spec, must
     assert "--privileged" not in spec and "docker.sock" not in spec and "SYS_ADMIN" not in spec
     assert "--network st_android_tor" in runs(log)[2] and "EGRESS=tor" in runs(log)[2]

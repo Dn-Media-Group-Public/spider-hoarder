@@ -81,7 +81,8 @@ load) instead of running out the `BOOT_TIMEOUT` (`ANDROID_BOOT_TIMEOUT`, 240 s);
 
 Measured on the first KVM host (GCE VM, 8 vCPU, 32 GB, nested KVM, ~48 MB/s disk reads, 3 GB guest): a reset takes 44-62 s; the
 restore reads `ram.bin`, which is as large as the guest RAM, so **disk read speed decides** (a 2 vCPU / 7.9 GB host with a ~7.6 MB/s disk
-needed 240-540 s). The guest clock is the snapshot time plus the time since restore, so it lags by the snapshot's age (not corrected).
+needed 240-540 s). The guest clock is the snapshot time plus the time since restore, so it lags by the snapshot's age (52 min seen);
+`slotd.set_guest_time()` sets it from the host clock (`cmd alarm set-time`, works as the shell uid) at the end of boot and again when a session starts.
 See also: [Plan: Android KVM bring-up](../plans/android-kvm-bringup.md)
 
 Idle timeout `ANDROID_IDLE_TIMEOUT` (600 s) ends the session and wipes the slot; a pending `device_request_human_help` suspends
@@ -143,7 +144,7 @@ re-makes the snapshot. Before that it scales the wrapper to 0 and **waits until 
 is left** (hand-run slots included: remove them first), then recreates the volume empty.
 
 **Guest RAM and memory.** `ANDROID_RAM_MB` is baked into the snapshot: a restore reads that much from disk, and the slot needs about
-**guest RAM + 3 GB** of container memory (`ANDROID_SLOT_MEMORY`, default 6g for the 3 GB guest). Measured: slot peak cgroup usage incl.
+**guest RAM + ~5 GB** of container memory (`ANDROID_SLOT_MEMORY`, default 8g for the 3 GB guest; qemu measured at 4.7-5.3 GB RSS: 3 GB guest + 1.4-2 GB heap, plus the `/tmp` tmpfs; 6g got the emulator OOM-killed in a Chrome session). Measured: slot peak cgroup usage incl.
 page cache about 5.4 GB (3 GB or 2 GB guest alike); a 4 GB limit gets the emulator OOM-killed once the tool server starts, 5 GB worked. A smaller guest means less disk read per
 restore and less RAM per slot, at the cost of a sluggish guest.
 

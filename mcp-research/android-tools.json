@@ -267,7 +267,7 @@
  },
  {
   "name": "device_app_start",
-  "description": "Start an app by package name.",
+  "description": "Start an app by package name and wait a few seconds for it to come to the front. A first start usually opens a permission or welcome dialog (F-Droid, org.fdroid.fdroid, asks to send notifications: answer it, \"Don't allow\" is fine), so take a device_snapshot afterwards. F-Droid is installed for getting apps; the Play Store starts signed out.",
   "inputSchema": {
    "type": "object",
    "properties": {

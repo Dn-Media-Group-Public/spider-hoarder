@@ -34,11 +34,11 @@ state is tracked here; the detailed checklists stay in the stage sections above.
 |---|---|---|---|
 | W1 | Slot isolation checks | Stage 2 step 6: TCP-level firewall proof (`10.0.2.2:9000/9001/5037/5900`, `169.254.169.254`, IPv6, svc-uid loopback-only), same list for a tor slot. Step 2: drop `NET_ADMIN` from `tini` or document it; tmpfs sizes under a session; whether `ANDROID_EMU_TMP` has any effect / `wipe()` covers emulator temp files | [done], results below (incl. fix 12) |
 | W2 | Reset and overlay hygiene | Stage 2 steps 4-5: reset during a running tool call; 5x reset with the full dirtying set (APK, account, Chrome login, clipboard); overlay upper size, golden checksum unchanged, recreate gives a fresh upper. Host regression tests for `ensure_network`, `console.py`, sdcard baseline | [done, see "W2 re-run 2" and fix 16] |
-| W3 | Tool server and device behaviour | Stage 3 leftovers: Unicode `device_type`, canvas tap, Play Store screen, check and trim `KEYS`, first-call latency after restore, F-Droid "first steps" hint in tool descriptions, then `export_tools.py`. Guest clock lag after restore (set time at session start) | [todo] |
+| W3 | Tool server and device behaviour | Stage 3 leftovers: Unicode `device_type`, canvas tap, Play Store screen, check and trim `KEYS`, first-call latency after restore, F-Droid "first steps" hint in tool descriptions, then `export_tools.py`. Guest clock lag after restore (set time at session start) | [done], results below (fixes 17-20), re-tested on the deployed stack |
 | W4 | Stack lifecycle and Tor | Stage 4 steps 1-4: wrapper kill/recreate, spec-hash change, scale-0, wrapper isolation; networks/DNS and nginx -> `:6080`; Tor leak checks (iptables scope, distinct exits, `.onion`, UDP/ICMP fail, tor stopped = no egress, `-dns-server`, `research-tor` unaffected); kill-gateway-mid-session reset-at-start; oauth2-proxy DELETE path | [todo] |
 | W5 | End to end through nginx | Stage 4 steps 5-6: Android case in `e2e_auth.py` (whole step 5 checklist), quarantine path, noVNC handoff in a real browser (mouse/keyboard, sizing, 403 for other user, link revoked after session) | [todo] |
 | W6 | Google sign-in and real apps (manual) | Stage 5, needs a human | [todo] |
-| W7 | Soak and capacity | Stage 6, plus stage 3 step 4 (two slots at once, RSS vs limit, OOM in `dmesg`); decide on periodic slot recreate | [todo] |
+| W7 | Soak and capacity | Stage 6, plus stage 3 step 4 (two slots at once, RSS vs limit, OOM in `dmesg`); decide on periodic slot recreate | [todo]; **start with the memory finding in the W3 results (slot at its 6 GiB limit, OOM kill seen)** |
 | W9 | Copy less data per slot recreate | New slots copy the userdata qcow2 (~2.1 GB) up into their overlay on every session (see fix 15). Find out why the file is copied up at all (`-read-only` already puts guest writes in a temp qcow2 in `/tmp`), and how to avoid it: e.g. a qcow2 backing file on the golden volume instead of an overlayfs copy-up, mounting `/avd` read-only for everything but the few files the emulator must write, hard-linking, or making the userdata smaller. Measure recreate time before and after; goal: recreate no slower than the old in-place reset (44-83 s) | [todo] |
 | W8 | Docs and close-out | Deliverables: measured numbers, README Android section, implemented plan's "Not run" paragraph, new env vars and `tor-route.sh` in the docs; move this plan to `docs/implemented-plans/` and link it in the index | [todo] |
 
@@ -163,6 +163,49 @@ between `free` and the gateway's `verify` would quarantine a slot; not seen in 6
   (when it declares the slot `free`) and `verify` compares with that instead of the init-time baseline (catches what a session adds, ignores what
   the system did after restore); (c) drop the `/sdcard` listing from `verify` since a reset boots a pristine userdata overlay anyway, and keep
   packages and accounts. Recommendation: (b), with (a) not needed.
+
+### W3 results (2026-10-22, stack slot `spider-hoarder-android-clear-1` driven by an MCP client / the handlers run inside the container; changed code copied to `/tmp/ts` there; re-tested deployed, see the last paragraph)
+
+- **Unicode `device_type`: works** (`Ünï 日本 ñ €` typed into Chrome's address bar with `clear`, read back exactly). The 😀 emoji case was not reached (see ref
+  finding). `data:` URLs through `device_open_url` fail with "unable to resolve Intent": Chrome refuses `data:` intents, not a quoting problem (list and
+  `shlex.quote` forms behave the same, `;` `|` `&` URLs are fine). No code change.
+- **Fix 17, ref of an input field died when its text changed:** `Node.sig` included the text, so after `device_type` the field's ref answered "gone from
+  the screen" and a second `device_type` into the same ref failed. `sig` now leaves out the text of `EditText` nodes (other nodes unchanged; a changed
+  button label is still another element). Test `test_ref_of_an_input_field_survives_typing_into_it`.
+- **Fix 18, `KEYS` checked against the device, `tab`/`space`/`escape` did nothing:** uiautomator2's `pressKey` returns `False` for those three names
+  (tool still said "Pressed"); the other 17 work (`back`/`home` also return `False` on the launcher, so the return value is not usable as an error).
+  They now go out as keycodes (`KEYCODES` = 61, 62, 111). Live: `space` appended to the field text, `tab` moved focus off the address bar. **No key
+  trimmed**: all 20 names are accepted. `left`/`right`/`center` took ~5 s each on the memory-starved guest (below).
+- **Fix 19, guest clock (decided in the plan, no new design):** the guest was **52 min behind** the host after a restore. `cmd alarm set-time <ms>` works as the
+  shell uid; `slotd.set_guest_time()` runs at the end of `boot()` and in `start_session()`. Verified by hand (clock matched the host right after); test
+  `test_guest_time_is_set_from_the_host_clock_at_session_start`. Not yet seen in a deployed slot.
+- **Fix 20, `device_app_start` reported the wrong foreground app:** it printed "Current app" at once; the Play Store took ~7 s, F-Droid's first start shows a
+  notification-permission dialog (`permission_allow_button` / `permission_deny_button`) over which `current_app` still says Chrome. It now waits up to
+  `START_WAIT` (5 s) for the package and otherwise says "<pkg> is not the foreground app yet ... take a device_snapshot". Test added.
+- **First-call latency after restore: 0.9 s** (first `current_app` on a freshly created slot, 0.1 s the second time, 0.4 s for a snapshot). The 64 s of the
+  starved first host is not reproduced on this host.
+- **Canvas tap / swipe:** `device_tap` on raw coordinates focused Chrome's address bar; `device_swipe` ran (10 s on the starved guest). **Play Store signed
+  out:** the outline shows "Sign in to find the latest Android apps..." and a `Button "Sign in"` (obfuscated ids `0_resource_name_obfuscated`), usable.
+  **F-Droid first start:** the notification dialog above; hint added to the `device_app_start` description (F-Droid is there for getting apps, the Play
+  Store starts signed out). The F-Droid install flow itself (unknown-sources prompt) was not walked through: do it in W6 with a human.
+- `export_tools.py` re-run (`mcp-research/android-tools.json`); docs updated (`docs/api/tools.md`, `docs/architecture/android.md`). Host tests: all four suites pass.
+- **Blocker found for W7: a slot is at its memory limit within minutes of normal use.** The emulator was **OOM-killed** (`OOMKilled=true`, slot `broken`)
+  during a Chrome session about 30 min after start. On the fresh slot: cgroup `memory.current` 6.37 GB of 6.44 GB (`anon` 5.38 GB, `file` 0.95 GB, `shmem`
+  0.53 GB), **qemu RSS 5.29 GB for a 3 GB guest**, the guest itself had 250 MB free and `lmkd` killed Chrome's processes; apps then took 30 s to start. So the
+  rule "slot limit = guest RAM + 3 GB" (6 GiB) is too tight here: either raise `ANDROID_SLOT_MEMORY` (8g?), lower `ANDROID_RAM_MB`, or find why qemu holds
+  ~2.3 GB over guest RAM (swiftshader, the snapshot load, 4 GB `/tmp` tmpfs with the 1.5 GB temp qcow2 is counted separately under `shmem`). **Decided by the user: `ANDROID_SLOT_MEMORY=8g`** (default in `reconcile.sh`, `docker-compose.yml`, `.env.example`, local `.env`; docs updated; spec hash changes, so a deploy recreates the slots).
+  Experiments on a scratch slot (qemu RSS idle, 30 s after `free`): control 4.75 GB (heap 1.44 GB); `-no-window` 4.53 GB; `-gpu guest` 4.22 GB but `free` after 110 s (was 65 s);
+  both 4.08 GB, 174 s. Guest RAM is 3 GB resident from the restore; the rest is emulator heap that grows ~0.6 GB under use. Flags not adopted. Also seen: the reset after the OOM kill took 87 s to `free`.
+
+**W3 re-test on the deployed stack (2026-10-22, after `./deploy.sh --dev`: image and golden snapshot rebuilt, both slots `free`, 8 GiB limit, `OOMKilled` false,
+memory 5.7 of 8 GiB after the run).** Driven through the real MCP tool server of the clear slot (session started via slotd `/internal/start`): **15 of 16
+checks pass, the 16th is a test-expectation error.** Passed: 18 tools listed; first call 1.0 s; guest clock diff 0 s from the host after session start
+(fix 19 live); all 20 keys accepted; open_url + wait_for; Unicode `Ünï 日本 ñ €` typed three times into the **same ref** (fix 17 live); `space` typed, `tab`
+moved focus (fix 18 live); canvas tap focused the address bar; swipe; F-Droid first start (7.3 s, `app_start` says "not the foreground app yet" under the
+dialog, fix 20 live); Play Store signed-out outline has "Sign in". The emoji case typed correctly (screenshot: `😀 emoji` in the address bar, Chrome even offers
+to paste it from the clipboard, which is how uiautomator2's `send_keys` types) but the accessibility dump returns characters outside the BMP as `..`, so
+`device_find`/`device_snapshot` cannot read an emoji back: a limit of the tree, noted in `docs/api/tools.md`. After the test the slot was reset: replacement
+`free`, `verify` ok.
 
 ## Host
 
@@ -343,9 +386,9 @@ Run an MCP client against `slot:9000/mcp` (headers `Host: mcp-upstream`, `X-Slot
 
 | # | Step | Status / result |
 |---|---|---|
-| 1 | Every tool once against known screens (Launcher, Settings, F-Droid, Chrome `example.com`, Play Store signed-out): outline, `device_find`, stale refs, `device_type` Unicode/`clear`/`submit`, `device_wait_for`, `device_swipe`, `device_tap` on canvas, `device_open_url`, `device_app_*`, `device_logcat`, `device_shell`, screenshot PNG | [partly]: all 18 tools called once and behave; `device_open_url` + `wait_for "Example Domain"` pass. [todo] Unicode `device_type`/`device_type` options, canvas tap, Play Store screen |
+| 1 | Every tool once against known screens (Launcher, Settings, F-Droid, Chrome `example.com`, Play Store signed-out): outline, `device_find`, stale refs, `device_type` Unicode/`clear`/`submit`, `device_wait_for`, `device_swipe`, `device_tap` on canvas, `device_open_url`, `device_app_*`, `device_logcat`, `device_shell`, screenshot PNG | [partly]: all 18 tools called once and behave; `device_open_url` + `wait_for "Example Domain"` pass. [done] in W3 (Unicode, canvas tap, Play Store screen; fixes 17-18, 20) |
 | 2 | **Install APK** via `PUT /internal/in/...` then `device_install_apk`, deleted afterwards, non-APK fails cleanly | [done] (install works) |
-| 3 | uiautomator2 assumptions: `app_list("-3")`, every `KEYS` name accepted by `d.press`, `install(..., nolaunch=True)`, `send_keys(clear=...)`, Chrome first-run dialogs, first `u2.connect` latency after restore | [partly]: install works; Chrome first run handled in init (stage 1 step 7). [todo] check every `KEYS` name and trim the list; first-call latency after restore (first call after boot took 64 s on the starved host, not re-measured). F-Droid asks for a permission on its first start: add a "first steps" hint to the tool descriptions |
+| 3 | uiautomator2 assumptions: `app_list("-3")`, every `KEYS` name accepted by `d.press`, `install(..., nolaunch=True)`, `send_keys(clear=...)`, Chrome first-run dialogs, first `u2.connect` latency after restore | [partly]: install works; Chrome first run handled in init (stage 1 step 7). [done] in W3: every `KEYS` name checked (none trimmed), first call 0.9 s, F-Droid hint added |
 | 4 | Concurrency: two slots at once, `docker stats`, emulator RSS vs the 6g limit, OOM in `dmesg` | [todo]. (First host: 4 GB limit OOM-kills the emulator, 5 GB works; see Host) |
 
 Also: `smoke_android.py` passes on the clear slot (session, 18 tools, snapshot, `open_url` + `wait_for`, screenshot, second start refused, old

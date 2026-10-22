@@ -27,11 +27,11 @@ Set `ANDROID_CLEAR_REPLICAS` / `ANDROID_TOR_REPLICAS` above 0. `deploy.sh` then 
 `ANDROID_FDROID_SHA256`, `/dev/kvm` and an x86_64 host; builds `android-wrapper:local` and `android-slot:local`; makes the golden
 snapshot on this host (skipped while the volume's stamp matches the image; a new image stops the wrapper, so the slots go, and
 starts from an empty volume); and the wrapper creates the slots on this node (`ANDROID_PLACEMENT`). Slot capacity per egress is
-replicas × `ANDROID_SLOTS_PER_REPLICA`; each slot takes `ANDROID_SLOT_CPUS` (2) and `ANDROID_SLOT_MEMORY` (6g).
+replicas × `ANDROID_SLOTS_PER_REPLICA`; each slot takes `ANDROID_SLOT_CPUS` (2) and `ANDROID_SLOT_MEMORY` (8g).
 See also: [Android emulators](../architecture/android.md), [Plan: Android hoarder](../implemented-plans/android-hoarder.md),
 [Plan: Android KVM bring-up](../plans/android-kvm-bringup.md)
 
-**Host sizing.** Per slot: 2 CPUs, 6 GB RAM (guest RAM + ~3 GB), ~0.75 GB disk for its overlay upper; the golden volume is ~3.8 GB. Plan
+**Host sizing.** Per slot: 2 CPUs, 8 GB RAM (guest RAM + ~5 GB: emulator heap ~2 GB, tmpfs, page cache), ~0.75 GB disk for its overlay upper; the golden volume is ~3.8 GB. Plan
 for 8 vCPU / 24 GB / 40 GB disk for 2 slots, and **SSD-class disk reads**: a slot (re)start reads a snapshot as large as the guest RAM,
 so disk speed sets the reset time. Measured on a GCE VM (8 vCPU, 32 GB, nested KVM, ~48 MB/s disk reads, 3 GB guest): reset 44-62 s,
 snapshot init 3 min 20 s; on a 2 vCPU / 7.9 GB host with ~7.6 MB/s reads a reset took 240-540 s and the slot thrashed. A 4g slot limit
@@ -43,7 +43,7 @@ gets the emulator OOM-killed; 5g worked. The device `/dev/kvm` must be readable 
 | `ANDROID_CLEAR_REPLICAS`, `ANDROID_TOR_REPLICAS` (0), `ANDROID_SLOTS_PER_REPLICA` (2) | gateways per egress and emulators per gateway |
 | `ANDROID_IDLE_TIMEOUT` (600 s), `ANDROID_MAX_SESSIONS_PER_USER` (1) | session limits |
 | `ANDROID_API` (34) | system image level |
-| `ANDROID_RAM_MB` (3072) | guest RAM, baked into the golden snapshot via `hw.ramSize`; part of the snapshot stamp (`<image id> ram=<n>` when set), so changing it re-makes the snapshot. Slot memory limit should be about this + 3 GB |
+| `ANDROID_RAM_MB` (3072) | guest RAM, baked into the golden snapshot via `hw.ramSize`; part of the snapshot stamp (`<image id> ram=<n>` when set), so changing it re-makes the snapshot. Slot memory limit should be about this + 5 GB |
 | `ANDROID_BOOT_TIMEOUT` (240 s) | wrapper env, passed to the slot as `BOOT_TIMEOUT`: how long `slotd` waits for the emulator/guest per boot; in the slot spec hash (a change recreates the slots) |
 | `ANDROID_RESET_TIMEOUT` (300 s) | the android gateways' `SLOT_RESET_TIMEOUT` (wait for a reset) and `SLOT_READY_TIMEOUT` (wait for a slot to be `free` before a session starts); keep above the boot timeout |
 | `ANDROID_HELP_TIMEOUT` (3600 s) | max time a pending `device_request_human_help` suspends the idle timer (not in `.env.example`; read by the gateway) |

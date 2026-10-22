@@ -283,6 +283,25 @@ def test_console_py_auth_and_ko():
         assert seen == ["auth sekrit", "avd snapshot save clean", "auth sekrit", "bogus"], seen
 
 
+def test_guest_time_is_set_from_the_host_clock_at_session_start():
+    os.environ["SLOT_SECRET"] = "s3cret"
+    import slotd
+    calls = []
+    saved = (slotd.adb, slotd.spawn, slotd.state, slotd.SVC_UID, slotd.os.open, slotd.os.fdopen, slotd.os.chown)
+    slotd.adb = lambda *a, **k: calls.append(a) or ""
+    slotd.spawn = lambda *a, **k: None
+    slotd.os.open, slotd.os.fdopen, slotd.os.chown = (lambda *a, **k: 0), (lambda *a, **k: open(os.devnull, "w")), (lambda *a: None)
+    try:
+        slotd.state = slotd.FREE
+        t0 = int(time.time() * 1000)
+        slotd.start_session("abcd1234")
+    finally:
+        slotd.adb, slotd.spawn, slotd.state, slotd.SVC_UID, slotd.os.open, slotd.os.fdopen, slotd.os.chown = saved
+        slotd.state = slotd.FREE
+    assert len(calls) == 1 and calls[0][:5] == ("-s", slotd.SERIAL, "shell", "cmd", "alarm"), calls
+    assert calls[0][5] == "set-time" and t0 <= int(calls[0][6]) <= int(time.time() * 1000), calls
+
+
 def test_end_session_answers_then_exits_without_restarting_anything():
     os.environ["SLOT_SECRET"] = "s3cret"
     import slotd
@@ -313,5 +332,6 @@ if __name__ == "__main__":
     test_settled_listing_waits_until_the_listing_stops_changing()
     test_ensure_network_toggles_wifi_when_gateway_stays_silent()
     test_console_py_auth_and_ko()
+    test_guest_time_is_set_from_the_host_clock_at_session_start()
     test_end_session_answers_then_exits_without_restarting_anything()
     print("ok")

@@ -230,6 +230,7 @@ def boot() -> None:
             raise RuntimeError("emulator exited during boot")
         if adb("-s", SERIAL, "shell", "getprop", "sys.boot_completed").strip() == "1":
             ensure_network()
+            set_guest_time()
             return
         time.sleep(1)
     raise RuntimeError("guest did not finish booting")
@@ -261,6 +262,12 @@ def ensure_network() -> None:
                 log.info("guest network recovered by toggling wifi")
                 return
     log.warning("guest cannot reach its gateway after restore")
+
+
+def set_guest_time() -> None:
+    """The guest's clock is the snapshot's time plus the time since the restore, so it lags by the snapshot's age (an hour
+    or more: TLS dates, 'today' in apps). `cmd alarm set-time` works as the shell uid. Best effort."""
+    adb("-s", SERIAL, "shell", "cmd", "alarm", "set-time", str(int(time.time() * 1000)))
 
 
 def start_toolserver() -> None:
@@ -377,6 +384,7 @@ def start_session(vnc_password: str) -> None:
     with os.fdopen(fd, "w") as f:
         f.write(vnc_password)
     os.chown(pw, SVC_UID, SVC_GID)
+    set_guest_time()  # the slot may have been free for hours since boot
     spawn("x11vnc", SVC_UID, ["x11vnc", "-display", DISPLAY, "-passwdfile", pw, "-localhost", "-rfbport", str(VNC_PORT),
                               "-forever", "-shared", "-quiet"])
     spawn("websockify", SVC_UID, ["websockify", "--web", "/usr/share/novnc", f"0.0.0.0:{WS_PORT}", f"127.0.0.1:{VNC_PORT}"])

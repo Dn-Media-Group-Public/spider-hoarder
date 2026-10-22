@@ -100,6 +100,35 @@ def test_find_and_type():
     assert [c[0] for c in dev.calls] == ["click", "keys", "press"] and dev.calls[1] == ("keys", "Ünï 日本", True)
 
 
+def test_ref_of_an_input_field_survives_typing_into_it():
+    dev = FakeDevice()
+    run(dev, "device_snapshot")
+    ref = next(r for r, n in dev.refs.table.items() if n.cls.endswith("EditText"))
+    assert dev.refs.table[ref].text == ""
+    dev.xml = dev.xml.replace('text="" resource-id="com.x:id/email"', 'text="typed Ünï" resource-id="com.x:id/email"', 1)
+    assert 'text="typed Ünï"' in dev.xml
+    run(dev, "device_type", ref=ref, text="again", clear=True)  # same ref, new text
+    assert dev.calls[0][0] == "click"
+    btn = next(r for r, n in dev.refs.table.items() if n.cls.endswith("Button"))
+    dev.xml = dev.xml.replace('text="Next"', 'text="Done"', 1)  # a label that changes is another element
+    try:
+        run(dev, "device_click", ref=btn)
+        assert False
+    except tools.ToolError:
+        pass
+
+
+def test_app_start_says_when_the_app_is_not_in_front():
+    dev = FakeDevice()
+    assert "not the foreground" not in run(dev, "device_app_start", package="com.x")
+    tools.START_WAIT = 0.6
+    try:
+        r = run(dev, "device_app_start", package="org.fdroid.fdroid")
+    finally:
+        tools.START_WAIT = 5
+    assert "org.fdroid.fdroid is not the foreground app" in r and "Current app: com.x" in r
+
+
 def test_files_and_inputs():
     with tempfile.TemporaryDirectory() as out, tempfile.TemporaryDirectory() as inp:
         tools.OUT, tools.IN = out, inp
@@ -139,6 +168,8 @@ def test_wait_for_and_keys():
     except tools.ToolError as e:
         assert "timed out" in str(e)
     run(dev, "device_press_key", key="BACK")
+    run(dev, "device_press_key", key="tab")
+    assert dev.calls[-2:] == [("press", "back"), ("press", 61)]  # names u2 does not know go out as keycodes
     try:
         run(dev, "device_press_key", key="reboot")
         assert False

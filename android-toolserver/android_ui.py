@@ -29,7 +29,8 @@ class Node:
 
     @property
     def sig(self) -> tuple:
-        return (self.cls, self.rid, self.text, self.desc)
+        # an input field's text is what the user (or device_type) just changed: not part of its identity
+        return (self.cls, self.rid, "" if self.cls.endswith("EditText") else self.text, self.desc)
 
     @property
     def center(self) -> tuple:

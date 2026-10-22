@@ -12,7 +12,9 @@ OUT = os.environ.get("ANDROID_OUT_DIR", "/out")  # file outputs; slotd serves th
 IN = os.environ.get("ANDROID_IN_DIR", "/in")     # input files (APKs) the gateway pushed
 KEYS = {"back", "home", "enter", "recent", "menu", "search", "delete", "tab", "space", "power", "volume_up",
         "volume_down", "volume_mute", "up", "down", "left", "right", "center", "camera", "escape"}
+KEYCODES = {"tab": 61, "space": 62, "escape": 111}  # uiautomator2's pressKey has no name for these (it returns False): send the keycode
 MAX_WAIT = 120
+START_WAIT = 5  # seconds device_app_start waits for the app to be in front
 
 
 class ToolError(Exception):
@@ -64,7 +66,12 @@ TOOLS: dict = {
     "device_install_apk": (
         "Install an APK that is stored in a job (e.g. uploaded through get_upload_link).",
         schema(["file"], file={**s_, "description": "Name of an APK pushed to the device (set by the gateway)"})),
-    "device_app_start": ("Start an app by package name.", schema(["package"], package=s_, activity=s_)),
+    "device_app_start": (
+        "Start an app by package name and wait a few seconds for it to come to the front. A first start usually opens "
+        "a permission or welcome dialog (F-Droid, org.fdroid.fdroid, asks to send notifications: answer it, \"Don't "
+        "allow\" is fine), so take a device_snapshot afterwards. F-Droid is installed for getting apps; the Play Store "
+        "starts signed out.",
+        schema(["package"], package=s_, activity=s_)),
     "device_app_stop": ("Force-stop an app.", schema(["package"], package=s_)),
     "device_app_list": ("List installed packages (third-party only unless `all`).", schema(all=b_, filename=FILENAME)),
     "device_current_app": ("Package and activity in the foreground.", schema()),
@@ -159,7 +166,7 @@ def press_key(dev, args):
     key = str(args["key"]).lower()
     if key not in KEYS:
         raise ToolError(f"unknown key {key!r}; one of {', '.join(sorted(KEYS))}")
-    dev.press(key)
+    dev.press(KEYCODES.get(key, key))
     return f"### Result\nPressed {key}"
 
 
@@ -212,8 +219,15 @@ def install_apk(dev, args):
 
 
 def app_start(dev, args):
-    dev.app_start(str(args["package"]), args.get("activity"))
-    return f"### Result\nStarted {args['package']}" + _device(dev)
+    pkg = str(args["package"])
+    dev.app_start(pkg, args.get("activity"))
+    deadline = time.time() + START_WAIT
+    while dev.current_app().get("package") != pkg and time.time() < deadline:
+        time.sleep(0.5)
+    note = ""
+    if dev.current_app().get("package") != pkg:  # e.g. a system dialog (permission prompt) is on top
+        note = f"\n{pkg} is not the foreground app yet (a dialog or a slow start): take a device_snapshot"
+    return f"### Result\nStarted {pkg}{note}" + _device(dev)
 
 
 def app_stop(dev, args):
