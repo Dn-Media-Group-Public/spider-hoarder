@@ -22,23 +22,25 @@ case "$cmd" in
       rm) ;;
     esac ;;
   run)
-    name=""; spec=""; lab=""
+    name=""; spec=""; lab=""; stk=""
     while [ $# -gt 0 ]; do
       case "$1" in
         --name) name=$2; shift ;;
-        --label) case "$2" in spider-hoarder.spec=*) spec=${2#*=} ;; spider-hoarder.android-slot=*) lab=${2#*=} ;; esac; shift ;;
+        --label) case "$2" in spider-hoarder.spec=*) spec=${2#*=} ;; spider-hoarder.android-slot=*) lab=${2#*=} ;; spider-hoarder.stack=*) stk=${2#*=} ;; esac; shift ;;
       esac
       shift
     done
-    if [ -n "$name" ]; then echo "$spec true" > "$S/c/$name"; echo "$lab" > "$S/l/$name"; fi ;;
+    if [ -n "$name" ]; then echo "$spec true" > "$S/c/$name"; echo "$lab" > "$S/l/$name"; echo "$stk" > "$S/s/$name"; fi ;;
   inspect)
     for last; do :; done
     if [ -f "$S/c/$last" ]; then cat "$S/c/$last"; else exit 1; fi ;;
   start) for last; do :; done; read spec _ < "$S/c/$last"; echo "$spec true" > "$S/c/$last" ;;
   exec) echo "$*" >> "$S/exec"; [ -f "$S/route-moved" ] && exit 10; exit 0 ;;
-  rm) for last; do :; done; rm -f "$S/c/$last" "$S/l/$last" ;;
+  rm) for last; do :; done; rm -f "$S/c/$last" "$S/l/$last" "$S/s/$last" ;;
   ps)
+    want=""; for a; do case "$a" in label=spider-hoarder.stack=*) want=${a#label=spider-hoarder.stack=} ;; esac; done
     for n in $(ls "$S/l"); do
+      [ -z "$want" ] || [ "$(cat "$S/s/$n")" = "$want" ] || continue
       case "$*" in *"{{.Label"*) echo "$n $(cat "$S/l/$n")" ;; *) echo "$n" ;; esac
     done ;;
 esac
@@ -50,6 +52,7 @@ class Env:
         self.d = tempfile.mkdtemp()
         os.makedirs(f"{self.d}/c")
         os.makedirs(f"{self.d}/l")
+        os.makedirs(f"{self.d}/s")
         p = f"{self.d}/docker"
         open(p, "w").write(FAKE)
         os.chmod(p, 0o755)
@@ -77,7 +80,7 @@ def test_reconcile():
     spec = runs(log)[0]
     for must in ("--device /dev/kvm", "--group-add 993", "--cap-drop ALL", "--security-opt no-new-privileges", "--read-only", "--ulimit nofile=65536:65536",
                  "--network st_android_clear", "--network-alias android-clear-1", "-v st-android-clear-1-avd:/avd",
-                 "--memory 6g", "--cpus 2", "--restart unless-stopped"):
+                 "--memory 6g", "--cpus 2", "--tmpfs /tmp:rw,exec,nosuid,size=4g", "--label spider-hoarder.stack=st", "--restart no"):
         assert must in spec, must
     assert "--privileged" not in spec and "docker.sock" not in spec and "SYS_ADMIN" not in spec
     assert "--network st_android_tor" in runs(log)[2] and "EGRESS=tor" in runs(log)[2]
@@ -88,14 +91,29 @@ def test_reconcile():
     p = f"{e.d}/c/st-android-clear-2"
     spec_hash = open(p).read().split()[0]
     open(p, "w").write(spec_hash + " false\n")
-    log = e.run()
-    assert "start st-android-clear-2" in log and runs(log) == []
+    log = e.run()  # a stopped slot (session over, crash, reboot) is replaced, never restarted: fresh overlay
+    assert "start st-android-clear-2" not in log and len(runs(log)) == 1 and "st-android-clear-2-state" in log
+    assert open(p).read().split() == [spec_hash, "true"]
     log = e.run(IMG="2")  # new slot image: every slot is recreated
     assert len(runs(log)) == 3
     log = e.run(IMG="2", ANDROID_CLEAR_SLOTS="1")  # fewer slots: the extra one goes
     assert e.containers() == ["st-android-clear-1", "st-android-tor-1"] and runs(log) == []
     log = e.run(IMG="2", ANDROID_CLEAR_SLOTS="0", ANDROID_TOR_SLOTS="0")
     assert e.containers() == []
+
+
+def test_wrapper_only_touches_its_own_stack():
+    a = Env(ANDROID_CLEAR_SLOTS="1", ANDROID_TOR_SLOTS="1")
+    a.run()
+    # a second wrapper (another stack name) on the same daemon, with other counts: it must not remove the first one's slots
+    b = Env(ANDROID_CLEAR_SLOTS="1", ANDROID_TOR_SLOTS="0", STACK_NAME="s2")
+    for sub in ("c", "l", "s"):
+        os.rmdir(f"{b.d}/{sub}")
+        os.symlink(f"{a.d}/{sub}", f"{b.d}/{sub}")
+    b.run()
+    assert a.containers() == ["s2-android-clear-1", "st-android-clear-1", "st-android-tor-1"], a.containers()
+    b.run(ANDROID_CLEAR_SLOTS="0")  # lowering its own count removes only its own
+    assert a.containers() == ["st-android-clear-1", "st-android-tor-1"], a.containers()
 
 
 def test_tor_route_is_fixed_by_exec_into_tor_slots_only():
@@ -118,6 +136,7 @@ def test_needs_kvm_group_and_secret():
 
 if __name__ == "__main__":
     test_reconcile()
+    test_wrapper_only_touches_its_own_stack()
     test_tor_route_is_fixed_by_exec_into_tor_slots_only()
     test_needs_kvm_group_and_secret()
     print("ok")

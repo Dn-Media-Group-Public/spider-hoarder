@@ -56,7 +56,9 @@ class FakeSlotd(BaseHTTPRequestHandler):
             c.state = "busy"; c.vnc = json.loads(body)["vnc_password"]
             return self._send(200, {"ok": True})
         if self.path == "/internal/reset":
-            c.state = "free"
+            # the real slot exits and the wrapper replaces it: busy slot -> "resetting" for a moment -> a fresh free one
+            c.state = "resetting"
+            threading.Timer(0.3, lambda: setattr(c, "state", "free")).start()
             return self._send(200, {"ok": True})
         if self.path == "/internal/verify":
             return self._send(200, {"ok": c.verify_ok, "problems": [] if c.verify_ok else ["an account exists"]})

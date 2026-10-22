@@ -42,33 +42,40 @@ Control verbs, on `slotd` (port 9001), each needing `X-Slot-Secret`:
 |---|---|
 | `GET /internal/health` | `{state: booting\|free\|busy\|resetting\|broken}` |
 | `POST /internal/start {vnc_password}` | session begins: x11vnc + websockify with a fresh per-session password; 409 unless `free` |
-| `POST /internal/reset` | kill VNC, tool server, emulator and everything of the emulator uid; sweep the tmpfs homes and `/out`, `/in`; boot from snapshot `clean` again (see below); returns when booted |
-| `GET /internal/verify` | `{ok, problems}`: emulator running, guest booted, third-party packages equal the baseline, no accounts, no files on `/sdcard/` beyond the baseline |
+| `POST /internal/reset` | session over: answers `ok`, then `slotd` exits (after 0.5 s) and the container stops. The wrapper recreates it from scratch (empty overlay upper, fresh tmpfs); the new `slotd` boots from snapshot `clean` (see below). `health` says `resetting` until the old process is gone |
+| `GET /internal/verify` | `{ok, problems}`: emulator running, guest booted, third-party packages equal the baseline, no accounts, `/sdcard/` has exactly the files it had when this boot became `free` (listing taken once it stopped changing: system apps keep creating files after a restore) |
 | `GET /internal/out/<name>` | a file a tool wrote; read once, then deleted (`O_NOFOLLOW`, regular files, size cap) |
 | `PUT /internal/in/<name>` | a file for a tool (an APK); exclusive create |
 
-After every session the gateway calls `reset` then `verify`; a slot that fails either (or times out) is **quarantined** (never
+After every session the gateway calls `reset`, waits for the replacement container to report `free` (`SLOT_RESET_TIMEOUT`), then calls
+`verify`; a slot that fails any of that (or times out) is **quarantined** (never
 reused, logged loudly, capacity shrinks until the gateway restarts). A gateway start resets every slot of its slice that is not
-`free`. Nothing is inherited: the VNC password and noVNC link are per session, `reset` kills x11vnc/websockify before the slot is
-freed, and `/authz` answers 403 for an ended session id.
+`free`. Nothing is inherited: the container, its overlay upper layer and its tmpfs are new for every session, the VNC password and noVNC
+link are per session, and `/authz` answers 403 for an ended session id.
 
 ### Boot, reset and failure detection (`slotd.py`)
 
-`reset` is also the first boot of a slot (`slotd` runs it at start; `health` answers `booting` meanwhile). Steps: stop everything,
-wipe both tmpfs homes, start Xvfb and the emulator (`-read-only -snapshot clean -no-snapshot-save`, `ANDROID_EMU_TMP=/tmp`), wait for
+**A slot is never reset in place.** The wrapper has no input channel by design (it holds `docker.sock`), so it cannot be told to recreate a
+slot; instead it only looks at whether its own slots run. `reset` makes `slotd` exit, the slot has no restart policy (`--restart no`), and a
+stopped slot (finished session, crash, or a host reboot) is recreated by the wrapper's next pass (`RECONCILE_INTERVAL`, 3 s) with an empty
+overlay upper: the guest, the emulator uid's files and anything an escaped guest could have written under `/avd` are all gone. Cost: each new
+container copies the userdata qcow2 up into its overlay again (~2.1 GB), on top of the snapshot restore.
+
+`slotd` boots the slot once, when the container starts (`boot_slot()`; `health` answers `booting` meanwhile). Steps: wipe both tmpfs homes
+(a no-op in a fresh container), start Xvfb and the emulator (`-read-only -snapshot clean -no-snapshot-save`, `ANDROID_EMU_TMP=/tmp`), wait for
 the console port, start the adb server **after** the emulator, wait for `sys.boot_completed`, `ensure_network()`, start the tool
 server. Every wait loop checks that the emulator is still alive ("emulator exited during boot", e.g. an OOM kill during the snapshot
 load) instead of running out the `BOOT_TIMEOUT` (`ANDROID_BOOT_TIMEOUT`, 240 s); the tool server wait is `TOOLSERVER_TIMEOUT`
-(180 s) and also notices a dead tool server. A failed boot leaves the slot `broken`; the gateway's next `reset` retries.
+(180 s) and also notices a dead tool server. A failed boot leaves the slot `broken`; the gateway's `reset` then replaces the container.
 
 - **`ensure_network()`**: after a snapshot restore the guest keeps a stale `wlan0` address for about 10 s, then drops it and its DHCP
   requests go unanswered ("No internet"). `slotd` waits for 5 consecutive pings of the emulator gateway `10.0.2.2`; if that does not
   happen within 25 s it toggles wifi (`svc wifi disable/enable`, up to 3 times) and logs "guest network recovered by toggling wifi".
   Best effort: it never fails the boot (an egress that is down on purpose, such as Tor not up, is not a boot failure). Root cause unknown.
 - **Watchdog**: a thread checks every 2 s that the emulator and tool server of a `free` or `busy` slot are running; if not, the slot is
-  `broken` at once (not when the next tool call fails) and the gateway's reset after the session reboots it. `verify` also reports
+  `broken` at once (not when the next tool call fails) and the gateway's reset after the session replaces the container. `verify` also reports
   "emulator not running".
-- **Timeouts at the gateway**: `SLOT_RESET_TIMEOUT` (reset call, code default 300 s) and `SLOT_READY_TIMEOUT` (wait for `free` before
+- **Timeouts at the gateway**: `SLOT_RESET_TIMEOUT` (wait for the replacement to be `free` after `reset`, code default 300 s; the `reset` call itself 30 s) and `SLOT_READY_TIMEOUT` (wait for `free` before
   `start`, code default 60 s) are both set from `ANDROID_RESET_TIMEOUT` (300 s) on the android gateways in `docker-compose.yml`; keep it
   above `ANDROID_BOOT_TIMEOUT`.
 
@@ -142,17 +149,17 @@ restore and less RAM per slot, at the cost of a sluggish guest.
 
 **File descriptors.** Docker's default `RLIMIT_NOFILE` (~1e9) makes the emulator loop `fcntl` over every fd; the whole process, guest
 included, stalls and the emulator's watchdog kills it ("detected a hanging thread QEMU2 CPU0"). Hence `--ulimit nofile=65536:65536` in the
-wrapper's `create_slot` (it is part of spec `spec-v2`) and in `deploy.sh`'s init run, and `ulimit -n 65536` in `entrypoint.sh` and
+wrapper's `create_slot` (it is part of the spec hash) and in `deploy.sh`'s init run, and `ulimit -n 65536` in `entrypoint.sh` and
 `init-snapshot.sh`. A ~20 s "hanging thread" warning on every restore is harmless.
 
-Measured (same host): init 3 min 20 s (3 GB guest); golden volume 3.8 GB; each slot's overlay upper is ~0.75 GB (spike S2) plus tmpfs
-(`/tmp` 2g, `/home/emu` 256m, `/out`, `/in` 512m each).
+Measured (same host): init 3 min 20 s (3 GB guest); golden volume 3.8 GB; each slot's overlay upper is ~2.1 GB (a full copy-up of the userdata qcow2; constant across sessions, see the KVM bring-up plan) plus tmpfs
+(`/tmp` 4g, of which the emulator's own temp file takes ~1.5 GB, `/home/emu` 256m, `/out`, `/in` 512m each).
 See also: [Plan: Android KVM bring-up](../plans/android-kvm-bringup.md)
 
 Each slot mounts an overlay volume at `/avd` (golden volume read-only below, a private upper layer; mounted by `dockerd`, so no
 `SYS_ADMIN`); the wrapper creates it fresh whenever it (re)creates a slot. The wrapper recreates a slot when its spec hash changes
-(slot image id, `ANDROID_SLOT_CPUS`, `ANDROID_SLOT_MEMORY`, `ANDROID_BOOT_TIMEOUT`, kvm gid, snapshot volume, `SLOT_SECRET`, `spec-v2`);
-a stopped slot is just started, a missing one created, and slots above the wanted count are removed with their volumes.
+(slot image id, `ANDROID_SLOT_CPUS`, `ANDROID_SLOT_MEMORY`, `ANDROID_BOOT_TIMEOUT`, kvm gid, snapshot volume, `SLOT_SECRET`, restart policy and slot spec version);
+a stopped slot is recreated (never restarted: see "A slot is never reset in place"), a missing one created, and slots above the wanted count are removed with their volumes.
 There is no pre-logged-in Google account: a human signs in through the live view each session.
 
 ## Tools

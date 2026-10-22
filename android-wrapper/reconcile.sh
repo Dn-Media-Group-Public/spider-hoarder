@@ -18,8 +18,10 @@ CPUS=${ANDROID_SLOT_CPUS:-2}
 MEMORY=${ANDROID_SLOT_MEMORY:-6g}   # snapshot RAM is 3 GB, the emulator was seen at ~5.8 GB RSS (S1)
 BOOT_TIMEOUT=${ANDROID_BOOT_TIMEOUT:-240}   # snapshot restore reads ~3 GB: disk speed decides (slow cloud disks: minutes)
 SNAP=${ANDROID_SNAPSHOT_VOLUME:-${STACK_NAME}_android_snapshot}
-INTERVAL=${RECONCILE_INTERVAL:-10}
+INTERVAL=${RECONCILE_INTERVAL:-3}   # a finished session is replaced within this
 LABEL=spider-hoarder.android-slot
+STACK_LABEL=spider-hoarder.stack   # a wrapper only touches slots carrying its own STACK_NAME: other stacks and hand-run slots are not "extra"
+TMP_SIZE=4g   # the emulator's own temp qcow2 (1.5 GB idle) and everything a session writes land in /tmp (tmpfs, counts against --memory)
 EMU_UID=2000
 KVM_GID=${ANDROID_KVM_GID:-$(awk -F: '$1=="kvm"{print $3}' /host-etc-group 2>/dev/null || true)}
 [ -n "$KVM_GID" ] || { echo "no kvm group: set ANDROID_KVM_GID or mount the host's /etc/group at /host-etc-group" >&2; exit 1; }
@@ -31,7 +33,7 @@ cname() { echo "${STACK_NAME}-android-$1-$2"; }
 
 spec_hash() {  # the spec: anything that should recreate a slot when it changes
   img=$($DOCKER image inspect -f '{{.Id}}' "$ANDROID_SLOT_IMAGE" 2>/dev/null || echo "$ANDROID_SLOT_IMAGE")
-  echo "$img $CPUS $MEMORY $BOOT_TIMEOUT $KVM_GID $SNAP $(printf %s "$SLOT_SECRET" | sha256sum | cut -c1-16) spec-v2" | sha256sum | cut -c1-32
+  echo "$img $CPUS $MEMORY $BOOT_TIMEOUT $KVM_GID $SNAP $(printf %s "$SLOT_SECRET" | sha256sum | cut -c1-16) spec-v4" | sha256sum | cut -c1-32
 }
 
 wipe_state() {  # fresh overlay upper/work dirs (the overlay must not be mounted: the container is gone)
@@ -58,19 +60,19 @@ create_slot() {
   log "creating $n"
   remove_slot "$n"
   wipe_state "$e" "$k"
-  $DOCKER run -d --name "$n" --label "$LABEL=$e/$k" --label "spider-hoarder.spec=$hash" \
+  $DOCKER run -d --name "$n" --label "$LABEL=$e/$k" --label "spider-hoarder.spec=$hash" --label "$STACK_LABEL=$STACK_NAME" \
     --network "${STACK_NAME}_android_$e" --network-alias "android-$e-$k" \
     --device /dev/kvm --group-add "$KVM_GID" \
     --cap-drop ALL --cap-add NET_ADMIN --cap-add SETUID --cap-add SETGID --cap-add SETPCAP --cap-add KILL \
     --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER \
     --security-opt no-new-privileges \
     --read-only --ulimit nofile=65536:65536 \
-    --tmpfs /tmp:rw,exec,nosuid,size=2g,mode=1777 --tmpfs /run:rw,nosuid,size=16m \
+    --tmpfs /tmp:rw,exec,nosuid,size=$TMP_SIZE,mode=1777 --tmpfs /run:rw,nosuid,size=16m \
     --tmpfs "/home/emu:rw,nosuid,size=256m,uid=$EMU_UID,gid=$EMU_UID" --tmpfs /home/svc:rw,nosuid,size=128m,uid=3000,gid=3000 \
     --tmpfs /out:rw,nosuid,noexec,size=512m,uid=3000,gid=3000 --tmpfs /in:rw,nosuid,noexec,size=512m,uid=3000,gid=3000 \
     -v "$n-avd:/avd" \
     --cpus "$CPUS" --memory "$MEMORY" --memory-swap "$MEMORY" --pids-limit 4096 \
-    --restart unless-stopped \
+    --restart no \
     -e "EGRESS=$e" -e "SLOT_SECRET=$SLOT_SECRET" -e "BOOT_TIMEOUT=$BOOT_TIMEOUT" \
     "$ANDROID_SLOT_IMAGE" >/dev/null
 }
@@ -90,7 +92,9 @@ reconcile_egress() {  # $1 egress, $2 wanted count
     case "$cur" in
       missing) create_slot "$e" "$k" "$hash" ;;
       "$hash true") ;;
-      "$hash false") log "starting $n"; $DOCKER start "$n" >/dev/null ;;
+      # a stopped slot is a finished session (slotd exits on reset), a crash or a reboot: never restart it, its overlay may hold
+      # anything the guest wrote. Recreate it from scratch (empty upper), which is the reset.
+      "$hash false") log "$n exited, recreating from scratch"; create_slot "$e" "$k" "$hash" ;;
       *) log "$n: spec changed, recreating"; create_slot "$e" "$k" "$hash" ;;
     esac
     # the tor task gets a new address whenever it is replaced (every deploy): the slot's route must follow
@@ -98,7 +102,7 @@ reconcile_egress() {  # $1 egress, $2 wanted count
     k=$((k + 1))
   done
   # extra slots (count lowered)
-  for l in $($DOCKER ps -a --filter "label=$LABEL" --format '{{.Names}} {{.Label "'$LABEL'"}}' | awk -v e="$e" -v w="$want" '{split($2,a,"/"); if (a[1]==e && a[2]+0>w) print $1}'); do
+  for l in $($DOCKER ps -a --filter "label=$LABEL" --filter "label=$STACK_LABEL=$STACK_NAME" --format '{{.Names}} {{.Label "'$LABEL'"}}' | awk -v e="$e" -v w="$want" '{split($2,a,"/"); if (a[1]==e && a[2]+0>w) print $1}'); do
     log "removing extra $l"
     remove_slot "$l"
     $DOCKER volume rm "$l-avd" "$l-state" >/dev/null 2>&1 || true
@@ -106,7 +110,7 @@ reconcile_egress() {  # $1 egress, $2 wanted count
 }
 
 remove_all() {
-  for n in $($DOCKER ps -a --filter "label=$LABEL" --format '{{.Names}}'); do
+  for n in $($DOCKER ps -a --filter "label=$LABEL" --filter "label=$STACK_LABEL=$STACK_NAME" --format '{{.Names}}'); do
     remove_slot "$n"
     $DOCKER volume rm "$n-avd" "$n-state" >/dev/null 2>&1 || true
   done

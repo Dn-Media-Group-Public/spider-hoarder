@@ -4,12 +4,13 @@ control verbs on CONTROL_PORT, each needing X-Slot-Secret:
 
   GET  /internal/health        {state, active}
   POST /internal/start         {"vnc_password": "..."}   session begins: VNC + noVNC come up
-  POST /internal/reset         session over: kill everything, wipe, boot from snapshot again; returns when booted
+  POST /internal/reset         session over: answers, then slotd exits and the container stops; the wrapper recreates it from
+                               scratch (fresh overlay, nothing of the session survives) and the new slotd boots from the snapshot
   GET  /internal/verify        {ok, problems}: is the guest what the snapshot was (packages, accounts, /sdcard)
   GET  /internal/out/<name>    a file a tool wrote (read once, then deleted)
   PUT  /internal/in/<name>     a file for a tool (an APK)
 
-States: booting -> free -> busy -> resetting -> free; broken after a failed boot (reset retries).
+States: booting -> free -> busy -> resetting (then the container is gone); broken after a failed boot (reset replaces the slot).
 See docs/implemented-plans/android-hoarder.md, "Slot lifecycle and the gateway-to-slot interface".
 """
 
@@ -60,6 +61,7 @@ SWEEP = ["/tmp", "/var/tmp", "/dev/shm", "/run"]  # tmpfs: anything the emulator
 BOOTING, FREE, BUSY, RESETTING, BROKEN = "booting", "free", "busy", "resetting", "broken"
 state = BOOTING
 procs: dict = {}      # name -> Popen: xvfb, emulator, toolserver, x11vnc, websockify
+sdcard_at_free: list | None = None  # the /sdcard listing when this boot became free: what verify compares with
 lock = threading.Lock()  # one lifecycle verb at a time
 
 
@@ -277,6 +279,27 @@ def start_toolserver() -> None:
     raise RuntimeError("tool server did not start")
 
 
+def sdcard_listing() -> list:
+    """Every regular file on /sdcard (the trailing slash matters: /sdcard is a symlink and `find /sdcard` lists nothing)."""
+    out = adb("-s", SERIAL, "shell", "find", "/sdcard/", "-type", "f")
+    return sorted(x for x in out.split("\n") if x.strip())
+
+
+def settled_sdcard_listing(timeout: float = 30, pause: float = 3) -> list:
+    """System apps create and delete files on /sdcard for a while after a snapshot restore (the obb .nomedia, YouTube's
+    randomly named exo/*.uid, GMS's speech model download): take the listing once it stops changing. A baseline fixed at
+    image time cannot match that, this one is what *this* boot looked like at rest."""
+    deadline = time.time() + timeout
+    last = sdcard_listing()
+    while time.time() < deadline:
+        time.sleep(pause)
+        now = sdcard_listing()
+        if now == last:
+            return now
+        last = now
+    return last
+
+
 def stop_session_processes() -> None:
     for name in ("websockify", "x11vnc", "toolserver", "emulator"):
         kill(name)
@@ -284,9 +307,11 @@ def stop_session_processes() -> None:
     adb("kill-server")
 
 
-def reset_locked() -> None:
-    global state
-    state = RESETTING
+def boot_slot() -> None:
+    """First (and only) boot of this container: a fresh container is the reset, so this is the same wipe and boot the old
+    in-place reset did, with nothing left over to clean."""
+    global state, sdcard_at_free
+    state = BOOTING  # not "resetting": a gateway starting meanwhile must see a booting slot (clean), not one to replace
     try:
         stop_session_processes()
         kill("xvfb")  # also drops the display's contents (clipboard, windows)
@@ -304,12 +329,21 @@ def reset_locked() -> None:
             os.chown(d, SVC_UID, SVC_GID)
         boot()
         start_toolserver()
+        sdcard_at_free = settled_sdcard_listing()
         state = FREE
         log.info("slot free")
     except BaseException:
         state = BROKEN
-        log.exception("reset failed")
+        log.exception("boot failed")
         raise
+
+
+def end_session() -> None:
+    """Session over: the slot is not reset in place, it is thrown away. Answer first, then exit; no restart policy, so the
+    container stops and the wrapper (which only looks at whether its slots run) recreates it with an empty overlay."""
+    global state
+    state = RESETTING  # nothing starts on it from here on
+    threading.Timer(0.5, os._exit, args=(0,)).start()
 
 
 def check_alive() -> None:
@@ -350,8 +384,8 @@ def start_session(vnc_password: str) -> None:
 
 
 def verify() -> dict:
-    """The guest is what the snapshot was: same third-party packages, no accounts, no files on /sdcard that the
-    baseline did not have, adb up."""
+    """The guest is what the snapshot was: same third-party packages as the baseline, no accounts, the same files on /sdcard
+    as when this boot became free (not the image-time baseline: see settled_sdcard_listing), adb up."""
     problems = []
     try:
         if procs.get("emulator") is None or procs["emulator"].poll() is not None:
@@ -362,12 +396,12 @@ def verify() -> dict:
         pk = sorted(adb("-s", SERIAL, "shell", "pm", "list", "packages", "-3").split())
         if pk != base("baseline-packages.txt"):
             problems.append("third-party packages differ from the baseline")
-        sd = sorted(adb("-s", SERIAL, "shell", "find", "/sdcard/", "-type", "f").split("\n"))
-        sd = [x for x in sd if x.strip()]
-        want = [x for x in base("baseline-sdcard.txt") if x]
-        if sd != want:
+        sd, want = sdcard_listing(), sdcard_at_free
+        if want is None:
+            problems.append("no /sdcard listing from when the slot became free")
+        elif sd != want:
             extra, missing = sorted(set(sd) - set(want)), sorted(set(want) - set(sd))
-            problems.append(f"/sdcard differs from the baseline: extra {extra[:10]}, missing {missing[:10]}")
+            problems.append(f"/sdcard changed since the slot became free: extra {extra[:10]}, missing {missing[:10]}")
         acc = adb("-s", SERIAL, "shell", "dumpsys", "account")
         if not re.search(r"Accounts: 0\b", acc):
             problems.append("an account exists")
@@ -489,7 +523,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/internal/reset":
             def go():
                 with lock:
-                    reset_locked()
+                    end_session()
                 return {"ok": True}
             return self._run(go)
         self._send(404, {"error": "not found"})
@@ -515,9 +549,9 @@ def main() -> None:
     threading.Thread(target=srv.serve_forever, daemon=True).start()  # health answers "booting" meanwhile
     try:
         with lock:
-            reset_locked()  # first boot = a reset: same wipe, same boot, same checks
+            boot_slot()
     except BaseException:  # noqa: BLE001
-        log.error("first boot failed; the gateway's reset can retry")
+        log.error("boot failed; the gateway's reset replaces this slot")
     while True:
         time.sleep(3600)
 

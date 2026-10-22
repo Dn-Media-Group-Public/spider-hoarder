@@ -68,8 +68,8 @@ class SlotBackend:
     async def health(self, k: int) -> dict:
         return await self._ok(k, "GET", "/internal/health", 5)
 
-    async def _wait_free(self, k: int) -> None:
-        deadline = asyncio.get_running_loop().time() + READY_TIMEOUT
+    async def _wait_free(self, k: int, timeout: float | None = None) -> None:
+        deadline = asyncio.get_running_loop().time() + (READY_TIMEOUT if timeout is None else timeout)
         last = "unreachable"
         while asyncio.get_running_loop().time() < deadline:
             try:
@@ -93,7 +93,10 @@ class SlotBackend:
         self.dirty.discard(uid)
 
     async def _reset_and_verify(self, k: int) -> None:
-        await self._ok(k, "POST", "/internal/reset", RESET_TIMEOUT)
+        """The slot throws itself away (slotd exits, the wrapper recreates the container from scratch): wait for the new
+        one to be free, then check it. The old one never reports free again, so this cannot see it by mistake."""
+        await self._ok(k, "POST", "/internal/reset", 30)
+        await self._wait_free(k, RESET_TIMEOUT)
         v = await self._ok(k, "GET", "/internal/verify", 60)
         if not v.get("ok"):
             raise RuntimeError(f"slot {k} not clean after reset: {v.get('problems')}")

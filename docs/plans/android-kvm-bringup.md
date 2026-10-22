@@ -24,7 +24,7 @@ fresh deploy, on both egresses.
 | 5 Google sign-in (manual) | [todo] | all |
 | 6 soak and capacity | [todo] | all |
 
-## Remaining work, grouped into work stages (W1-W8)
+## Remaining work, grouped into work stages (W1-W9)
 
 The remaining [todo]/[partly] items of stages 2-6 and the deliverables, regrouped by the layer they touch so each work stage can be run in
 one sitting. Do them in order; W1-W3 need only a slot (no stack), W4-W5 need the stack, W6-W7 are long or manual, W8 closes out. Tick
@@ -33,12 +33,13 @@ state is tracked here; the detailed checklists stay in the stage sections above.
 | W | Name | Contents (from) | State |
 |---|---|---|---|
 | W1 | Slot isolation checks | Stage 2 step 6: TCP-level firewall proof (`10.0.2.2:9000/9001/5037/5900`, `169.254.169.254`, IPv6, svc-uid loopback-only), same list for a tor slot. Step 2: drop `NET_ADMIN` from `tini` or document it; tmpfs sizes under a session; whether `ANDROID_EMU_TMP` has any effect / `wipe()` covers emulator temp files | [done], results below (incl. fix 12) |
-| W2 | Reset and overlay hygiene | Stage 2 steps 4-5: reset during a running tool call; 5x reset with the full dirtying set (APK, account, Chrome login, clipboard); overlay upper size, golden checksum unchanged, recreate gives a fresh upper. Host regression tests for `ensure_network`, `console.py`, sdcard baseline | [done except the one open item below] |
+| W2 | Reset and overlay hygiene | Stage 2 steps 4-5: reset during a running tool call; 5x reset with the full dirtying set (APK, account, Chrome login, clipboard); overlay upper size, golden checksum unchanged, recreate gives a fresh upper. Host regression tests for `ensure_network`, `console.py`, sdcard baseline | [done, see "W2 re-run 2" and fix 16] |
 | W3 | Tool server and device behaviour | Stage 3 leftovers: Unicode `device_type`, canvas tap, Play Store screen, check and trim `KEYS`, first-call latency after restore, F-Droid "first steps" hint in tool descriptions, then `export_tools.py`. Guest clock lag after restore (set time at session start) | [todo] |
 | W4 | Stack lifecycle and Tor | Stage 4 steps 1-4: wrapper kill/recreate, spec-hash change, scale-0, wrapper isolation; networks/DNS and nginx -> `:6080`; Tor leak checks (iptables scope, distinct exits, `.onion`, UDP/ICMP fail, tor stopped = no egress, `-dns-server`, `research-tor` unaffected); kill-gateway-mid-session reset-at-start; oauth2-proxy DELETE path | [todo] |
 | W5 | End to end through nginx | Stage 4 steps 5-6: Android case in `e2e_auth.py` (whole step 5 checklist), quarantine path, noVNC handoff in a real browser (mouse/keyboard, sizing, 403 for other user, link revoked after session) | [todo] |
 | W6 | Google sign-in and real apps (manual) | Stage 5, needs a human | [todo] |
 | W7 | Soak and capacity | Stage 6, plus stage 3 step 4 (two slots at once, RSS vs limit, OOM in `dmesg`); decide on periodic slot recreate | [todo] |
+| W9 | Copy less data per slot recreate | New slots copy the userdata qcow2 (~2.1 GB) up into their overlay on every session (see fix 15). Find out why the file is copied up at all (`-read-only` already puts guest writes in a temp qcow2 in `/tmp`), and how to avoid it: e.g. a qcow2 backing file on the golden volume instead of an overlayfs copy-up, mounting `/avd` read-only for everything but the few files the emulator must write, hard-linking, or making the userdata smaller. Measure recreate time before and after; goal: recreate no slower than the old in-place reset (44-83 s) | [todo] |
 | W8 | Docs and close-out | Deliverables: measured numbers, README Android section, implemented plan's "Not run" paragraph, new env vars and `tor-route.sh` in the docs; move this plan to `docs/implemented-plans/` and link it in the index | [todo] |
 
 ### W1 results (2026-10-22, stack slots `spider-hoarder-android-{clear,tor}-1`, guest traffic modelled as `docker exec -u 2000 ... nc -z -w4`)
@@ -63,8 +64,55 @@ state is tracked here; the detailed checklists stay in the stage sections above.
   plus 78 MB and 0.3 MB ones. That leaves ~512 MB for everything a session writes (APK installs, downloads, app data all go through the
   guest's userdata overlay). A session that writes more than that fills `/tmp` and the emulator dies or hangs. `/tmp` counts against the slot's
   memory limit (`Shmem` 3.1 GB in the container; `docker stats` 1.58 GiB of 6 GiB at idle). `/home/emu` 256 MB, `/home/svc` 128 MB,
-  `/in` and `/out` 512 MB each: unused so far (not stressed). **Open decision: raise `/tmp` (3-4 GB) and re-check the 6 GB memory limit, or
-  find out why the idle qcow2 is 1.5 GB.** Stress test (fill the guest's storage until something gives) moves to W2/W7.
+  `/in` and `/out` 512 MB each: unused so far (not stressed). **Decided: raise `/tmp` to 4g (fix 14, see W2 results).** Stress test (fill the guest's storage until something gives) moves to W2/W7.
+
+### Fix 15: a slot is recreated from scratch after every session (decided by the user, 2026-10-22; replaces the in-place reset)
+
+Why: an in-place reset keeps the overlay upper layer (emulator-uid owned, mounted read-write at `/avd`, holding the userdata copy-up, `ram.bin`
+and the snapshot), so an attacker who escaped the guest could persist state across sessions; recreating throws everything away and is simpler.
+The wrapper must stay input-free (it holds `docker.sock`), so it is not asked to recreate; it only looks at whether its own slots run.
+- `slotd` `POST /internal/reset` now answers and then exits (`end_session()`, `os._exit(0)` after 0.5 s, state `resetting` meanwhile);
+  `boot_slot()` (was `reset_locked`) runs once at container start.
+- `reconcile.sh`: `--restart no`, a stopped slot is **recreated** (`create_slot`: `wipe_state`, new container) instead of started, spec `spec-v4`,
+  default `RECONCILE_INTERVAL` 3 s (was 10). A crash or a host reboot is handled the same way.
+- Gateway `slots.py`: `_reset_and_verify` = `POST /reset` (30 s), `_wait_free(RESET_TIMEOUT)` for the replacement, then `verify`.
+- Tests: `test_slot.py::test_end_session_...`, `test_reconcile.py` (stopped slot recreated, `--restart no`), `test_android.py` fake slot goes
+  `resetting` then `free`. Host tests pass.
+- **Deployed and W2 redone** (see "W2 re-run 2"). Resets took 59-122 s end to end (not analysed, speed is W9's). Still to check, in W4/W5: what
+  the gateway and client see between the old slot's exit and the new one's `free` (and the DNS alias); that a slot that crashes at start does not
+  recreate in a tight loop (3 s pass, each with a wipe). The stage-2 recipe's `curl .../reset` must now wait for `free`.
+  The unresolved `verify` `/sdcard` baseline problem (below) is not affected: it appears after every snapshot restore, fresh container or not.
+
+### W2 re-run 2 on fix 15 (2026-10-22, deployed stack, clear slot `spider-hoarder-android-clear-1` driven directly; speed not assessed)
+
+- **Reset during a running tool call:** `POST /internal/reset` answered 200 at once; the slot came back as a **new container** and `free` after 40 s. The
+  in-flight client call again just ended with an empty `TimeoutError` (client side, 40 s); nothing on the slot side to fix, W5 checks what a user sees.
+- **5 cycles, full dirtying** (same set as before: APK installed and started, `/sdcard/leak.txt`, `/sdcard/Download/d.txt`, `/data/local/tmp/leak2`,
+  `device_name`, a contact row, Chrome on example.com): state clean 5/5 after the reset; every cycle a **new container id**; during every
+  reset the health walked `unreachable` -> `booting` -> `free`, never `free` from the old slot.
+- **Persistence test (the point of fix 15):** before each reset a marker file was created as the emulator uid in `/avd/slot.avd/` (the writable
+  overlay upper) and in `/tmp`; **both gone after the reset, 5/5**. (With the in-place reset the `/avd` one would have survived.)
+- **Fix to the fix:** `boot_slot()` first set the state to `resetting`, which the gateway's start-up reset treats as "not clean, replace it"; it now
+  stays `booting` (a gateway starting during a slot's boot leaves it alone). `health` was `booting` then `free` on a fresh deploy.
+- **`verify` after a reset still fails (4 of 5; passed once, cycle 4), now for a clearer reason:** the init-time `/sdcard` baseline cannot match system
+  activity after a restore: missing `/sdcard/Android/obb/.nomedia`; extra **randomly named** files such as
+  `/sdcard/Android/data/com.google.android.apps.youtube.music/cache/exo/<16 hex>.uid` (a new name per boot) and the GMS
+  `download_cache/soda-*.zip`. A fixed baseline or a fixed ignore list (option a) cannot cover the random names without patterns; option (b) (record
+  the listing when the slot becomes `free`, compare with that) handles all of it. **Decided: (b), done as fix 16.**
+- Exit criteria of stage 2 now: reset provably clean 5/5 **met** (state, persistence), overlay hygiene **met** (fresh upper by construction),
+  `verify` **met** after fix 16.
+
+### Fix 16: `verify` compares `/sdcard` with the listing taken when the slot became free (option b, decided by the user, 2026-10-22)
+
+`slotd` takes `sdcard_at_free = settled_sdcard_listing()` (polls `find /sdcard/ -type f` every 3 s until two listings are equal, at most 30 s) just
+before the state becomes `free`; `verify` compares the live listing with that, and with the init-time packages/accounts baselines as before.
+`baseline-sdcard.txt` is still written and checked by init (non-empty) but `verify` no longer uses it. A slot with no such listing fails
+`verify` ("no /sdcard listing from when the slot became free"). Tests: `test_verify_compares_sdcard_with_the_listing_taken_when_the_slot_became_free`,
+`test_settled_listing_waits_until_the_listing_stops_changing`. **Live (deployed, same 5-cycle driver as re-run 2): `verify` after the reset was
+ok 6/6** (mid-call reset plus the 5 cycles; was 1 of 6 before), state clean 5/5, new container and planted markers gone 5/5. Mid-session
+`verify` correctly names the dirt (`leak.txt`, `d.txt`, changed packages) and also shows system noise appearing during a session (the GMS
+`soda-*.zip`, `obb/.nomedia` come and go), which is irrelevant at reset time. Residual risk: a system file that appears in the seconds
+between `free` and the gateway's `verify` would quarantine a slot; not seen in 6 runs. Watch for it in W5/W7 (the message now names the files).
 
 ### W2 results (2026-10-22, hand-run clear slot `s2-android-clear-1` on the new image; script kept outside the repo)
 
@@ -88,10 +136,33 @@ state is tracked here; the detailed checklists stay in the stage sections above.
   spec-hash recreate is exercised in W4).
 - **Regression tests added** (`android-slot/test_slot.py`, all pass): `verify` names sdcard differences and handles `find /sdcard/` output;
   `ensure_network` toggles wifi only when the gateway stays silent; `console.py` auth handshake, command, and KO exit.
-- **Found while testing:** the wrapper's slot label is not scoped to a stack. A second wrapper pass (`STACK_NAME=s2`) deleted the real stack's
-  `spider-hoarder-android-tor-1` as an "extra slot" (its tor count was 0) and the stack wrapper re-created it. Do not use the stage-2 recipe's
-  wrapper step on a host where a stack runs; one stack per Docker daemon is a de-facto constraint (worth a line in the ops docs, or scope the label by
-  `STACK_NAME`: **decision for the user**).
+- **Found while testing, fixed (fix 13):** the wrapper's slot label was not scoped to a stack. A second wrapper pass (`STACK_NAME=s2`) deleted the
+  real stack's `spider-hoarder-android-tor-1` as an "extra slot" (its tor count was 0) and the stack wrapper re-created it. Now slots also carry
+  `spider-hoarder.stack=<STACK_NAME>` and every `docker ps` filter in `reconcile.sh` (extras, `remove_all`) includes it, so a wrapper touches
+  only its own stack's slots. `test_reconcile.py::test_wrapper_only_touches_its_own_stack` fails without the filter. `deploy.sh`'s wait for
+  `label=spider-hoarder.android-slot` to be empty stays global on purpose (conservative). Slots created before this change have no stack label;
+  they are recreated by name by the spec bump below.
+- **`/tmp` raised to 4g (fix 14)** (`TMP_SIZE` in `reconcile.sh`; was 2g, 1.5 GB used idle by the emulator's temp qcow2). The slot memory limit stays
+  6g: the tmpfs is only charged for what is written. Still to be seen under load: peak slot memory with a busy session (W7 checks RSS vs the limit
+  and `dmesg`). Spec hash is now `spec-v3`, so the next wrapper pass recreates every slot (new `/tmp` size and stack label).
+
+**W2 re-run after the deploy (2026-10-22, new image with `spec-v3`, `/tmp` 4g, `verify` naming files; same script, 5 cycles).**
+- State was clean 5/5 (files, setting, APK, contact gone; launcher in front); resets 64-83 s. Reset during a tool call: 200 after 58 s, same
+  client-side `TimeoutError` as before. The stack's own slots (clear, tor) were left alone while the `s2` test slot was created by a wrapper with
+  another `STACK_NAME` (fix 13 confirmed live), both stack slots came up with `/tmp` 4.0G and the new label.
+- **`verify` after a reset failed 6/6 (the 5 cycles and the mid-call reset), and now says why:** the `/sdcard` listing right after a restore differs from
+  `baseline-sdcard.txt` in system-managed files, in both directions: **missing** `/sdcard/Android/obb/.nomedia` (in 5 of 6 post-reset checks; it was
+  present during one running session), and once **extra**
+  `/sdcard/Android/data/com.google.android.googlequicksearchbox/files/download_cache/soda-en-US-v1001.zip` (the Google app's on-device speech
+  model, downloaded in the background after the restore now that the guest has network). So the earlier single failure was this, not a fluke;
+  it passed 4 of 5 last time by luck of timing. No user data is involved in any of them. **The check as written cannot pass reliably**:
+  a baseline taken once at init cannot match files that system apps create or delete after each restore.
+- **Open decision for the user** (the plan's rule is to fix the baseline and not weaken the check silently): (a) an explicit, documented
+  ignore list for system-managed paths (the obb `.nomedia`, `.thumbnails/*`, `*/cache/*`, GMS `download_cache`), compared exactly for everything
+  else; (b) make the check a *diff against the live state at restore*: slotd records the `/sdcard` listing right after boot settles
+  (when it declares the slot `free`) and `verify` compares with that instead of the init-time baseline (catches what a session adds, ignores what
+  the system did after restore); (c) drop the `/sdcard` listing from `verify` since a reset boots a pristine userdata overlay anyway, and keep
+  packages and accounts. Recommendation: (b), with (a) not needed.
 
 ## Host
 
@@ -151,7 +222,7 @@ headers={"Host":"mcp-upstream","X-Slot-Secret":"s3cret"})`, `ClientSession.initi
 `--network host`. Test APK: `org.woheller69.arity` v159 from `https://f-droid.org/repo/org.woheller69.arity_159.apk`. Dirtying commands
 that work via `device_shell`: write `/sdcard/leak.txt`, `/sdcard/Download/d.txt`, `/data/local/tmp/leak2`,
 `settings put global device_name LEAKED`.
-**Do not run the wrapper step while a stack is deployed** (see W2 results: it removes the stack's slots of the other egress). Clean up afterwards: `docker rm -f s2-android-clear-1; docker volume rm s2-android-clear-1-avd s2-android-clear-1-state; docker network rm s2_android_clear`.
+Use a different `STACK_NAME` than the deployed stack (the wrapper only touches slots of its own stack since fix 13; before that it removed the other stack's slots). Clean up afterwards: `docker rm -f s2-android-clear-1; docker volume rm s2-android-clear-1-avd s2-android-clear-1-state; docker network rm s2_android_clear`.
 `deploy.sh` waits for **every** container labelled `spider-hoarder.android-slot` to exit before making the snapshot, so hand-run slots must
 be removed before a deploy that re-snapshots.
 
@@ -321,6 +392,7 @@ Step 5 checklist, all [todo]:
 - gateway failures: kill the slot mid-session (clear error, session ends, slot recovers); kill only the emulator; fill `/out`.
 
 Fixes made in this stage:
+13. **Wrapper scoped to its stack**, 14. **`/tmp` 4g** (see W2 results), 15. **slot recreated from scratch after every session** (see "Fix 15") and 16. **`verify` `/sdcard` live baseline** (see "Fix 16").
 12. **`NET_ADMIN` removed from PID 1** (see W1 results): `ENTRYPOINT ["/app/entrypoint.sh"]`, which ends in `exec setpriv ... tini -- slotd.py`.
 10. **Tor slot stale route.** Slots resolved `tasks.tor` once at start and installed a static default route; the tor task gets a new IP whenever
     it is replaced (every deploy), leaving the slot without network. Decided with the user: exec into the slot and resolve there. New
