@@ -1,0 +1,368 @@
+[
+ {
+  "name": "device_snapshot",
+  "description": "Outline of what is on the Android screen (accessibility tree): visible and interactive elements with `[ref=eN]`, flags and tap coordinates. Refs stay valid while the element is on screen; if one fails with 'ref not found', take a new snapshot. Webview content (Chrome, in-app browsers) is included.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "filename": {
+     "type": "string",
+     "description": "Name of the file inside the job (default depends on the tool)"
+    }
+   },
+   "required": []
+  }
+ },
+ {
+  "name": "device_find",
+  "description": "Find on-screen elements matching ALL given criteria and return them with refs.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "text": {
+     "type": "string",
+     "description": "Substring of text, description or hint (case-insensitive)"
+    },
+    "regex": {
+     "type": "string",
+     "description": "Python regex searched in text/description/hint"
+    },
+    "resource_id": {
+     "type": "string",
+     "description": "Substring of the resource id, e.g. 'search_box'"
+    },
+    "description": {
+     "type": "string",
+     "description": "Substring of the content description"
+    },
+    "class_name": {
+     "type": "string",
+     "description": "Substring of the class name, e.g. 'EditText'"
+    },
+    "filename": {
+     "type": "string",
+     "description": "Name of the file inside the job (default depends on the tool)"
+    }
+   },
+   "required": []
+  }
+ },
+ {
+  "name": "device_click",
+  "description": "Tap an element by ref.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "ref": {
+     "type": "string",
+     "description": "Element ref from device_snapshot / device_find"
+    }
+   },
+   "required": [
+    "ref"
+   ]
+  }
+ },
+ {
+  "name": "device_long_click",
+  "description": "Long-press an element by ref.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "ref": {
+     "type": "string",
+     "description": "Element ref from device_snapshot / device_find"
+    },
+    "seconds": {
+     "type": "number",
+     "description": "Hold time (default 1)"
+    }
+   },
+   "required": [
+    "ref"
+   ]
+  }
+ },
+ {
+  "name": "device_tap",
+  "description": "Tap screen coordinates (for canvas/game UIs without accessibility nodes).",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "x": {
+     "type": "integer"
+    },
+    "y": {
+     "type": "integer"
+    }
+   },
+   "required": [
+    "x",
+    "y"
+   ]
+  }
+ },
+ {
+  "name": "device_swipe",
+  "description": "Swipe between two screen coordinates (scroll, pull, drag).",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "x1": {
+     "type": "integer"
+    },
+    "y1": {
+     "type": "integer"
+    },
+    "x2": {
+     "type": "integer"
+    },
+    "y2": {
+     "type": "integer"
+    },
+    "seconds": {
+     "type": "number",
+     "description": "Duration (default 0.3)"
+    }
+   },
+   "required": [
+    "x1",
+    "y1",
+    "x2",
+    "y2"
+   ]
+  }
+ },
+ {
+  "name": "device_type",
+  "description": "Type text (Unicode ok) into the element `ref` (it is tapped first to focus it).",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "ref": {
+     "type": "string",
+     "description": "Element ref from device_snapshot / device_find"
+    },
+    "text": {
+     "type": "string"
+    },
+    "clear": {
+     "type": "boolean",
+     "description": "Clear the field first (default false)"
+    },
+    "submit": {
+     "type": "boolean",
+     "description": "Press enter afterwards (default false)"
+    }
+   },
+   "required": [
+    "ref",
+    "text"
+   ]
+  }
+ },
+ {
+  "name": "device_press_key",
+  "description": "Press a key: back, camera, center, delete, down, enter, escape, home, left, menu, power, recent, right, search, space, tab, up, volume_down, volume_mute, volume_up.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "key": {
+     "type": "string",
+     "enum": [
+      "back",
+      "camera",
+      "center",
+      "delete",
+      "down",
+      "enter",
+      "escape",
+      "home",
+      "left",
+      "menu",
+      "power",
+      "recent",
+      "right",
+      "search",
+      "space",
+      "tab",
+      "up",
+      "volume_down",
+      "volume_mute",
+      "volume_up"
+     ]
+    }
+   },
+   "required": [
+    "key"
+   ]
+  }
+ },
+ {
+  "name": "device_wait_for",
+  "description": "Wait until `text` appears on screen, `text_gone` disappears, or `time` seconds passed (max 120). With text/text_gone it fails after `timeout` seconds (default 30).",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "text": {
+     "type": "string"
+    },
+    "text_gone": {
+     "type": "string"
+    },
+    "time": {
+     "type": "number"
+    },
+    "timeout": {
+     "type": "number"
+    }
+   },
+   "required": []
+  }
+ },
+ {
+  "name": "device_take_screenshot",
+  "description": "Take a screenshot (PNG, always a file).",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "filename": {
+     "type": "string",
+     "description": "Name of the file inside the job (default depends on the tool)"
+    }
+   },
+   "required": []
+  }
+ },
+ {
+  "name": "device_open_url",
+  "description": "Open a URL on the device (an intent VIEW; usually opens Chrome).",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "url": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "url"
+   ]
+  }
+ },
+ {
+  "name": "device_install_apk",
+  "description": "Install an APK that is stored in a job (e.g. uploaded through get_upload_link).",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "file": {
+     "type": "string",
+     "description": "Name of an APK pushed to the device (set by the gateway)"
+    }
+   },
+   "required": [
+    "file"
+   ]
+  }
+ },
+ {
+  "name": "device_app_start",
+  "description": "Start an app by package name.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "package": {
+     "type": "string"
+    },
+    "activity": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "package"
+   ]
+  }
+ },
+ {
+  "name": "device_app_stop",
+  "description": "Force-stop an app.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "package": {
+     "type": "string"
+    }
+   },
+   "required": [
+    "package"
+   ]
+  }
+ },
+ {
+  "name": "device_app_list",
+  "description": "List installed packages (third-party only unless `all`).",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "all": {
+     "type": "boolean"
+    },
+    "filename": {
+     "type": "string",
+     "description": "Name of the file inside the job (default depends on the tool)"
+    }
+   },
+   "required": []
+  }
+ },
+ {
+  "name": "device_current_app",
+  "description": "Package and activity in the foreground.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {},
+   "required": []
+  }
+ },
+ {
+  "name": "device_logcat",
+  "description": "Recent logcat output.",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "lines": {
+     "type": "integer",
+     "description": "Last N lines (default 500)"
+    },
+    "regex": {
+     "type": "string",
+     "description": "Keep only matching lines"
+    },
+    "filename": {
+     "type": "string",
+     "description": "Name of the file inside the job (default depends on the tool)"
+    }
+   },
+   "required": []
+  }
+ },
+ {
+  "name": "device_shell",
+  "description": "Run a command in the device's adb shell (the device is an isolated emulator).",
+  "inputSchema": {
+   "type": "object",
+   "properties": {
+    "command": {
+     "type": "string"
+    },
+    "filename": {
+     "type": "string",
+     "description": "Name of the file inside the job (default depends on the tool)"
+    }
+   },
+   "required": [
+    "command"
+   ]
+  }
+ }
+]

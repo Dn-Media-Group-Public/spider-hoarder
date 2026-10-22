@@ -17,7 +17,7 @@ Keycloak account), and nginx runs two `auth_request` stages: SSO (sets the email
 See also: [Plan: Scale research containers](../implemented-plans/research-replicas.md) (two-stage nginx, `rid` in the URL)
 
 ## oauth2-proxy registers itself (DCR)
-A wrapper entrypoint (`oauth2-proxy/entrypoint.sh`, alpine variant of the image + `jq`) registers a client at
+A wrapper entrypoint (`oauth2-proxy/entrypoint.sh`, alpine variant of the image + `jq` + GNU `wget`; curl would ignore the dev `/etc/hosts` rewrite for `localhost`) registers a client at
 `$OIDC_ISSUER/clients-registrations/openid-connect`, persists it in the `o2p_state` volume, reuses it across restarts (validated with the
 registration access token), replaces it when `PUBLIC_HOST`/scheme change, and fails loudly if registration is rejected. Single replica.
 See also: [Plan: oauth2-proxy DCR](../implemented-plans/oauth2-proxy-dcr.md)

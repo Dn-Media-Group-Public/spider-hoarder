@@ -3,6 +3,8 @@
 Target is **`docker stack deploy` on Docker Swarm**, in prod and in dev
 (`./deploy.sh [--dev]`). Nothing here assumes docker-compose.
 
+See also: [Plan: Android hoarder](android-hoarder.md) (replica-owned slot slices, `/android-<egress>/` routes).
+
 ## Problem / Goal
 
 `research-tor` and `research-clear` each run as exactly one container

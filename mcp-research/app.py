@@ -1,6 +1,7 @@
 """mcp-research gateway: per-user isolated headed browser sessions (proxied
 toolserver) plus fetch/parse/blob tools. See
-docs/implemented-plans/browser-sessions-plan.md.
+docs/implemented-plans/browser-sessions-plan.md. With MODE=android the same gateway fronts Android emulator
+slots instead (device_* tools, no browser tools): docs/implemented-plans/android-hoarder.md.
 
 Everything is served under /<egress>/ (nginx routes by that prefix and by the replica id `rid`
 in ids and URLs), except /authz which nginx's auth_request calls on the internal network.
@@ -19,6 +20,7 @@ import uuid
 from typing import Any
 
 import anyio
+import httpx
 
 from mcp import types
 from mcp.server.auth.provider import AccessToken
@@ -35,16 +37,19 @@ import extract
 import fetch
 import ports
 import sessions
+import slots
 import storage
 from toolserver.textcap import DEFAULT_TEXT_CAP
 
 EGRESS = sessions.EGRESS
+ANDROID = sessions.ANDROID
+PREFIX = sessions.PREFIX  # tor | clear | android-tor | android-clear: the URL prefix nginx routes on
 DEFAULT_TEXT_LENGTH = 20000  # chars; keeps get_file_text results LLM-sized
 PUBLIC_HOST = os.environ["PUBLIC_HOST"]
 SCHEME = os.environ.get("PUBLIC_SCHEME", "https")  # TLS ends at the load balancer; dev uses http
 OIDC_ISSUER = os.environ["OIDC_ISSUER"].rstrip("/")
-BASE = f"{SCHEME}://{PUBLIC_HOST}/{EGRESS}"
-MCP_PATH = f"/{EGRESS}/mcp"
+BASE = f"{SCHEME}://{PUBLIC_HOST}/{PREFIX}"
+MCP_PATH = f"/{PREFIX}/mcp"
 UPLOAD_MARK = "@upload"  # blobtoken path marking an upload-link token (never a real file path)
 INLINE_LIMIT = 50_000
 MAX_FILE_BYTES = int(os.environ.get("MAX_FILE_BYTES", 50 * 1024 * 1024))
@@ -57,6 +62,11 @@ FILE_TOOLS = {
     "browser_network_requests": "network-requests.txt", "browser_storage_state": "storage-state.json",
 }
 CAPPED_TOOLS = ("browser_snapshot", "browser_find")  # take `text_cap`
+if ANDROID:
+    FILE_TOOLS = {"device_snapshot": "snapshot.txt", "device_find": "matches.txt", "device_take_screenshot": "screenshot.png",
+                  "device_logcat": "logcat.txt", "device_shell": "shell.txt", "device_app_list": "apps.txt"}
+    CAPPED_TOOLS = ()
+
 FILE_TOOLS_NOTE = ("\n\nThe result is {job_id, files, text?}: `text` is the content if small, else page through it "
                    "with get_file_text or search it with grep_file; get_file_url for a link. `filename` only names "
                    "the file inside the job.")
@@ -79,11 +89,36 @@ EGRESS_NOTE = {
         "Slower, and many sites show CAPTCHAs or block Tor exit nodes; use browser_request_human_help for those "
         "or fall back to the clear variant when anonymity is not needed."),
 }[EGRESS]
+if ANDROID:
+    EGRESS_NOTE = {
+        "clear": (
+            "ANDROID, CLEAR-TEXT / direct internet: a real Android emulator (Google Play image) whose traffic leaves "
+            "from this server's public IP, not anonymised. Apps can see and block it. Cannot reach .onion sites or "
+            "private/internal addresses. For anonymity use the Tor variant (spider-hoarder-android-tor)."),
+        "tor": (
+            "ANDROID, TOR: a real Android emulator (Google Play image) whose traffic, DNS included, is routed through "
+            "Tor; everything but TCP and DNS is dropped (no QUIC/UDP). Apps are slow and many services block Tor exits "
+            "or show CAPTCHAs; Google sign-in / Play Store are often refused. For apps that need a normal address use "
+            "the clear variant (spider-hoarder-android-clear) when anonymity is not needed."),
+    }[EGRESS]
 
 _ENFORCED_SCOPES = [os.environ["MCP_SCOPE"]] if os.environ.get("MCP_SCOPE") else []
+ANDROID_INSTRUCTIONS = (
+    f"{EGRESS_NOTE} Each conversation gets its own private, isolated emulator (one device, wiped when the session ends; "
+    "if all devices are busy you get a 'busy' error: try again later). Use the device_* tools: device_snapshot shows the "
+    "accessibility tree with refs, device_click / device_type / device_swipe act on it, device_take_screenshot returns a "
+    "screenshot file, device_install_apk installs an APK from a job (get_upload_link lets a human upload one; F-Droid is "
+    "preinstalled). There is NO pre-logged-in account: at a Google / Play Store sign-in, a CAPTCHA, 2FA or any login, call "
+    "device_request_human_help, show the user the link, and wait for them to confirm before continuing. Refs stay valid "
+    "while the element is on screen; actions do not return a snapshot, so call device_snapshot or device_find again after "
+    "one. Bulk output (snapshots, finds, screenshots, logcat, shell, app lists) returns {job_id, files, text?}; text is "
+    "inline only when small, otherwise use get_file_text to page or grep_file to search, or list_files / get_file_url. "
+    f"The session ends after {sessions.IDLE_TIMEOUT // 60} minutes without a tool call (waiting for the user does not count). "
+    "Call device_end_session when finished.")
+
 mcp = FastMCP(
-    name=f"mcp-research-{EGRESS}",
-    instructions=(
+    name=f"mcp-android-{EGRESS}" if ANDROID else f"mcp-research-{EGRESS}",
+    instructions=ANDROID_INSTRUCTIONS if ANDROID else (
         f"{EGRESS_NOTE} Prefer this server over the built-in WebFetch. "
         "Each conversation gets its own private, isolated browser. "
         "Use the browser_* tools to browse. When a page shows a CAPTCHA, bot check, login wall or cookie wall "
@@ -173,6 +208,19 @@ EXTRA_TOOLS = [
                description="Mint a short-lived opaque signed URL for one blob (original or parsed)."),
 ]
 HIDDEN = {"browser_install", "browser_bring_to_front"}
+if ANDROID:  # no browser, no page ingestion; the device tools come from the static list, three more are the gateway's own
+    EXTRA_TOOLS = [t for t in EXTRA_TOOLS if t.name in ("get_upload_link", "list_files", "get_file_text", "grep_file", "get_file_url")] + [
+        types.Tool(name="device_request_human_help", inputSchema=_schema(reason="What the user needs to do, e.g. 'sign in to Google'"),
+                   description="Get a link that lets the user see and control THIS conversation's device in a new tab. "
+                   "Use it for a Google / Play Store sign-in, CAPTCHA, 2FA, a permission or anything else a human should do. "
+                   "Give the link to the user, explain what to do, then STOP until they confirm they are done."),
+        types.Tool(name="device_end_session", inputSchema=_schema(),
+                   description="End this conversation's device session: the emulator is wiped (apps, accounts, files) and freed."),
+        types.Tool(name="device_install_apk", inputSchema=_schema(job_id="Job id of the job holding the APK",
+                                                                  path="File path from the job's manifest, e.g. original/app.apk"),
+                   description="Install an APK stored in a job (e.g. uploaded by a human through get_upload_link). "
+                   "F-Droid is preinstalled for open-source apps."),
+    ]
 
 
 def _caller() -> tuple[Any, str, str | None]:
@@ -220,6 +268,8 @@ def _store_and_parse(key: str, filename: str, raw: bytes, content_type: str, bas
     if filename.lower().endswith((".md", ".markdown")):  # already Markdown: no parsed/, terse from the original
         text = raw.decode("utf-8", errors="replace")
         return _job_result(key, text, f"original/{filename}", _write_terse(key, filename, text), f"terse/{filename}")
+    if filename.lower().endswith(".apk"):  # nothing to parse: stored for device_install_apk
+        return _job_result(key)
     is_html = "html" in content_type
     if is_html:
         raw = extract.absolutize(raw, base_url)  # parsed/ and simplified/ get absolute links; original/ is stored untouched above
@@ -295,17 +345,43 @@ def _store_file(key: str, name: str, raw: bytes) -> dict:
     return _job_result(key)
 
 
+# every tool name a device session may call: the static list (the toolserver's) plus the gateway's own
+ANDROID_NAMES = {t["name"] for t in json.load(open(slots.TOOLS_FILE))} | {"device_request_human_help"} if ANDROID else set()
+
+
+async def _install_apk(bs: sessions.BrowserSession, args: dict) -> types.CallToolResult:
+    """The APK comes from a job (storage), is pushed into the slot under a name of our choosing, and the tool server
+    installs it by that name: the model never names a path on the device side."""
+    key = _key(bs.owner, args["job_id"])
+    path = _check_rel_path(args["path"])
+    if not storage.exists(key, path):
+        return _text("file not found", True)
+    raw = storage.read_bytes(key, path)
+    if len(raw) > MAX_FILE_BYTES:
+        return _text("APK too large", True)
+    if raw[:2] != b"PK":
+        return _text("not an APK (not a zip archive)", True)
+    private = f"{uuid.uuid4()}.apk"
+    await slots.backend.push_in(bs.uid, private, raw)
+    return await bs.client.call_tool("device_install_apk", {"file": private})
+
+
 async def _file_tool(bs: sessions.BrowserSession, name: str, arguments: dict) -> types.CallToolResult:
     """Run a file-producing upstream tool; the file ends up under a new job_id."""
     jname = _job_name(arguments.get("filename"), FILE_TOOLS[name])
     job_id = _new_job_id()
     private = f"{uuid.uuid4()}-{jname}"  # gateway-chosen, relative: lands in out/, never an agent-chosen path
+    if ANDROID:  # the slot only serves plain names
+        private = f"{uuid.uuid4()}{os.path.splitext(FILE_TOOLS[name])[1]}"
     res = await bs.client.call_tool(name, {**arguments, "filename": private})
     if res.isError:
         return res
     try:
-        raw = await asyncio.to_thread(_read_out, bs.uid, private)
-    except (OSError, ValueError) as e:
+        if ANDROID:
+            raw = await slots.backend.fetch_out(bs.uid, private, MAX_FILE_BYTES)
+        else:
+            raw = await asyncio.to_thread(_read_out, bs.uid, private)
+    except (OSError, ValueError, httpx.HTTPError) as e:
         return _text(f"{name} produced no readable output file ({e}). Upstream said: {sessions.result_text(res)}", True)
     key = _key(bs.owner, job_id)
     result = _store_file(key, jname, raw)
@@ -361,7 +437,7 @@ async def list_tools() -> list[types.Tool]:
     tools = [t for t in await sessions.upstream_tools() if t.name not in HIDDEN | own]
     tools = [t.model_copy(update={"description": (t.description or "") + FILE_TOOLS_NOTE}) if t.name in FILE_TOOLS else t
              for t in tools]
-    tools = [t.model_copy(update={"description": f"[{EGRESS.upper()}] {EGRESS_NOTE}\n\n{t.description or ''}"}) if t.name == "browser_navigate" else t
+    tools = [t.model_copy(update={"description": f"[{PREFIX.upper()}] {EGRESS_NOTE}\n\n{t.description or ''}"}) if t.name in ("browser_navigate", "device_open_url") else t
              for t in tools]
     return tools + EXTRA_TOOLS
 
@@ -373,6 +449,11 @@ async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
     if name in HIDDEN:
         return _text(f"{name} is disabled", True)
     try:
+        if name == "device_end_session":
+            bs = await sessions.get_session(mcp_session, owner, create=False)
+            if bs:
+                await sessions.close(bs)
+            return _text("Device session ended; the emulator is being wiped.")
         if name == "browser_end_session":
             bs = await sessions.get_session(mcp_session, owner, create=False)
             if bs and args.get("browser"):
@@ -382,7 +463,7 @@ async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
             if bs:
                 await sessions.close(bs)  # no id, or the last browser was closed
             return _text("Browser session closed.")
-        if name == "ingest_page":
+        if name == "ingest_page" and not ANDROID:
             return _text(json.dumps(await _ingest_page(
                 owner, args["url"], await sessions.get_session(mcp_session, owner, create=False), args.get("target"))))
         if name == "get_upload_link":
@@ -415,8 +496,20 @@ async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
                              + f"]\n\n{text[off:end]}")
             return _text(json.dumps({"url": f"{BASE}/blob/{RID}/{blobtoken.mint(key, path)}"}))
 
+        if ANDROID and name not in ANDROID_NAMES:  # before get_session: an unknown tool must not book a device
+            return _text(f"unknown tool {name}", True)
         bs = await sessions.get_session(mcp_session, owner, sid)
         bs.last_used = time.time()
+        bs.waiting_human = None  # any tool call ends a pending human-help wait
+        if name == "device_request_human_help":
+            bs.waiting_human = bs.last_used  # the idle timer is suspended while the user is at the device
+            return _text(
+                f"Live view of this conversation's device: {BASE}/view/{RID}/{bs.id}/start\n"
+                f"Ask the user to open it (they sign in with their newsroom account) and to: {args.get('reason', 'help on the device')}. "
+                "Only the user who owns this conversation can open it. "
+                "Do not take further device actions until the user confirms they are done.")
+        if name == "device_install_apk":
+            return await _install_apk(bs, args)
         if name == "browser_request_human_help":
             reason = args.get("reason", "help with the page")
             if args.get("browser"):  # raise that browser's window in the live view
@@ -428,7 +521,7 @@ async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
                 f"Ask the user to open it (they sign in with their newsroom account) and to: {reason}. "
                 "Only the user who owns this conversation can open it. "
                 "Do not take further browser actions until the user confirms they are done.")
-        if name == "browser_save_page":
+        if name == "browser_save_page" and not ANDROID:
             return _text(json.dumps(await _save_page(bs, args.get("browser"), args.get("target"))))
         if name in FILE_TOOLS:
             return await _file_tool(bs, name, args)
@@ -438,7 +531,7 @@ async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
 
 
 # ------------------------------------------------------ live view / web ----
-VIEW_RE = re.compile(rf"^/{EGRESS}/view/{RID}/([A-Za-z0-9_-]+)(/|$)")  # a foreign rid never matches
+VIEW_RE = re.compile(rf"^/{PREFIX}/view/{RID}/([A-Za-z0-9_-]+)(/|$)")  # a foreign rid never matches
 
 
 def _owned_session(request: Request, view_id: str) -> sessions.BrowserSession | None:
@@ -459,7 +552,9 @@ async def authz(request: Request) -> Response:
     bs = _owned_session(request, m.group(1)) if m else None
     if not bs:
         return PlainTextResponse("forbidden", status_code=403)
-    return Response(status_code=200, headers={"X-Upstream": f"{RID.replace('-', '.')}:{ports.ws_port(bs.uid)}"})  # this replica, not the service
+    # this replica's own session: its uid's websockify port here, or the slot's noVNC port in the slot's container
+    upstream = slots.view_upstream(bs.uid) if ANDROID else f"{RID.replace('-', '.')}:{ports.ws_port(bs.uid)}"
+    return Response(status_code=200, headers={"X-Upstream": upstream})
 
 
 def _own(request: Request) -> None:
@@ -467,7 +562,7 @@ def _own(request: Request) -> None:
         raise HTTPException(404, "not found")  # nginx routes by rid, so this is only defence in depth
 
 
-@mcp.custom_route(f"/{EGRESS}/view/{{rid}}/{{view_id}}/start", methods=["GET"])
+@mcp.custom_route(f"/{PREFIX}/view/{{rid}}/{{view_id}}/start", methods=["GET"])
 async def view_start(request: Request) -> Response:
     """Landing link handed to the user; reveals the VNC password only to the owner."""
     _own(request)
@@ -475,7 +570,7 @@ async def view_start(request: Request) -> Response:
     bs = _owned_session(request, view_id)
     if not bs:
         return PlainTextResponse("This browser session does not exist or is not yours.", status_code=403)
-    base = f"/{EGRESS}/view/{RID}/{view_id}"
+    base = f"/{PREFIX}/view/{RID}/{view_id}"
     return RedirectResponse(
         f"{base}/vnc.html?path={base.lstrip('/')}/websockify&autoconnect=1&reconnect=1"
         f"&resize=scale&password={bs.vnc_password}", status_code=302)
@@ -496,16 +591,17 @@ async def index_page(request: Request) -> Response:
     """Public landing page (no auth): how to add both servers; URLs come from PUBLIC_SCHEME/PUBLIC_HOST."""
     root = f"{SCHEME}://{PUBLIC_HOST}"
     cmds = "\n".join(
-        f"claude mcp add --transport http spider-hoarder-{e} {root}/{e}/mcp" for e in ("clear", "tor"))
+        f"claude mcp add --transport http spider-hoarder-{e} {root}/{e}/mcp" for e in ("clear", "tor", "android-clear", "android-tor"))
     return HTMLResponse(
         "<!doctype html><html><head><meta charset=utf-8><title>spider-hoarder</title></head><body>"
         "<h1>spider-hoarder</h1><p>Add the MCP servers to Claude Code:</p>"
         f"<pre>{html.escape(cmds)}</pre>"
         "<p>Then run <code>/mcp</code>, pick the server and choose Authenticate. "
-        "<b>clear</b> browses directly; <b>tor</b> browses via Tor.</p></body></html>")
+        "<b>clear</b> browses directly; <b>tor</b> browses via Tor; <b>android-clear</b> / <b>android-tor</b> "
+        "give Claude an Android emulator, direct or via Tor.</p></body></html>")
 
 
-@mcp.custom_route(f"/{EGRESS}/upload/{{rid}}/{{token}}", methods=["GET"])
+@mcp.custom_route(f"/{PREFIX}/upload/{{rid}}/{{token}}", methods=["GET"])
 async def upload_page(request: Request) -> Response:
     _own(request)
     _upload_key(request.path_params["token"])
@@ -515,7 +611,7 @@ async def upload_page(request: Request) -> Response:
         '<input type="file" name="files" multiple><button type="submit">Upload</button></form></body></html>')
 
 
-@mcp.custom_route(f"/{EGRESS}/upload/{{rid}}/{{token}}", methods=["POST"])
+@mcp.custom_route(f"/{PREFIX}/upload/{{rid}}/{{token}}", methods=["POST"])
 async def upload_submit(request: Request) -> Response:
     _own(request)
     key = _upload_key(request.path_params["token"])
@@ -528,12 +624,12 @@ async def upload_submit(request: Request) -> Response:
         filename = os.path.basename(uf.filename or "upload")
         ctype = uf.content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
         _store_and_parse(key, filename, data, ctype)
-        previews.append((filename, storage.read_text(key, f"parsed/{filename}.md") if storage.exists(key, f"parsed/{filename}.md") else "(archive unpacked)"))
+        previews.append((filename, storage.read_text(key, f"parsed/{filename}.md") if storage.exists(key, f"parsed/{filename}.md") else "(stored)" if filename.lower().endswith(".apk") else "(archive unpacked)"))
     body = "".join(f"<h2>{html.escape(n)}</h2><pre>{html.escape(t[:5000])}</pre>" for n, t in previews)
     return HTMLResponse(f"<!doctype html><html><body><h1>Uploaded</h1>{body}</body></html>")
 
 
-@mcp.custom_route(f"/{EGRESS}/blob/{{rid}}/{{token}}", methods=["GET"])
+@mcp.custom_route(f"/{PREFIX}/blob/{{rid}}/{{token}}", methods=["GET"])
 async def get_blob(request: Request) -> Response:
     _own(request)
     try:

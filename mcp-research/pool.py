@@ -50,7 +50,7 @@ class Pool:
 
     def take(self) -> int:
         if not self.free:
-            raise RuntimeError("browser capacity reached; try again later")
+            raise RuntimeError("capacity reached; try again later")
         uid = min(self.free)
         self.free.remove(uid)
         self.busy.add(uid)

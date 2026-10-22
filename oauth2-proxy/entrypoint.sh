@@ -1,5 +1,6 @@
 #!/bin/sh
 # Registers (or reuses) a Keycloak client via anonymous DCR, then execs oauth2-proxy.
+# GNU wget, not curl: curl resolves "localhost" itself and ignores /etc/hosts, which dev/localhost-is-host.sh edits.
 # Env: OIDC_ISSUER PUBLIC_HOST PUBLIC_SCHEME [MCP_SCOPE]. State: /state/registration.json
 set -eu
 S=/state/registration.json
@@ -11,10 +12,9 @@ field() { jq -r ".$1" "$S"; }
 if [ -f "$S" ]; then
   uri=$(field registrationClientUri); tok=$(field registrationAccessToken)
   if [ "$(field redirectUri)" = "$REDIRECT" ]; then
-    code=$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $tok" "$uri" || true)
-    [ "$code" = 200 ] || rm -f "$S"
+    wget -q -O /dev/null --header "Authorization: Bearer $tok" "$uri" || rm -f "$S"
   else
-    curl -s -o /dev/null -X DELETE -H "Authorization: Bearer $tok" "$uri" || true   # best effort
+    wget -q -O /dev/null --method=DELETE --header "Authorization: Bearer $tok" "$uri" || true   # best effort
     rm -f "$S"
   fi
 fi
@@ -22,7 +22,7 @@ fi
 if [ ! -f "$S" ]; then
   body=$(jq -n --arg r "$REDIRECT" --arg s "$SCOPES" '{client_name:"spider-hoarder live view",redirect_uris:[$r],
     grant_types:["authorization_code"],token_endpoint_auth_method:"client_secret_basic",scope:$s}')
-  resp=$(curl -sf -X POST -H 'Content-Type: application/json' -d "$body" \
+  resp=$(wget -q -O- --header 'Content-Type: application/json' --post-data "$body" \
     "$OIDC_ISSUER/clients-registrations/openid-connect") || { echo "DCR registration failed" >&2; exit 1; }
   echo "$resp" | jq --arg r "$REDIRECT" '{clientId:.client_id,secret:.client_secret,
     registrationAccessToken:.registration_access_token,registrationClientUri:.registration_client_uri,redirectUri:$r}' > "$S.tmp"

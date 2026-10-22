@@ -52,7 +52,7 @@ is rejected. Never run with a stale or empty client.
 
 The stock oauth2-proxy image is distroless (no shell, no `jq`), so a tiny local image is built
 by `deploy.sh` like `mcp-research` and `tor`: `oauth2-proxy/Dockerfile` is `FROM` the `-alpine`
-variant of the same pinned version, plus `apk add jq` and the entrypoint script. JSON is read and
+variant of the same pinned version, plus `apk add jq wget` and the entrypoint script (GNU `wget` for the HTTP calls, not curl: curl 8 resolves `localhost` itself and ignores the dev `/etc/hosts` rewrite, giving "DCR registration failed"; the `DELETE` path is untested). JSON is read and
 written with `jq` only (no `sed`/`grep` parsing).
 
 ### Keycloak side (`keycloak/setup.sh`)

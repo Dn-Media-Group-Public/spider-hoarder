@@ -24,6 +24,9 @@ Two MCP endpoints appear:
 - `$PUBLIC_SCHEME://$PUBLIC_HOST/tor/mcp` — browsers egress via Tor only
 - `$PUBLIC_SCHEME://$PUBLIC_HOST/clear/mcp` — direct egress, public internet only
 
+Optionally (see [Android](#android)) two more, giving Claude a real Android emulator instead of a browser:
+`/android-clear/mcp` and `/android-tor/mcp`.
+
 TLS must end in front of nginx (the stack only speaks http); auth is an external OIDC provider (Keycloak). More replicas:
 `docker service scale spider-hoarder_research-clear=3`. Details: [deploying and configuring](docs/operations/deploy-and-configure.md),
 [scaling](docs/architecture/scaling.md).
@@ -80,6 +83,23 @@ for the user to solve a CAPTCHA/login (they sign in with the same Keycloak accou
 and `browser_end_session` frees the browser. Use `tor` for sensitive research, `clear` when a site
 blocks Tor.
 
+## Android
+
+Claude can also drive a real Android device (x86_64 emulator, Google Play image) per conversation: the `device_*` tools
+(accessibility-tree snapshot with refs, click/type/swipe/tap, screenshots, install an APK from a job, logcat, adb shell) plus the
+same jobs, uploads and live view. `device_request_human_help` gives you a link to the *same* device, which is how you sign in to
+Google/Play (there is no pre-logged-in account; sessions are wiped when they end, after `ANDROID_IDLE_TIMEOUT`, or on
+`device_end_session`). F-Droid is preinstalled. On `android-tor`, Play Store is best effort (Google tends to block Tor exits) and
+only TCP and DNS leave the device.
+
+It is opt-in and needs a **KVM-capable x86_64 host** (`/dev/kvm`; on a cloud VM, nested virtualisation): set
+`ANDROID_CLEAR_REPLICAS` / `ANDROID_TOR_REPLICAS` (and `SLOT_SECRET`, `ANDROID_FDROID_URL`, `ANDROID_FDROID_SHA256`) in `.env` and run
+`./deploy.sh` on that host: it builds the slot image and makes the golden emulator snapshot there (a few minutes the first time).
+Each emulator ("slot") serves one session at a time, takes 2 CPUs and 6 GB RAM (guest RAM `ANDROID_RAM_MB`, default 3 GB, plus ~3 GB; a 4 GB limit gets the emulator OOM-killed) and ~0.75 GB disk, and a server with no free slot answers "busy" at once. Plan for 8 vCPU / 24 GB / 40 GB for two slots and SSD-class disk reads: a reset restores a RAM-sized snapshot, which took 44-62 s on an 8 vCPU / 32 GB VM and minutes on a slow disk (see [measured numbers](docs/architecture/android.md#image-and-golden-snapshot)).
+Add it to Claude like the others: `claude mcp add --transport http spider-hoarder-android-clear $PUBLIC_SCHEME://$PUBLIC_HOST/android-clear/mcp`.
+Details: [Android emulators](docs/architecture/android.md), [tool reference](docs/api/tools.md#android-tools),
+[configuration](docs/operations/deploy-and-configure.md#android-opt-in).
+
 ## Tests
 
 ```bash
@@ -93,4 +113,13 @@ docker run -d --name e2e --add-host nginx:172.17.0.1 <same caps> -e EGRESS=clear
   -e PUBLIC_HOST=localhost:8000 -e PUBLIC_SCHEME=https -e OIDC_ISSUER=http://127.0.0.1:9999/realms/r \
   -e BLOB_TOKEN_SECRET=x mcp-research:local
 docker exec -u 1000 -w /app e2e python e2e_auth.py
+```
+
+Android (host, no KVM needed; `test_android.py` must run on its own because it sets `MODE=android`):
+
+```bash
+(cd mcp-research && python test_android.py)
+(cd android-toolserver && python test_android_toolserver.py)   # if you change the tools: python export_tools.py first
+(cd android-slot && python test_slot.py) && (cd android-wrapper && python test_reconcile.py)
+# on a KVM host, inside a research-android-* container as uid 1000: python smoke_android.py
 ```

@@ -60,6 +60,21 @@ Chromium cannot do SOCKS auth, so per-session credentials are not an option. Chr
 With several replicas each gets its own slice of the SocksPort range (`SOCKS_STRIDE = POOL_SIZE + 1`, offset by task slot);
 see [Scaling](scaling.md).
 
+## Android slots
+
+Android sessions are isolated differently: a slot is a container with `/dev/kvm`, the emulator is the VM boundary, and the
+firewall is per uid inside the slot (the guest's traffic is the emulator uid's). See [Android emulators](android.md).
+See also: [Plan: Android hoarder](../implemented-plans/android-hoarder.md), [Plan: Android KVM bring-up](../plans/android-kvm-bringup.md)
+
+- Slot containers: `cap_drop ALL` plus `NET_ADMIN SETUID SETGID SETPCAP KILL CHOWN DAC_OVERRIDE FOWNER` for the entrypoint and `slotd`;
+  the emulator, adb, tool server and VNC run under `setpriv --bounding-set=-all` (verified: 0 caps, `no_new_privs`). `slotd` keeps the
+  last seven (no `NET_ADMIN`). **PID 1 (`tini`) keeps the full set including `NET_ADMIN`**: nothing else in the container can signal it, so
+  it is a documented property, not a hole known to be exploitable.
+- Reset is in place: processes of both uids are killed, tmpfs homes swept, the emulator booted again from snapshot `clean`; `verify` then
+  compares packages, accounts and `/sdcard/` with the baselines. The overlay upper layer is only wiped by the wrapper when it recreates a slot.
+- Tor slots: the `android-wrapper` (docker.sock holder) execs one fixed command, `/app/tor-route.sh`, in each tor slot every pass and reads
+  only its exit code, so a compromised slot cannot steer the wrapper.
+
 ## Consent banners
 
 `consent.js` (init script in every page) auto-clicks consent buttons. Known consent-vendor hosts (Fanboy Cookiemonster list, ~670, fetched

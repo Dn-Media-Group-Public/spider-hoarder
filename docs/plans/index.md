@@ -7,3 +7,5 @@ Plans awaiting implementation or kept as background. Implemented plans move to [
   parts belong to another project.
 - [Newsroom browsers](newsroom-browsers-plan.md) — the earlier container-per-session design. Superseded by
   [Browser sessions](../implemented-plans/browser-sessions-plan.md); kept for its Keycloak/Tor background.
+- [Android bring-up on a KVM host](android-kvm-bringup.md) — **in progress**: staged verification of the built-but-never-run parts of
+  [Android hoarder](../implemented-plans/android-hoarder.md): snapshot, slot, firewall/Tor, stack, human handoff, soak.

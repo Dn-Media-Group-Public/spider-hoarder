@@ -4,6 +4,9 @@
 # Auth: an external OIDC IdP (OIDC_ISSUER, Keycloak); `./deploy.sh --dev` adds a local one
 # (docker-compose.dev.yml). Set it up with keycloak/setup.sh (realm, scopes, DCR for Claude, a user).
 # TLS is terminated in front of nginx (Google LB in prod: PUBLIC_SCHEME=https; dev: http, no TLS).
+# Android emulators (opt in: ANDROID_*_REPLICAS > 0, needs a KVM host; see README):
+#   $PUBLIC_SCHEME://$PUBLIC_HOST/android-tor/mcp     direct emulator egress via Tor only
+#   $PUBLIC_SCHEME://$PUBLIC_HOST/android-clear/mcp   emulator egress directly (public internet only)
 # Docker Swarm stack (`./deploy.sh`). Swarm notes: `build:` is ignored (deploy.sh builds
 # the images), `shm_size`/`security_opt` are unsupported (Chromium runs with
 # --disable-dev-shm-usage; entrypoint.sh sets no_new_privs itself).
@@ -49,7 +52,7 @@ services:
       GATEWAY_PORT: ${GATEWAY_PORT}
     volumes:
       - ./nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
-    networks: [auth, sessions_tor, sessions_clear]
+    networks: [auth, sessions_tor, sessions_clear, android_tor, android_clear]   # android_*: the slots' noVNC
 
   # Human SSO for the live view (MCP bearer tokens are verified by the gateways)
   oauth2-proxy:
@@ -96,14 +99,82 @@ services:
       EGRESS: clear
     networks: [sessions_clear, public]
 
+  # Android gateways: the same image as research-*, MODE=android. No uid pool, sessiond or firewall here (the
+  # sessions live in the slot containers the wrapper makes), so only what setpriv needs. See
+  # docs/implemented-plans/android-hoarder.md.
+  research-android-clear:
+    <<: *research
+    cap_add: [SETUID, SETGID, SETPCAP]
+    deploy:
+      <<: *research-deploy
+      replicas: ${ANDROID_CLEAR_REPLICAS:-0}
+      resources:
+        limits: { memory: 2g }
+    environment: &android-env
+      <<: *research-env
+      EGRESS: clear
+      MODE: android
+      MAX_SESSIONS_PER_USER: ${ANDROID_MAX_SESSIONS_PER_USER:-1}
+      ANDROID_SLOTS_PER_REPLICA: ${ANDROID_SLOTS_PER_REPLICA:-2}
+      ANDROID_IDLE_TIMEOUT: ${ANDROID_IDLE_TIMEOUT:-600}   # no tool call this long: session ends, slot wiped
+      SLOT_SECRET: ${SLOT_SECRET:-}
+      SLOT_RESET_TIMEOUT: ${ANDROID_RESET_TIMEOUT:-300}   # snapshot restore + checks; slow disks need more
+      SLOT_READY_TIMEOUT: ${ANDROID_RESET_TIMEOUT:-300}
+    networks: [android_clear, public]   # public: the gateway reaches the IdP
+
+  research-android-tor:
+    <<: *research
+    cap_add: [SETUID, SETGID, SETPCAP]
+    deploy:
+      <<: *research-deploy
+      replicas: ${ANDROID_TOR_REPLICAS:-0}
+      resources:
+        limits: { memory: 2g }
+    environment:
+      <<: *android-env
+      EGRESS: tor
+    networks: [android_tor, public]
+
+  # Creates and supervises the slot containers (android-clear-N / android-tor-N) from env alone: it holds
+  # docker.sock, so it has no ports, no network and no API (reconcile.sh header). Runs on the KVM node.
+  android-wrapper:
+    image: android-wrapper:local
+    read_only: true
+    cap_drop: [ALL]
+    stop_grace_period: 120s   # SIGTERM removes every slot
+    environment:
+      STACK_NAME: ${STACK_NAME}
+      ANDROID_CLEAR_SLOTS: ${ANDROID_CLEAR_SLOTS:-0}   # replicas x ANDROID_SLOTS_PER_REPLICA (deploy.sh)
+      ANDROID_TOR_SLOTS: ${ANDROID_TOR_SLOTS:-0}
+      ANDROID_SLOT_IMAGE: android-slot:local
+      ANDROID_SLOT_CPUS: ${ANDROID_SLOT_CPUS:-2}
+      ANDROID_SLOT_MEMORY: ${ANDROID_SLOT_MEMORY:-6g}
+      ANDROID_KVM_GID: ${ANDROID_KVM_GID:-}
+      ANDROID_BOOT_TIMEOUT: ${ANDROID_BOOT_TIMEOUT:-240}
+      SLOT_SECRET: ${SLOT_SECRET:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /etc/group:/host-etc-group:ro   # the kvm group's gid (Swarm cannot map devices; the wrapper does it per slot)
+    deploy:
+      replicas: ${ANDROID_WRAPPER_REPLICAS:-0}
+      restart_policy: { condition: any }
+      placement:
+        constraints: ["${ANDROID_PLACEMENT:-node.role == manager}"]
+    networks: [android_wrapper]
+
   tor:
     image: spider-hoarder-tor:local
     deploy: { replicas: 1, restart_policy: { condition: any } }
+    # NET_ADMIN: the entrypoint's redirect rules for the Android slots (then setpriv drops everything for tor)
+    cap_drop: [ALL]
+    cap_add: [NET_ADMIN, SETUID, SETGID, SETPCAP]
+    sysctls: { net.ipv4.ip_forward: 1 }
     environment:
       MAX_SESSIONS_TOTAL: ${MAX_SESSIONS_TOTAL:-18}
       MAX_REPLICAS: ${MAX_REPLICAS:-4}   # one SocksPort range per research replica
+      ANDROID_TOR_SUBNET: ${ANDROID_TOR_SUBNET:-10.99.0.0/24}
     volumes: [tor_data:/var/lib/tor]
-    networks: [tor_egress, sessions_tor]
+    networks: [tor_egress, sessions_tor, android_tor]
 
 networks:
   public: { driver: overlay }
@@ -111,6 +182,16 @@ networks:
   tor_egress: { driver: overlay }
   sessions_tor: { driver: overlay, internal: true }   # tor browsers: no internet, only tor:9050+
   sessions_clear: { driver: overlay }                 # clear browsers -> internet (uid firewall blocks private ranges)
+  # Android slots are plain containers made by the wrapper, hence attachable. clear: direct, the slot's uid firewall
+  # blocks private ranges. tor: no internet, the slots' default route is the tor container (transparent proxy);
+  # a fixed subnet so tor can match the interface, outside tor's 10.192.0.0/10 virtual range.
+  android_clear: { driver: overlay, attachable: true }
+  android_tor:
+    driver: overlay
+    internal: true
+    attachable: true
+    ipam: { config: [{ subnet: "${ANDROID_TOR_SUBNET:-10.99.0.0/24}" }] }
+  android_wrapper: { driver: overlay, internal: true }   # nobody else on it: the wrapper has no network to speak of
 
 volumes:
   tor_data: {}

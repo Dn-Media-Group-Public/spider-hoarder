@@ -20,14 +20,18 @@ from mcp.client.streamable_http import streamablehttp_client
 
 import cmp_rules
 import ports
+import slots
 from pool import Pool, Sessiond
 
 log = logging.getLogger("sessions")
 
 EGRESS = os.environ.get("EGRESS", "clear")  # "tor" | "clear"
-IDLE_TIMEOUT = int(os.environ.get("IDLE_TIMEOUT", "1800"))
+ANDROID = os.environ.get("MODE") == "android"  # slots (emulators) instead of sessiond uids; docs/implemented-plans/android-hoarder.md
+PREFIX = f"android-{EGRESS}" if ANDROID else EGRESS  # URL / service prefix: /<PREFIX>/mcp, /<PREFIX>/view/...
+IDLE_TIMEOUT = int(os.environ.get("ANDROID_IDLE_TIMEOUT", "600") if ANDROID else os.environ.get("IDLE_TIMEOUT", "1800"))
+HELP_TIMEOUT = int(os.environ.get("ANDROID_HELP_TIMEOUT", "3600"))  # a pending device_request_human_help suspends the idle timer, up to this
 DISCONNECT_TIMEOUT = float(os.environ.get("DISCONNECT_TIMEOUT_MINUTES", "5")) * 60  # no open request this long = client gone
-MAX_PER_USER = int(os.environ.get("MAX_SESSIONS_PER_USER", "3"))
+MAX_PER_USER = int(os.environ.get("MAX_SESSIONS_PER_USER", "1" if ANDROID else "3"))
 UPSTREAM_HOST = "mcp-upstream"  # must match the allow-list in toolserver/server.py
 
 
@@ -41,7 +45,7 @@ def _own_rid() -> str:
 
 RID = os.environ.get("REPLICA_RID") or _own_rid()  # REPLICA_RID: tests / single-host runs without nginx
 
-pool = Pool(Sessiond(os.environ.get("SESSIOND_SOCKET", "/run/sessiond.sock")))
+pool = Pool(slots.backend, uids=slots.SLOTS) if ANDROID else Pool(Sessiond(os.environ.get("SESSIOND_SOCKET", "/run/sessiond.sock")))
 _HOST_RULES = cmp_rules.host_rules()
 
 
@@ -60,6 +64,7 @@ class BrowserSession:
     task: asyncio.Task | None = None
     last_used: float = field(default_factory=time.time)
     sid: str | None = None  # SDK MCP session id (no replica prefix)
+    waiting_human: float | None = None  # android: when device_request_human_help was called; cleared by the next tool call
 
 
 @dataclass
@@ -79,12 +84,12 @@ _tools_cache: list[types.Tool] | None = None
 _tools_lock = asyncio.Lock()
 
 
-async def _wait_http(url: str, timeout: float = 60) -> None:
+async def _wait_http(url: str, timeout: float = 60, headers: dict | None = None) -> None:
     deadline = time.time() + timeout
     async with httpx.AsyncClient() as h:
         while time.time() < deadline:
             try:
-                await h.get(url, headers={"Host": UPSTREAM_HOST}, timeout=2)
+                await h.get(url, headers=headers or {"Host": UPSTREAM_HOST}, timeout=2)
                 return
             except httpx.HTTPError:
                 await asyncio.sleep(0.5)
@@ -92,16 +97,20 @@ async def _wait_http(url: str, timeout: float = 60) -> None:
 
 
 async def _run_client(bs: BrowserSession) -> None:
-    """Owns the session's uid and its upstream MCP connection for its lifetime."""
+    """Owns the session's uid (android: slot) and its upstream MCP connection for its lifetime."""
     try:
-        env = {"UPSTREAM_SOCKS": f"tor:{ports.socks_port(bs.uid)}"} if EGRESS == "tor" else {}
-        # clear: Chromium --host-rules; tor: the filter relay (host-rules don't apply when a proxy resolves names)
-        files = {"vncpass": bs.vnc_password, "hostrules": "" if EGRESS == "tor" else _HOST_RULES}
-        await pool.start(bs.uid, env, files)
+        if ANDROID:  # the slot is a container: its tool server is reached by name, with the slot secret
+            await pool.start(bs.uid, {}, {"vncpass": bs.vnc_password})
+            url, headers = slots.mcp_url(bs.uid), slots.mcp_headers()
+        else:
+            env = {"UPSTREAM_SOCKS": f"tor:{ports.socks_port(bs.uid)}"} if EGRESS == "tor" else {}
+            # clear: Chromium --host-rules; tor: the filter relay (host-rules don't apply when a proxy resolves names)
+            files = {"vncpass": bs.vnc_password, "hostrules": "" if EGRESS == "tor" else _HOST_RULES}
+            await pool.start(bs.uid, env, files)
+            url, headers = f"http://127.0.0.1:{ports.mcp_port(bs.uid)}/mcp", {"Host": UPSTREAM_HOST}
         bs.running = True
-        url = f"http://127.0.0.1:{ports.mcp_port(bs.uid)}/mcp"
-        await _wait_http(url)
-        async with streamablehttp_client(url, headers={"Host": UPSTREAM_HOST}) as (r, w, _):
+        await _wait_http(url, headers=headers)
+        async with streamablehttp_client(url, headers=headers) as (r, w, _):
             async with ClientSession(r, w) as cs:
                 await cs.initialize()
                 bs.client = cs
@@ -146,8 +155,8 @@ def _count(owner: str | None = None) -> int:
 def reserve(owner: str) -> int:
     """Hold a uid for a new MCP session (not yet keyed: see register). RuntimeError = full."""
     if _count(owner) >= MAX_PER_USER:
-        raise RuntimeError(f"you already have {MAX_PER_USER} browser sessions; end one first")
-    if _count() >= ports.MAX_SESSIONS_TOTAL:
+        raise RuntimeError(f"you already have {MAX_PER_USER} {'device' if ANDROID else 'browser'} sessions; end one first")
+    if not ANDROID and _count() >= ports.MAX_SESSIONS_TOTAL:
         raise RuntimeError("browser capacity reached; try again later")
     return pool.take()
 
@@ -214,9 +223,12 @@ async def get_session(mcp_session: Any, owner: str, sid: str | None = None, crea
 
 
 async def upstream_tools() -> list[types.Tool]:
-    """Tool list of the toolserver, fetched once from a throwaway session."""
+    """Tool list of the toolserver, fetched once from a throwaway session (android: the static list, no device is
+    booked just to list tools)."""
     global _tools_cache
     async with _tools_lock:
+        if _tools_cache is None and ANDROID:
+            _tools_cache = slots.static_tools()
         if _tools_cache is None:
             probe = await new_session("probe")
             try:
@@ -316,6 +328,8 @@ async def reaper() -> None:
         await asyncio.sleep(60)
         now = time.time()
         for bs in list(by_mcp.values()):
+            if bs.waiting_human is not None and now - bs.waiting_human < HELP_TIMEOUT:
+                continue  # the user is at the device: not idle
             if now - bs.last_used > IDLE_TIMEOUT:
                 log.info("reaping idle session %s", bs.id[:8])
                 await close(bs)

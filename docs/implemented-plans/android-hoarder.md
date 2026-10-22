@@ -1,6 +1,7 @@
 # Plan: Android hoarder (`spider-hoarder-android-clear` / `-tor`)
 
-Status: plan, not implemented. All spikes S1-S6 done (see "Spike results"); several design points were corrected by them. Builds on [Browser sessions](../implemented-plans/browser-sessions-plan.md),
+Status: implemented (see "Implementation notes" at the end for where the build differs from the text above, and what was
+not run on a real emulator). All spikes S1-S6 done (see "Spike results"); several design points were corrected by them. Builds on [Browser sessions](../implemented-plans/browser-sessions-plan.md),
 [Scale research containers](../implemented-plans/research-replicas.md) and
 [Tool file outputs become jobs](../implemented-plans/file-outputs-as-jobs.md).
 
@@ -378,3 +379,56 @@ There are no `docs/architecture/` or `docs/api/` files in this repo yet; the aff
   where the architecture/routing sections are extended.
 - On completion: move this file to `docs/implemented-plans/android-hoarder.md` and add it to
   `docs/implemented-plans/index.md`.
+
+## Implementation notes
+
+Built as planned, with these differences and additions (the text above is the decision record; this is what the code does):
+
+- **Control port.** The slot's control verbs are served by `slotd` (root, narrow caps) on **:9001**; the tool server stays on :9000.
+  The tool server also requires `X-Slot-Secret` (and `Host: mcp-upstream`), so nothing in a slot answers unauthenticated except
+  noVNC (protected by the per-session VNC password).
+- **`reset()` restarts in place; the overlay upper layer is wiped by the wrapper.** An overlay upper directory cannot be wiped from
+  inside the container that has it mounted (S2: the wipe must happen unmounted). So the in-slot `reset` kills everything,
+  sweeps the tmpfs homes, `/out`, `/in`, and boots from snapshot `clean` again (S2 measured guest writes gone after such a
+  restart); the wrapper wipes the upper/work directories whenever it (re)creates a slot (new image, spec change, crash). A new
+  verb `GET /internal/verify` lets the gateway do the plan's check (third-party packages equal the baseline recorded by
+  `init-snapshot.sh`, no accounts, no `/sdcard` files beyond the baseline) without any adb access of its own.
+- **Slot counts** are computed in `deploy.sh` (`ANDROID_*_SLOTS` = replicas x `ANDROID_SLOTS_PER_REPLICA`): compose cannot multiply.
+  The feature is **opt-in**: replica counts default to 0, and `deploy.sh` then neither builds nor needs KVM.
+- **Capabilities.** The slot entrypoint set is `NET_ADMIN SETUID SETGID SETPCAP KILL CHOWN DAC_OVERRIDE FOWNER` (S1 plus `KILL`, so
+  `slotd` can kill the emulator uid's stragglers); only `slotd` keeps the last seven, the emulator and everything else start with
+  none (`setpriv --bounding-set=-all`). `ANDROID_SLOT_MEMORY` defaults to 6g (S1).
+- **`device_install_apk(job_id, path)`** is a gateway tool: it reads the APK from the job, checks the zip magic, pushes it to the
+  slot under a gateway-chosen name (`PUT /internal/in/<uuid>.apk`) and calls the tool server's own `device_install_apk(file)`.
+  `.apk` uploads are stored without parsing.
+- **Files out.** Tools write to `/out/<uuid>.<ext>` (a plain gateway-chosen name, never the agent's); `GET /internal/out/<name>` reads
+  it once (`O_NOFOLLOW`, regular file, size cap) and deletes it.
+- **Idle timeout** is also suspended while the user uses the live view, and a pending `device_request_human_help` suspends it for at
+  most `ANDROID_HELP_TIMEOUT` (default 3600 s). The tool list is static: `android-toolserver/export_tools.py` writes
+  `mcp-research/android-tools.json` and a test fails when it is out of date.
+- **Tor side.** `tor` runs `setpriv` from a root entrypoint (it needs `NET_ADMIN` for the redirect rules, selected by interface
+  from the fixed `ANDROID_TOR_SUBNET`, default `10.99.0.0/24`, deliberately outside `10.192.0.0/10`) and `sysctls: net.ipv4.ip_forward=1`.
+- **Wrapper network.** Swarm has no `network_mode: none`, so the wrapper sits on an `internal` overlay nobody else joins. It finds the
+  kvm gid in the host's `/etc/group` (bind-mounted read-only) unless `ANDROID_KVM_GID` is set.
+- **Changes found on a real KVM host** (see [Plan: Android KVM bring-up](../plans/android-kvm-bringup.md); how it works now is in
+  [Android emulators](../architecture/android.md)): `--ulimit nofile=65536` (spec `spec-v2`); snapshot saved through `console.py` (root,
+  console auth token), not `adb emu`; `/sdcard/` baseline with a stability wait; Chrome first run dismissed in init; `ANDROID_RAM_MB`
+  (guest RAM, in the stamp), `ANDROID_BOOT_TIMEOUT`, `ANDROID_RESET_TIMEOUT`; `slotd` boot-loop exit detection, watchdog and
+  `ensure_network()`; Tor slots' default route re-pointed by the wrapper via `docker exec -u root <slot> /app/tor-route.sh`.
+- **Pinned downloads.** The F-Droid APK URL and sha256 are required build args (`ANDROID_FDROID_URL` / `_SHA256` in `.env`); the
+  command-line-tools archive can be verified with `ANDROID_CMDLINE_TOOLS_SHA256` (otherwise `sdkmanager` verifies what it fetches).
+
+**Verified on the host (no KVM, no emulator):** the Android tool server's outline, refs and handlers against captured hierarchy XML
+and a fake device; the slot's firewall rule set (rule order for clear and tor, with a fake `iptables`), `slotd`'s auth and file
+handling; the wrapper's reconcile pass against a fake `docker`; the gateway's slot backend, quarantine, tool list, `/authz`
+upstream, file tools, APK push and idle/help behaviour against a fake `slotd`; the existing browser tests still pass; the compose
+file validates with `docker stack config`.
+
+**Superseded in part:** the assembled system has since been run on a KVM host (clear slot end to end, Tor routing, stack up); what is
+still open is tracked in [Plan: Android KVM bring-up](../plans/android-kvm-bringup.md). The paragraph below is the state at the time of writing.
+
+**Not run (needs a KVM host, to be checked on the first deploy):** the slot image build, `init-snapshot.sh`, the emulator boot and
+snapshot restore under `slotd` (including the Xvfb size, `-snapshot clean -read-only` flags and the overlay mount), the live
+firewall and Tor redirect inside real containers, `uiautomator2` against the built image through the gateway, the noVNC handoff
+through nginx, and `smoke_android.py`. The spikes S1-S6 covered the same mechanisms by hand; the assembled system has not been
+run.

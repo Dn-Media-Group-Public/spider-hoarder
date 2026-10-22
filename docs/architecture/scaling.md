@@ -19,3 +19,12 @@ files and jobs stay per replica; Swarm only (`tasks.<service>` DNS, `{{.Task.Slo
 - **Consequences**: a `job_id` from another replica is not readable ("lives on another replica"); a restarted/rescheduled replica loses
   its sessions and links (new IP); `nginx.conf.template` is bind-mounted (single node; use a Swarm `config:` otherwise).
   Upgrade path for shared files: shared blob storage (`RESEARCH_BLOB_URL` is already a URL).
+
+## Android replicas
+`research-android-clear` / `research-android-tor` use the same `rid` routing (`/android-<egress>/…`, `tasks.research-android-<egress>`).
+Replica `REPLICA_SLOT=s` owns slots `(s-1)*ANDROID_SLOTS_PER_REPLICA+1 ..`, so there is no shared slot allocator; the slot
+containers themselves are made by the single `android-wrapper` on the KVM node (`ANDROID_*_SLOTS` = replicas × slots per replica,
+computed by `deploy.sh`: scale replicas by changing `.env` and redeploying, not with `docker service scale`).
+See [Android emulators](android.md). See also: [Plan: Android hoarder](../implemented-plans/android-hoarder.md), [Plan: Android KVM bring-up](../plans/android-kvm-bringup.md)
+
+Capacity is bounded by the KVM node, not by Swarm: each slot is a 2-CPU / 6 GB container and the golden-snapshot restore is disk-bound (measured on an 8 vCPU / 32 GB host: reset 44-62 s, ~5.4 GB peak per 3 GB-guest slot; see [Android emulators](android.md#image-and-golden-snapshot)). The android gateways wait `ANDROID_RESET_TIMEOUT` for a reset, so raise it on slow disks.

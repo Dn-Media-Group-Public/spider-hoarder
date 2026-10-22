@@ -10,3 +10,4 @@ Back to the [documentation index](../index.md). Open plans: [plans](../plans/ind
 - [Terse outline view of job content](terse-view.md)
 - [oauth2-proxy registers itself via DCR](oauth2-proxy-dcr.md)
 - [Scale `research-*` containers (sticky replicas on Swarm)](research-replicas.md)
+- [Android hoarder (`android-clear` / `android-tor` emulator servers)](android-hoarder.md)

@@ -35,3 +35,28 @@ Every one takes optional `browser` (default `main`).
 ## Egress
 `/tor/mcp` browses only via Tor (anonymised, but some sites block Tor); `/clear/mcp` browses directly
 (public internet only, not `.onion`). Use Tor for sensitive research, clear when a site blocks Tor.
+
+## Android tools
+Served at `/android-clear/mcp` and `/android-tor/mcp` ([Android emulators](../architecture/android.md)); one device per session, no
+`browser` parameter. Bulk results are jobs, as above. See also: [Plan: Android hoarder](../implemented-plans/android-hoarder.md)
+
+| Tool | Behaviour |
+|---|---|
+| `device_snapshot(filename?)` | Outline of the accessibility tree (visible/interactive nodes with `[ref=eN]`, flags, tap coordinates); webview content included. Job. |
+| `device_find(text?, regex?, resource_id?, description?, class_name?)` | Matching nodes with refs. Job. |
+| `device_click(ref)`, `device_long_click(ref, seconds?)` | Act on a ref. A stale ref answers "ref not found, take a new snapshot". |
+| `device_tap(x, y)`, `device_swipe(x1, y1, x2, y2, seconds?)` | Coordinates, for canvas/game UIs. |
+| `device_type(ref, text, clear?, submit?)` | Taps the field, types (Unicode ok), optionally presses enter. |
+| `device_press_key(key)` | `back`, `home`, `enter`, `recent`, … |
+| `device_wait_for(text?, text_gone?, time?, timeout?)` | Wait for text to appear/disappear, or a number of seconds (max 120). |
+| `device_take_screenshot(filename?)` | PNG, always a job file. |
+| `device_open_url(url)` | `am start -a VIEW`. |
+| `device_install_apk(job_id, path)` | Installs an APK stored in a job (gateway pushes it into the slot). |
+| `device_app_start(package, activity?)`, `device_app_stop(package)`, `device_app_list(all?)`, `device_current_app()` | App control. |
+| `device_logcat(lines?, regex?, filename?)`, `device_shell(command)` | Logcat / adb shell (jobs). With `regex`, the whole buffer is filtered first, then the last `lines` matches are returned. |
+| `device_request_human_help(reason)` | Live-view link, e.g. for a Google/Play sign-in (there is no pre-logged-in account). Suspends the idle timer. |
+| `device_end_session()` | End the session; the emulator is wiped. |
+| `get_upload_link`, `list_files`, `get_file_text`, `grep_file`, `get_file_url` | As above. |
+
+Not carried over: cookie/storage tools, `ingest_page`, `browser_save_page`, `browser_pdf_save`, network tools, multi-browser.
+All slots busy: `initialize` answers 503 immediately (no queue).

@@ -9,6 +9,7 @@ Start with the [README](../README.md) (what it is, quick start, how to use it).
 - [Jobs, storage and links](architecture/jobs-and-storage.md) — job layout, HTML conversion, terse/simplified views, signed links
 - [Authentication and live view](architecture/auth.md) — Keycloak, DCR, oauth2-proxy, human handoff
 - [Scaling and routing](architecture/scaling.md) — nginx, replica ids, Tor port slices
+- [Android emulators](architecture/android.md) — slots, wrapper, firewall, golden snapshot, the two Android servers
 
 ## API
 - [Tool reference](api/tools.md)
@@ -26,4 +27,5 @@ Start with the [README](../README.md) (what it is, quick start, how to use it).
   [Jobs for all tools](implemented-plans/jobs-for-all-tools.md),
   [Terse view](implemented-plans/terse-view.md),
   [oauth2-proxy DCR](implemented-plans/oauth2-proxy-dcr.md),
-  [Sticky replicas](implemented-plans/research-replicas.md)
+  [Sticky replicas](implemented-plans/research-replicas.md),
+  [Android hoarder](implemented-plans/android-hoarder.md)
