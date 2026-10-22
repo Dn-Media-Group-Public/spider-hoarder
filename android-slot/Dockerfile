@@ -53,4 +53,4 @@ COPY android-slot/entrypoint.sh android-slot/tor-route.sh android-slot/firewall.
 RUN chmod +x /app/*.sh
 
 EXPOSE 9000 9001 6080
-ENTRYPOINT ["tini", "--", "/app/entrypoint.sh"]
+ENTRYPOINT ["/app/entrypoint.sh"]

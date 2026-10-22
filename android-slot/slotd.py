@@ -364,8 +364,10 @@ def verify() -> dict:
             problems.append("third-party packages differ from the baseline")
         sd = sorted(adb("-s", SERIAL, "shell", "find", "/sdcard/", "-type", "f").split("\n"))
         sd = [x for x in sd if x.strip()]
-        if sd != [x for x in base("baseline-sdcard.txt") if x]:
-            problems.append("/sdcard has files the baseline does not")
+        want = [x for x in base("baseline-sdcard.txt") if x]
+        if sd != want:
+            extra, missing = sorted(set(sd) - set(want)), sorted(set(want) - set(sd))
+            problems.append(f"/sdcard differs from the baseline: extra {extra[:10]}, missing {missing[:10]}")
         acc = adb("-s", SERIAL, "shell", "dumpsys", "account")
         if not re.search(r"Accounts: 0\b", acc):
             problems.append("an account exists")

@@ -1,6 +1,7 @@
 #!/bin/sh
-# Slot start (root, NET_ADMIN + the caps below): route, firewall, then slotd with only the caps it needs.
-# NET_ADMIN is gone from slotd on; the emulator and everything else slotd starts has no capabilities at all.
+# Slot start (root, NET_ADMIN + the caps below): route, firewall, then tini (PID 1 from here on, replacing this
+# script) with slotd under it, both with only the caps slotd needs.
+# NET_ADMIN is gone from tini on; the emulator and everything else slotd starts has no capabilities at all.
 set -eu
 : "${EGRESS:?}" "${SLOT_SECRET:?}"
 export EMU_UID=${EMU_UID:-2000} SVC_UID=${SVC_UID:-3000}
@@ -22,4 +23,4 @@ sh /app/firewall.sh
 KVM_GID=$(stat -c %g /dev/kvm) ; export KVM_GID
 exec setpriv --no-new-privs \
   --bounding-set=-all,+setuid,+setgid,+setpcap,+kill,+chown,+dac_override,+fowner \
-  /venv/bin/python /app/slotd.py
+  tini -- /venv/bin/python /app/slotd.py

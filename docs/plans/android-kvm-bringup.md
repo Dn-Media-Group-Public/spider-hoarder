@@ -24,6 +24,75 @@ fresh deploy, on both egresses.
 | 5 Google sign-in (manual) | [todo] | all |
 | 6 soak and capacity | [todo] | all |
 
+## Remaining work, grouped into work stages (W1-W8)
+
+The remaining [todo]/[partly] items of stages 2-6 and the deliverables, regrouped by the layer they touch so each work stage can be run in
+one sitting. Do them in order; W1-W3 need only a slot (no stack), W4-W5 need the stack, W6-W7 are long or manual, W8 closes out. Tick
+state is tracked here; the detailed checklists stay in the stage sections above.
+
+| W | Name | Contents (from) | State |
+|---|---|---|---|
+| W1 | Slot isolation checks | Stage 2 step 6: TCP-level firewall proof (`10.0.2.2:9000/9001/5037/5900`, `169.254.169.254`, IPv6, svc-uid loopback-only), same list for a tor slot. Step 2: drop `NET_ADMIN` from `tini` or document it; tmpfs sizes under a session; whether `ANDROID_EMU_TMP` has any effect / `wipe()` covers emulator temp files | [done], results below (incl. fix 12) |
+| W2 | Reset and overlay hygiene | Stage 2 steps 4-5: reset during a running tool call; 5x reset with the full dirtying set (APK, account, Chrome login, clipboard); overlay upper size, golden checksum unchanged, recreate gives a fresh upper. Host regression tests for `ensure_network`, `console.py`, sdcard baseline | [done except the one open item below] |
+| W3 | Tool server and device behaviour | Stage 3 leftovers: Unicode `device_type`, canvas tap, Play Store screen, check and trim `KEYS`, first-call latency after restore, F-Droid "first steps" hint in tool descriptions, then `export_tools.py`. Guest clock lag after restore (set time at session start) | [todo] |
+| W4 | Stack lifecycle and Tor | Stage 4 steps 1-4: wrapper kill/recreate, spec-hash change, scale-0, wrapper isolation; networks/DNS and nginx -> `:6080`; Tor leak checks (iptables scope, distinct exits, `.onion`, UDP/ICMP fail, tor stopped = no egress, `-dns-server`, `research-tor` unaffected); kill-gateway-mid-session reset-at-start; oauth2-proxy DELETE path | [todo] |
+| W5 | End to end through nginx | Stage 4 steps 5-6: Android case in `e2e_auth.py` (whole step 5 checklist), quarantine path, noVNC handoff in a real browser (mouse/keyboard, sizing, 403 for other user, link revoked after session) | [todo] |
+| W6 | Google sign-in and real apps (manual) | Stage 5, needs a human | [todo] |
+| W7 | Soak and capacity | Stage 6, plus stage 3 step 4 (two slots at once, RSS vs limit, OOM in `dmesg`); decide on periodic slot recreate | [todo] |
+| W8 | Docs and close-out | Deliverables: measured numbers, README Android section, implemented plan's "Not run" paragraph, new env vars and `tor-route.sh` in the docs; move this plan to `docs/implemented-plans/` and link it in the index | [todo] |
+
+### W1 results (2026-10-22, stack slots `spider-hoarder-android-{clear,tor}-1`, guest traffic modelled as `docker exec -u 2000 ... nc -z -w4`)
+
+- **Firewall, TCP level: every internal target is rejected for the emulator uid, on both egresses.** Blocked: `127.0.0.1` ports 9000, 9001, 5037,
+  5900, 5554, 5555, 6080 (the 10.0.2.2 alias lands on loopback); the slot's own overlay IP (9000, 9001, 80, 53); the Docker gateway / the tor
+  container IP (same ports); `169.254.169.254`; `10.0.6.1/2`, `172.18.0.1`, `192.168.0.1`, `100.64.0.1`; IPv6 to `2606:4700:4700::1111`. Positive
+  control: `1.1.1.1:443` is open on both. The loopback listeners are really up (svc uid reaches `127.0.0.1:9001`), so "blocked" is the rule and
+  not a closed port. The live `iptables -S OUTPUT` and `ip6tables -S OUTPUT` match `firewall.sh` on both slots.
+- **svc uid (3000):** loopback only. `127.0.0.1:9001` open; gateway / peer, `1.1.1.1:443`, `169.254.169.254` blocked; IPv6 rejected.
+- **Not covered here:** the tor-specific leak checks (UDP/QUIC, ICMP, tor stopped) are in W4. The test is from the container's OUTPUT chain, not
+  from inside the guest; the guest's own traffic is the same uid's connections by design (see `firewall.sh`), and W5's browser run will show it
+  from the guest side.
+- **Capabilities:** slotd `0x1eb` (no `NET_ADMIN`); Xvfb, adb, tool server and emulator children `0`; `no_new_privs` on every process. `tini`
+  (PID 1) had `0x11eb`, i.e. `NET_ADMIN` (bit 12). **Fixed (fix 12):** `entrypoint.sh` is now the image `ENTRYPOINT` and does the root work
+  (route loop, `firewall.sh`, `prep-homes.sh`), then `exec setpriv --no-new-privs --bounding-set=... tini -- python slotd.py`, so `tini` replaces
+  it as PID 1 with slotd's 7 caps. Verified after a redeploy on both slots: PID 1 `CapEff 0x1eb`, `NoNewPrivs 1`, slots reach `free`, default
+  routes present (tor slot via the tor task), same iptables rule counts as before; the golden snapshot was re-made (image id changed).
+  `tor-route.sh` via the wrapper's `docker exec` is unaffected (exec caps come from the container config).
+- **tmpfs sizes: `/tmp` is too tight.** `/tmp` (2 GB) holds the emulator's own temp dir `/tmp/android-unknown/` (so `ANDROID_EMU_TMP=/tmp` is the
+  effective location, and `wipe()`'s `SWEEP` covers it, emu-owned files are removed): one qcow2 of **1.54 GB while idle and `free`** (stable over 60 s),
+  plus 78 MB and 0.3 MB ones. That leaves ~512 MB for everything a session writes (APK installs, downloads, app data all go through the
+  guest's userdata overlay). A session that writes more than that fills `/tmp` and the emulator dies or hangs. `/tmp` counts against the slot's
+  memory limit (`Shmem` 3.1 GB in the container; `docker stats` 1.58 GiB of 6 GiB at idle). `/home/emu` 256 MB, `/home/svc` 128 MB,
+  `/in` and `/out` 512 MB each: unused so far (not stressed). **Open decision: raise `/tmp` (3-4 GB) and re-check the 6 GB memory limit, or
+  find out why the idle qcow2 is 1.5 GB.** Stress test (fill the guest's storage until something gives) moves to W2/W7.
+
+### W2 results (2026-10-22, hand-run clear slot `s2-android-clear-1` on the new image; script kept outside the repo)
+
+- **Reset during a running tool call:** `device_wait_for` (120 s) in flight, `POST /internal/reset` after 5 s: 200 after 70 s, slot `free`, `verify`
+  ok. The in-flight client call did **not** get a clear error: it hung until the client's own 30 s timeout (`TimeoutError`, empty message) and the
+  later session close got 404. Fine for the slot, but W5 must check what the gateway/client reports to a user in this case.
+- **5 cycles, full dirtying** (installed APK `org.woheller69.arity` and started it, `/sdcard/leak.txt`, `/sdcard/Download/d.txt`,
+  `/data/local/tmp/leak2`, `device_name=LEAKED`, a contact row, Chrome opened on example.com): after every reset all of it was gone and the launcher
+  was in front (5/5). Resets took 72-81 s with the new image. `verify` reported the dirt before each reset (packages, `/sdcard`). Not covered:
+  a Google account, clipboard (no tool sets it), Chrome login (needs an account: W6).
+- **One unexplained `verify` failure:** after the *first* reset (cycle 1) `verify` said "/sdcard has files the baseline does not"; cycles 2-5 and
+  the reset before them were ok, and no user data was left (probe clean). Cause not found: the message did not name the files, and the slot
+  was torn down after the run. **Changed** `verify` to name up to 10 extra and 10 missing files (`slotd.py`), so the next occurrence is
+  diagnosable; the golden baseline has 9 files (`.nomedia`, `.thumbnails/*`, YouTube exo `.uid`). If it recurs: compare
+  `baseline-sdcard.txt` with the live listing right after a restore (likely files created late after boot, as in fix 4). **Exit criterion
+  "reset provably clean 5/5" is therefore met for state, not yet for `verify`: re-run once on the next deploy.**
+- **Overlay hygiene:** golden volume untouched (no file newer than `.stamp` after 3 slots and 7+ resets). A slot's upper layer is **2.1 GB**
+  (`slot.avd/userdata-qemu.img.qcow2`, a full copy-up of the userdata qcow2 on first write), identical for the slot after 7 resets with APK installs
+  and for a stack slot after one: bounded, does not grow per session. This is **~3x the plan's 0.75 GB**: budget ~2.2 GB per slot of disk
+  (plus the 3.7 GB golden volume). `create_slot` does `wipe_state` (`rm -rf u w`) so a recreated slot starts with an empty upper (by code; the
+  spec-hash recreate is exercised in W4).
+- **Regression tests added** (`android-slot/test_slot.py`, all pass): `verify` names sdcard differences and handles `find /sdcard/` output;
+  `ensure_network` toggles wifi only when the gateway stays silent; `console.py` auth handshake, command, and KO exit.
+- **Found while testing:** the wrapper's slot label is not scoped to a stack. A second wrapper pass (`STACK_NAME=s2`) deleted the real stack's
+  `spider-hoarder-android-tor-1` as an "extra slot" (its tor count was 0) and the stack wrapper re-created it. Do not use the stage-2 recipe's
+  wrapper step on a host where a stack runs; one stack per Docker daemon is a de-facto constraint (worth a line in the ops docs, or scope the label by
+  `STACK_NAME`: **decision for the user**).
+
 ## Host
 
 | | Plan wanted | First host (2026-10-20) | Current host (2026-10-21) |
@@ -82,7 +151,7 @@ headers={"Host":"mcp-upstream","X-Slot-Secret":"s3cret"})`, `ClientSession.initi
 `--network host`. Test APK: `org.woheller69.arity` v159 from `https://f-droid.org/repo/org.woheller69.arity_159.apk`. Dirtying commands
 that work via `device_shell`: write `/sdcard/leak.txt`, `/sdcard/Download/d.txt`, `/data/local/tmp/leak2`,
 `settings put global device_name LEAKED`.
-Clean up afterwards: `docker rm -f s2-android-clear-1; docker volume rm s2-android-clear-1-avd s2-android-clear-1-state; docker network rm s2_android_clear`.
+**Do not run the wrapper step while a stack is deployed** (see W2 results: it removes the stack's slots of the other egress). Clean up afterwards: `docker rm -f s2-android-clear-1; docker volume rm s2-android-clear-1-avd s2-android-clear-1-state; docker network rm s2_android_clear`.
 `deploy.sh` waits for **every** container labelled `spider-hoarder.android-slot` to exit before making the snapshot, so hand-run slots must
 be removed before a deploy that re-snapshots.
 
@@ -252,6 +321,7 @@ Step 5 checklist, all [todo]:
 - gateway failures: kill the slot mid-session (clear error, session ends, slot recovers); kill only the emulator; fill `/out`.
 
 Fixes made in this stage:
+12. **`NET_ADMIN` removed from PID 1** (see W1 results): `ENTRYPOINT ["/app/entrypoint.sh"]`, which ends in `exec setpriv ... tini -- slotd.py`.
 10. **Tor slot stale route.** Slots resolved `tasks.tor` once at start and installed a static default route; the tor task gets a new IP whenever
     it is replaced (every deploy), leaving the slot without network. Decided with the user: exec into the slot and resolve there. New
     `android-slot/tor-route.sh` (resolves `tasks.tor`, validates a dotted quad, `ip route replace default via <ip>` if different, exit 10 =

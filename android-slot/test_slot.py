@@ -7,7 +7,9 @@ import os
 import subprocess
 import sys
 import tempfile
+import socket
 import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -168,9 +170,110 @@ def test_watchdog_marks_dead_emulator_broken():
     assert "emulator not running" in slotd.verify()["problems"]
 
 
+def test_verify_names_sdcard_differences_and_baseline_listing():
+    os.environ["SLOT_SECRET"] = "s3cret"
+    import slotd
+    with tempfile.TemporaryDirectory() as d:
+        for n, text in (("baseline-packages.txt", "package:a\n"), ("baseline-sdcard.txt", "/sdcard/.nomedia\n/sdcard/gone\n")):
+            open(os.path.join(d, n), "w").write(text)
+        listing = ["/sdcard/.nomedia", "/sdcard/leak.txt", ""]  # `find /sdcard/` output is split on newlines
+        answers = {"getprop": "1\n", "packages": "package:a\n", "find": "\n".join(listing), "account": "Accounts: 0\n"}
+
+        def fake_adb(*a, **k):
+            return next(v for key, v in answers.items() if key in a)
+        saved = (slotd.AVD, slotd.adb, dict(slotd.procs))
+        slotd.AVD, slotd.adb = d, fake_adb
+        slotd.procs["emulator"] = _Proc()
+        try:
+            r = slotd.verify()
+            assert not r["ok"] and len(r["problems"]) == 1, r
+            assert "leak.txt" in r["problems"][0] and "/sdcard/gone" in r["problems"][0], r
+            answers["find"] = "/sdcard/.nomedia\n/sdcard/gone\n"
+            assert slotd.verify() == {"ok": True, "problems": []}
+        finally:
+            slotd.AVD, slotd.adb = saved[0], saved[1]
+            slotd.procs.clear()
+            slotd.procs.update(saved[2])
+
+
+def test_ensure_network_toggles_wifi_when_gateway_stays_silent():
+    os.environ["SLOT_SECRET"] = "s3cret"
+    import slotd
+    calls, state = [], {"up": False}
+    saved = (slotd.adb, slotd.has_net, time.sleep, time.time)
+    clock = [0.0]
+
+    def fake_adb(*a, **k):
+        calls.append(a[-2:])
+        if a[-2:] == ("wifi", "enable"):
+            state["up"] = True  # asking again gets an answer
+        return ""
+    slotd.adb, slotd.has_net = fake_adb, lambda: state["up"]
+    time.sleep = lambda n: clock.__setitem__(0, clock[0] + n)
+    time.time = lambda: clock[0]
+    try:
+        slotd.ensure_network()
+    finally:
+        slotd.adb, slotd.has_net, time.sleep, time.time = saved
+    assert calls == [("wifi", "disable"), ("wifi", "enable")], calls
+    # an address that is up from the start needs no toggling
+    calls.clear()
+    state["up"] = True
+    clock[0] = 0.0
+    slotd.adb, slotd.has_net, time.sleep, time.time = fake_adb, lambda: True, lambda n: clock.__setitem__(0, clock[0] + n), lambda: clock[0]
+    try:
+        slotd.ensure_network()
+    finally:
+        slotd.adb, slotd.has_net, time.sleep, time.time = saved
+    assert calls == []
+
+
+def test_console_py_auth_and_ko():
+    import console
+    with tempfile.TemporaryDirectory() as d:
+        tok = os.path.join(d, "tok")
+        open(tok, "w").write("sekrit\n")
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(2)
+        seen = []
+
+        def serve():
+            for _ in range(2):
+                c, _ = srv.accept()
+                f = c.makefile("rw", newline="")
+                f.write("Android Console\r\nOK\r\n")
+                f.flush()
+                auth = f.readline().strip()
+                seen.append(auth)
+                if auth != "auth sekrit":
+                    f.write("KO: bad token\r\n")
+                    f.flush()
+                else:
+                    f.write("OK\r\n")
+                    f.flush()
+                    cmd = f.readline().strip()
+                    seen.append(cmd)
+                    f.write("KO: bad sub-command\r\n" if cmd.startswith("bogus") else "snapshot saved\r\nOK\r\n")
+                    f.flush()
+                c.close()
+        t = threading.Thread(target=serve, daemon=True)
+        t.start()
+        port = srv.getsockname()[1]
+        ok, out = console.run("avd snapshot save clean", port, tok, 5)
+        assert ok and out == ["snapshot saved"], (ok, out)
+        ok, out = console.run("bogus", port, tok, 5)
+        assert not ok and out == ["KO: bad sub-command"], (ok, out)
+        t.join(5)
+        assert seen == ["auth sekrit", "avd snapshot save clean", "auth sekrit", "bogus"], seen
+
+
 if __name__ == "__main__":
     test_firewall_clear()
     test_firewall_tor()
     test_slotd_files_and_auth()
     test_watchdog_marks_dead_emulator_broken()
+    test_verify_names_sdcard_differences_and_baseline_listing()
+    test_ensure_network_toggles_wifi_when_gateway_stays_silent()
+    test_console_py_auth_and_ko()
     print("ok")
