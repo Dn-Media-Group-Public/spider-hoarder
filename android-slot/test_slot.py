@@ -170,45 +170,30 @@ def test_watchdog_marks_dead_emulator_broken():
     assert "emulator not running" in slotd.verify()["problems"]
 
 
-def test_verify_compares_sdcard_with_the_listing_taken_when_the_slot_became_free():
+def test_verify_checks_packages_and_accounts_not_sdcard():
     os.environ["SLOT_SECRET"] = "s3cret"
     import slotd
     with tempfile.TemporaryDirectory() as d:
         open(os.path.join(d, "baseline-packages.txt"), "w").write("package:a\n")
-        answers = {"getprop": "1\n", "packages": "package:a\n", "find": "", "account": "Accounts: 0\n"}
+        answers = {"getprop": "1\n", "packages": "package:a\n", "account": "Accounts: 0\n"}
 
         def fake_adb(*a, **k):
+            assert "find" not in a, "verify must not list /sdcard"
             return next(v for key, v in answers.items() if key in a)
-        saved = (slotd.AVD, slotd.adb, dict(slotd.procs), slotd.sdcard_at_free)
+        saved = (slotd.AVD, slotd.adb, dict(slotd.procs))
         slotd.AVD, slotd.adb = d, fake_adb
         slotd.procs["emulator"] = _Proc()
         try:
-            slotd.sdcard_at_free = None
-            assert "no /sdcard listing" in slotd.verify()["problems"][0]
-            # what the system made after the restore (random exo names, .nomedia) is in the listing taken at rest
-            slotd.sdcard_at_free = ["/sdcard/.nomedia", "/sdcard/exo/1.uid"]
-            answers["find"] = "/sdcard/.nomedia\n/sdcard/exo/1.uid\n"
             assert slotd.verify() == {"ok": True, "problems": []}
-            # what a session left is named in the problem
-            answers["find"] = "/sdcard/.nomedia\n/sdcard/leak.txt\n"
-            r = slotd.verify()
-            assert not r["ok"] and len(r["problems"]) == 1, r
-            assert "leak.txt" in r["problems"][0] and "/sdcard/exo/1.uid" in r["problems"][0], r
+            answers["packages"] = "package:a\npackage:b\n"
+            assert "packages differ" in slotd.verify()["problems"][0]
+            answers["packages"] = "package:a\n"
+            answers["account"] = "Accounts: 1\n"
+            assert "account" in slotd.verify()["problems"][0]
         finally:
-            slotd.AVD, slotd.adb, slotd.sdcard_at_free = saved[0], saved[1], saved[3]
+            slotd.AVD, slotd.adb = saved[0], saved[1]
             slotd.procs.clear()
             slotd.procs.update(saved[2])
-
-
-def test_settled_listing_waits_until_the_listing_stops_changing():
-    import slotd
-    seq = iter([["a"], ["a", "b"], ["a", "b", "c"], ["a", "b", "c"], ["x"]])
-    saved = (slotd.sdcard_listing, time.sleep)
-    slotd.sdcard_listing, time.sleep = lambda: next(seq), lambda n: None
-    try:
-        assert slotd.settled_sdcard_listing() == ["a", "b", "c"]
-    finally:
-        slotd.sdcard_listing, time.sleep = saved
 
 
 def test_ensure_network_toggles_wifi_when_gateway_stays_silent():
@@ -328,8 +313,7 @@ if __name__ == "__main__":
     test_firewall_tor()
     test_slotd_files_and_auth()
     test_watchdog_marks_dead_emulator_broken()
-    test_verify_compares_sdcard_with_the_listing_taken_when_the_slot_became_free()
-    test_settled_listing_waits_until_the_listing_stops_changing()
+    test_verify_checks_packages_and_accounts_not_sdcard()
     test_ensure_network_toggles_wifi_when_gateway_stays_silent()
     test_console_py_auth_and_ko()
     test_guest_time_is_set_from_the_host_clock_at_session_start()

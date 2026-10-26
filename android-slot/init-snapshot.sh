@@ -90,17 +90,6 @@ adb_ shell input keyevent KEYCODE_HOME </dev/null
 sleep 5
 
 adb_ shell pm list packages -3 </dev/null | tr -d '\r' | sort > /avd/baseline-packages.txt
-# system apps keep creating files on /sdcard for a while after boot (.nomedia, speech-model cache): wait until the
-# listing is stable, so the baseline is what the snapshot really holds
-prev=
-for _ in $(seq 1 30); do
-  cur=$(adb_ shell find /sdcard/ -type f </dev/null | tr -d '\r' | sort)
-  [ -n "$cur" ] && [ "$cur" = "$prev" ] && break
-  prev=$cur; sleep 10
-done
-printf '%s\n' "$cur" > /avd/baseline-sdcard.txt
-# /sdcard is a symlink: without the trailing slash find lists nothing (and verify would never see a leftover file)
-[ -s /avd/baseline-sdcard.txt ] || { echo "baseline-sdcard.txt is empty: find did not follow /sdcard" >&2; exit 1; }
 grep -q org.fdroid.fdroid /avd/baseline-packages.txt || { echo "F-Droid missing from the baseline" >&2; exit 1; }
 
 # the console wants the auth token from the emulator's home, which the svc uid (so `adb emu`) cannot read, and

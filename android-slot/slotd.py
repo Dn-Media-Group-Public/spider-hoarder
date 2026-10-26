@@ -6,7 +6,7 @@ control verbs on CONTROL_PORT, each needing X-Slot-Secret:
   POST /internal/start         {"vnc_password": "..."}   session begins: VNC + noVNC come up
   POST /internal/reset         session over: answers, then slotd exits and the container stops; the wrapper recreates it from
                                scratch (fresh overlay, nothing of the session survives) and the new slotd boots from the snapshot
-  GET  /internal/verify        {ok, problems}: is the guest what the snapshot was (packages, accounts, /sdcard)
+  GET  /internal/verify        {ok, problems}: is the guest what the snapshot was (packages, accounts)
   GET  /internal/out/<name>    a file a tool wrote (read once, then deleted)
   PUT  /internal/in/<name>     a file for a tool (an APK)
 
@@ -61,7 +61,6 @@ SWEEP = ["/tmp", "/var/tmp", "/dev/shm", "/run"]  # tmpfs: anything the emulator
 BOOTING, FREE, BUSY, RESETTING, BROKEN = "booting", "free", "busy", "resetting", "broken"
 state = BOOTING
 procs: dict = {}      # name -> Popen: xvfb, emulator, toolserver, x11vnc, websockify
-sdcard_at_free: list | None = None  # the /sdcard listing when this boot became free: what verify compares with
 lock = threading.Lock()  # one lifecycle verb at a time
 
 
@@ -286,27 +285,6 @@ def start_toolserver() -> None:
     raise RuntimeError("tool server did not start")
 
 
-def sdcard_listing() -> list:
-    """Every regular file on /sdcard (the trailing slash matters: /sdcard is a symlink and `find /sdcard` lists nothing)."""
-    out = adb("-s", SERIAL, "shell", "find", "/sdcard/", "-type", "f")
-    return sorted(x for x in out.split("\n") if x.strip())
-
-
-def settled_sdcard_listing(timeout: float = 30, pause: float = 3) -> list:
-    """System apps create and delete files on /sdcard for a while after a snapshot restore (the obb .nomedia, YouTube's
-    randomly named exo/*.uid, GMS's speech model download): take the listing once it stops changing. A baseline fixed at
-    image time cannot match that, this one is what *this* boot looked like at rest."""
-    deadline = time.time() + timeout
-    last = sdcard_listing()
-    while time.time() < deadline:
-        time.sleep(pause)
-        now = sdcard_listing()
-        if now == last:
-            return now
-        last = now
-    return last
-
-
 def stop_session_processes() -> None:
     for name in ("websockify", "x11vnc", "toolserver", "emulator"):
         kill(name)
@@ -317,7 +295,7 @@ def stop_session_processes() -> None:
 def boot_slot() -> None:
     """First (and only) boot of this container: a fresh container is the reset, so this is the same wipe and boot the old
     in-place reset did, with nothing left over to clean."""
-    global state, sdcard_at_free
+    global state
     state = BOOTING  # not "resetting": a gateway starting meanwhile must see a booting slot (clean), not one to replace
     try:
         stop_session_processes()
@@ -336,7 +314,6 @@ def boot_slot() -> None:
             os.chown(d, SVC_UID, SVC_GID)
         boot()
         start_toolserver()
-        sdcard_at_free = settled_sdcard_listing()
         state = FREE
         log.info("slot free")
     except BaseException:
@@ -392,8 +369,9 @@ def start_session(vnc_password: str) -> None:
 
 
 def verify() -> dict:
-    """The guest is what the snapshot was: same third-party packages as the baseline, no accounts, the same files on /sdcard
-    as when this boot became free (not the image-time baseline: see settled_sdcard_listing), adb up."""
+    """The guest is what the snapshot was: same third-party packages as the baseline, no accounts, adb up. No /sdcard listing:
+    the slot is recreated with an empty overlay after every session, so files cannot survive, and system apps keep creating
+    and deleting some for minutes after a restore (a listing taken in the same boot proves nothing and flaps)."""
     problems = []
     try:
         if procs.get("emulator") is None or procs["emulator"].poll() is not None:
@@ -404,12 +382,6 @@ def verify() -> dict:
         pk = sorted(adb("-s", SERIAL, "shell", "pm", "list", "packages", "-3").split())
         if pk != base("baseline-packages.txt"):
             problems.append("third-party packages differ from the baseline")
-        sd, want = sdcard_listing(), sdcard_at_free
-        if want is None:
-            problems.append("no /sdcard listing from when the slot became free")
-        elif sd != want:
-            extra, missing = sorted(set(sd) - set(want)), sorted(set(want) - set(sd))
-            problems.append(f"/sdcard changed since the slot became free: extra {extra[:10]}, missing {missing[:10]}")
         acc = adb("-s", SERIAL, "shell", "dumpsys", "account")
         if not re.search(r"Accounts: 0\b", acc):
             problems.append("an account exists")

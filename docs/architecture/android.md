@@ -43,7 +43,7 @@ Control verbs, on `slotd` (port 9001), each needing `X-Slot-Secret`:
 | `GET /internal/health` | `{state: booting\|free\|busy\|resetting\|broken}` |
 | `POST /internal/start {vnc_password}` | session begins: x11vnc + websockify with a fresh per-session password; 409 unless `free` |
 | `POST /internal/reset` | session over: answers `ok`, then `slotd` exits (after 0.5 s) and the container stops. The wrapper recreates it from scratch (empty overlay upper, fresh tmpfs); the new `slotd` boots from snapshot `clean` (see below). `health` says `resetting` until the old process is gone |
-| `GET /internal/verify` | `{ok, problems}`: emulator running, guest booted, third-party packages equal the baseline, no accounts, `/sdcard/` has exactly the files it had when this boot became `free` (listing taken once it stopped changing: system apps keep creating files after a restore) |
+| `GET /internal/verify` | `{ok, problems}`: emulator running, guest booted, third-party packages equal the baseline, no accounts. No `/sdcard` listing: a slot is recreated with an empty overlay after every session, and system apps keep creating and deleting files there for minutes after a restore. See also: [Plan: Android bring-up](../plans/android-kvm-bringup.md) (fix 21) |
 | `GET /internal/out/<name>` | a file a tool wrote; read once, then deleted (`O_NOFOLLOW`, regular files, size cap) |
 | `PUT /internal/in/<name>` | a file for a tool (an APK); exclusive create |
 
@@ -129,10 +129,7 @@ nofile=65536`) on an **empty** `android_snapshot` volume:
    the library's 30 s window; the agent then runs inside the snapshot), animations off.
 3. Chrome first run is dismissed once ("Use without an account", notifications "No thanks"; init fails if it does not finish), so
    `device_open_url` works at once in every session.
-4. Baselines: `baseline-packages.txt` (`pm list packages -3`) and `baseline-sdcard.txt` (`find /sdcard/ -type f`). `/sdcard` is a
-   symlink, so the **trailing slash is required** (without it `find` lists nothing and `verify` could never see a leftover file); init
-   waits until the listing is stable (system apps create `.nomedia` and speech-model cache files shortly after boot) and refuses an
-   empty baseline or one without F-Droid.
+4. Baseline: `baseline-packages.txt` (`pm list packages -3`); init refuses one without F-Droid.
 5. `console.py avd snapshot save clean`, then `console.py kill`. `console.py` runs as root and reads the console auth token from
    `/home/emu/.emulator_console_auth_token`: as the svc uid `adb emu` has no token and a trimmed command set, and the emulator's own
    `-snapshot clean` autosave on exit does not work (emulator 37). init checks that `snapshots/clean/{snapshot.pb,ram.bin}` exist.
