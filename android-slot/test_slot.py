@@ -146,6 +146,12 @@ class _Proc:
         return self.returncode
 
 
+def test_emulator_is_started_without_the_nested_virtualization_dialog():
+    os.environ["SLOT_SECRET"] = "s3cret"
+    import slotd
+    assert "-no-nested-warnings" in slotd.emulator_cmd()  # a modal dialog over the device in every live view otherwise
+
+
 def test_watchdog_marks_dead_emulator_broken():
     os.environ["SLOT_SECRET"] = "s3cret"
     import slotd
@@ -312,6 +318,7 @@ if __name__ == "__main__":
     test_firewall_clear()
     test_firewall_tor()
     test_slotd_files_and_auth()
+    test_emulator_is_started_without_the_nested_virtualization_dialog()
     test_watchdog_marks_dead_emulator_broken()
     test_verify_checks_packages_and_accounts_not_sdcard()
     test_ensure_network_toggles_wifi_when_gateway_stays_silent()

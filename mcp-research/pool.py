@@ -65,13 +65,17 @@ class Pool:
             raise
 
     async def release(self, uid: int) -> None:
-        """Stop (kill, wipe, verify) then free; quarantine if stop fails."""
-        try:
-            await asyncio.shield(self.backend.stop(uid))
-        except Exception as e:  # noqa: BLE001
+        """Stop (kill, wipe, verify) then free; quarantine if stop fails. The whole thing, bookkeeping included, runs as
+        its own task: a caller that is cancelled while waiting (sessions.close gives up after a timeout) must not leave the
+        uid busy once the stop has finished."""
+        async def work() -> None:
+            try:
+                await self.backend.stop(uid)
+            except Exception as e:  # noqa: BLE001
+                self.busy.discard(uid)
+                self.lost.add(uid)
+                log.error("uid %s QUARANTINED: %s", uid, e)
+                return
             self.busy.discard(uid)
-            self.lost.add(uid)
-            log.error("uid %s QUARANTINED: %s", uid, e)
-            return
-        self.busy.discard(uid)
-        self.free.add(uid)
+            self.free.add(uid)
+        await asyncio.shield(asyncio.ensure_future(work()))

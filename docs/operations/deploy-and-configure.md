@@ -68,8 +68,11 @@ In-container with the deployed capability set (plain root hides permission bugs)
 stub Keycloak, `smoke_e2e.py` for real sessions. Exact commands are in the README.
 
 Android: `mcp-research/test_android.py` (run on its own), `android-toolserver/test_android_toolserver.py`,
-`android-slot/test_slot.py` and `android-wrapper/test_reconcile.py` run on the host without KVM; a real emulator is only exercised by
-`mcp-research/smoke_android.py` inside a `research-android-*` container on a KVM host.
+`android-slot/test_slot.py` and `android-wrapper/test_reconcile.py` run on the host without KVM; a real emulator is only exercised on a KVM
+host: `mcp-research/smoke_android.py` inside a `research-android-*` container, and against the deployed `--dev` stack **through nginx** with
+real Keycloak tokens `e2e_android.py`, `e2e_android_view.py` (noVNC handoff in headless Chromium) and `e2e_android_lifecycle.py` (idle, disconnect,
+failure and quarantine phases), after `e2e_android_setup.sh` (throwaway Keycloak users). Commands: the scripts' docstrings.
+See also: [Plan: Android KVM bring-up](../plans/android-kvm-bringup.md) (W5)
 
 Slot internals not configurable from `.env`: `TOOLSERVER_TIMEOUT` (180 s, `slotd` waiting for the tool server), `--ulimit nofile=65536:65536`
 (required: with Docker's default the emulator stalls), pids limit 4096, tmpfs sizes. Tor slots: the wrapper re-points each slot's

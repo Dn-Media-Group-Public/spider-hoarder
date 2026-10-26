@@ -1,6 +1,6 @@
 # Plan: Android bring-up and verification on a KVM host
 
-Status: **in progress** (stages 0-1 done, 2-3 mostly done, 4 partly, 5-6 not started). Work started 2026-10-20, last updated 2026-10-22.
+Status: **in progress** (stages 0-4 done, 5-6 not started). Work started 2026-10-20, last updated 2026-10-26.
 Follows [Android hoarder](../implemented-plans/android-hoarder.md), which was built and tested on a host without `/dev/kvm`. This plan
 covers what was **not** run there (see that plan's "Implementation notes", "Not run") and the assumptions in the code that were never
 checked against a real emulator. Nothing is committed yet. Tags: **[done]**, **[partly]**, **[todo]**.
@@ -20,7 +20,7 @@ fresh deploy, on both egresses.
 | 1 image + golden snapshot | [done] | - |
 | 2 one slot by hand | [partly] | reset during a tool call, overlay hygiene, tmpfs sizes, 5x repeat with the full dirtying set, tor-slot firewall list, TCP-level firewall proof |
 | 3 tool server on the device | [partly] | Unicode `device_type`, two slots at once, first-call latency after restore, `KEYS` trimming |
-| 4 stack | [partly] | wrapper kill/recreate/scale-0, wrapper isolation, tor leak checks, noVNC in a browser, e2e through nginx, quarantine path |
+| 4 stack | [done] (W4, W5) | - |
 | 5 Google sign-in (manual) | [todo] | all |
 | 6 soak and capacity | [todo] | all |
 
@@ -36,7 +36,7 @@ state is tracked here; the detailed checklists stay in the stage sections above.
 | W2 | Reset and overlay hygiene | Stage 2 steps 4-5: reset during a running tool call; 5x reset with the full dirtying set (APK, account, Chrome login, clipboard); overlay upper size, golden checksum unchanged, recreate gives a fresh upper. Host regression tests for `ensure_network`, `console.py`, sdcard baseline | [done, see "W2 re-run 2" and fix 16] |
 | W3 | Tool server and device behaviour | Stage 3 leftovers: Unicode `device_type`, canvas tap, Play Store screen, check and trim `KEYS`, first-call latency after restore, F-Droid "first steps" hint in tool descriptions, then `export_tools.py`. Guest clock lag after restore (set time at session start) | [done], results below (fixes 17-20), re-tested on the deployed stack |
 | W4 | Stack lifecycle and Tor | Stage 4 steps 1-4: wrapper kill/recreate, spec-hash change, scale-0, wrapper isolation; networks/DNS and nginx -> `:6080`; Tor leak checks (iptables scope, distinct exits, `.onion`, UDP/ICMP fail, tor stopped = no egress, `-dns-server`, `research-tor` unaffected); kill-gateway-mid-session reset-at-start; oauth2-proxy DELETE path | [done], results below; finding: `verify`'s `/sdcard` check flapped, removed as fix 21 |
-| W5 | End to end through nginx | Stage 4 steps 5-6: Android case in `e2e_auth.py` (whole step 5 checklist), quarantine path, noVNC handoff in a real browser (mouse/keyboard, sizing, 403 for other user, link revoked after session) | [todo] |
+| W5 | End to end through nginx | Stage 4 steps 5-6: Android case in `e2e_auth.py` (whole step 5 checklist), quarantine path, noVNC handoff in a real browser (mouse/keyboard, sizing, 403 for other user, link revoked after session) | [done], results in "W5 results" (fixes 22-28); the scripts are `e2e_android*.py`, not an `e2e_auth.py` case (see there) |
 | W6 | Google sign-in and real apps (manual) | Stage 5, needs a human | [todo] |
 | W7 | Soak and capacity | Stage 6, plus stage 3 step 4 (two slots at once, RSS vs limit, OOM in `dmesg`); decide on periodic slot recreate | [todo]; **start with the memory finding in the W3 results (slot at its 6 GiB limit, OOM kill seen)** |
 | W9 | Copy less data per slot recreate | New slots copy the userdata qcow2 (~2.1 GB) up into their overlay on every session (see fix 15). Find out why the file is copied up at all (`-read-only` already puts guest writes in a temp qcow2 in `/tmp`), and how to avoid it: e.g. a qcow2 backing file on the golden volume instead of an overlayfs copy-up, mounting `/avd` read-only for everything but the few files the emulator must write, hard-linking, or making the userdata smaller. Measure recreate time before and after; goal: recreate no slower than the old in-place reset (44-83 s) | [todo] |
@@ -65,6 +65,69 @@ state is tracked here; the detailed checklists stay in the stage sections above.
   guest's userdata overlay). A session that writes more than that fills `/tmp` and the emulator dies or hangs. `/tmp` counts against the slot's
   memory limit (`Shmem` 3.1 GB in the container; `docker stats` 1.58 GiB of 6 GiB at idle). `/home/emu` 256 MB, `/home/svc` 128 MB,
   `/in` and `/out` 512 MB each: unused so far (not stressed). **Decided: raise `/tmp` to 4g (fix 14, see W2 results).** Stress test (fill the guest's storage until something gives) moves to W2/W7.
+
+### W5 results (2026-10-26, deployed dev stack after `./deploy.sh --dev` with fix 21; real Keycloak, through nginx at `127.0.0.1:7297`; clear and tor slot)
+
+Why not an `e2e_auth.py` case: that script runs its own gateway with a stub IdP, but the deployed gateways validate tokens against the real
+Keycloak, and nginx routes only to them. So the new scripts use real tokens (password grant, throwaway client `e2e-android` and users alice, bob made
+by `mcp-research/e2e_android_setup.sh`) and talk to the real stack. Run with `docker run --rm --network host -v $PWD:/app -w /app -e KC_ALICE_PASSWORD=...
+-e KC_BOB_PASSWORD=... --entrypoint python mcp-research:local <script>` (they use `127.0.0.1` plus a `Host: localhost:7297` header: on this host `localhost`
+resolves to `::1` first and hangs; the gateway only accepts its public host name).
+
+**`e2e_android.py` (both egresses): all pass.** 401 without a token; protected-resource metadata; 25 tools (20 `device_*` + file tools + `device_request_human_help`,
+`device_end_session`), no `browser_*`; instructions present; snapshot job, `grep_file` over it, `device_open_url`, `device_wait_for`, `device_find` ->
+`device_click` by ref, screenshot job -> `get_file_url` -> PNG download through nginx, tampered link rejected, `get_upload_link` -> APK upload through
+nginx -> `device_install_apk` -> package listed, install of a missing file fails cleanly; second initialize of the same user and of another user with the slot
+busy: `503` in 0.1 s with a readable message (`you already have 1 device sessions; end one first` / `capacity reached; try again later`).
+Not testable with one slot per egress: "second user on a free slot works" (W7, two slots).
+
+**`e2e_android_view.py` (human handoff in headless Chromium through nginx + oauth2-proxy + Keycloak): all pass.** The link is under the public host and the
+`android-` prefix; SSO login (and Keycloak's first-login consent page) -> `vnc.html` with `password=` and `autoconnect=1`; noVNC connects and shows the
+800x1000 screen, scaled to fit a 1280x1100 viewport; **mouse and keyboard work** (a click on Chrome's address bar plus typed text was found by `device_find`; the first version of the test
+also saw a click dismiss the nested-virtualization dialog, which fix 25 then removed). Observed once: text typed at 80 ms per key straight after the click lost all but the first
+character (Chrome's address bar re-takes focus while its search view opens); with a 2 s wait and 200 ms per key it arrived whole in 2 of 2 runs, and the test retries once and reports the attempt number; another user gets 403 on the start link, `vnc.html` and the websocket path; without login: redirect to the IdP; after
+`device_end_session` the websocket is dropped, the old link and `vnc.html` give 403, and the next session has another link and another VNC password.
+
+**`e2e_android_lifecycle.py`** (short timeouts set on the clear gateway with `docker service update --env-add`, removed afterwards):
+- **idle** (`ANDROID_IDLE_TIMEOUT=60`): a planted device setting is gone after idle + one reaper tick (the next call starts a *new* session on the recreated slot,
+  so a call succeeding after a reap proves nothing: look at device state). **help:** with `device_request_human_help` pending the session survives idle + tick;
+  after a tool call ended the wait, idle reaping applies again. Not tested: that opening the live view refreshes the timer (by code: `/authz` sets `last_used`
+  on each page/websocket request, an open noVNC connection does not).
+- **disconnect** (`DISCONNECT_TIMEOUT_MINUTES=1`): a client that vanished without DELETE/`device_end_session` held the slot (`503` for others), reaped and free again after 173 s.
+- **kill only the emulator:** the tool call fails in 1 s with `device 'emulator-5554' not found`, the slot is replaced, a new session works.
+- **fill `/out`** (512 MB tmpfs): `device_snapshot` fails with `[Errno 28] No space left on device`, the session works again after the space is freed.
+- **quarantine:** a bogus line added to the golden `baseline-packages.txt` (restored byte for byte, same sha256) makes the recreated slot fail `verify`: gateway log
+  `uid 1 QUARANTINED: slot 1 not clean after reset: ['third-party packages differ from the baseline']`, a new `initialize` gets `503 capacity`, after the restore and a
+  gateway restart the slot is back.
+- **kill the whole slot container mid-session:** first run NOT OK (hang, slot unusable for 5+ minutes); fixed, see fixes 26-28. Now the call fails at once with `the device session ended unexpectedly (ConnectError: [Errno -2] Name or service not known); start a new one`, and the replacement is usable 72 s later, not quarantined.
+
+**Found and fixed in W5**
+- **Fix 22, a slot could stay `busy` in the pool forever (every client got `503 capacity`).** `sessions.close()` waited 60 s for the session task, but an Android reset takes
+  60-120 s (74 s seen). The timeout cancelled the task inside `pool.release()`; `release` shields `stop()`, but the `busy -> free` bookkeeping after it ran in the cancelled
+  task and was skipped, so the clean, free slot was never handed out again (until a gateway restart). Now `Pool.release` runs stop + bookkeeping as its own task
+  (cancel-safe) and `close()` waits `SLOT_RESET_TIMEOUT + 90 s` on Android. Test `test_pool.py::test_cancelled_release_still_frees_the_uid` (fails on the old code).
+  The browser pool gets the same `release` (no behaviour change there).
+- **Fix 23, nginx rejected uploads above 1 MB** (`413`): no real APK could be uploaded through `get_upload_link`. `client_max_body_size 50m` on the blob/upload location (= the gateway's `MAX_FILE_BYTES`).
+- **Fix 24, the SSO redirect lost the published port** (`http://localhost/oauth2/start`, dev: connection refused) and would downgrade `https` to `http` behind the LB in prod:
+  `absolute_redirect off;` makes the 401 -> login redirect relative.
+- **Fix 25, a modal "Emulator is running using nested virtualization" dialog sat on the device in every live view** (it was in the first screenshot): the emulator is now started with
+  `-no-nested-warnings` (`slotd.emulator_cmd()`, test added). Changes the image, so the golden snapshot was re-made on that deploy.
+
+- **Fix 26, a tool call in flight when the slot container dies hung for good.** Diagnosis (my first two explanations, "no FIN, silent drop" and "needs TCP keepalive", were wrong; checked with `/proc/net/tcp` in the gateway
+  during the hang: the connections to the old IP were in `TIME_WAIT`, i.e. closed cleanly): the SDK's GET stream reconnects, gets `ConnectError: Name or service not known` (the slot's DNS name is absent until the wrapper
+  recreates the container, ~3 s), the session task `_run_client` ends with `bs.error`, and the SDK never wakes a call that is already waiting for its answer. `sessions._Guarded` (the session's `client`) now races every `call_tool`
+  against `bs.dead`, which `_run_client` sets first thing in its `finally`; the user gets an error naming the cause. Also applies to the browser sessions. Tests `test_a_call_in_flight_fails_when_the_session_task_dies`.
+- **Fix 27, a slot killed mid-session ended up quarantined** (`QUARANTINED: [Errno -2] Name or service not known`, until a gateway restart): the cleanup POSTed `/internal/reset` to the vanished name and failed. `_reset_and_verify`
+  now treats "cannot reach the old container" as "already gone": it waits for the replacement to be `free` (fresh by construction) and still runs `verify`. Test `test_reset_of_a_vanished_slot_waits_for_the_replacement_instead_of_failing`.
+- **Fix 28, TCP keepalive and `TCP_USER_TIMEOUT` on the gateway-to-slot MCP connections** (decided by the user: these connections stay inside the stack, so a minute without an answer means the peer is gone): keepalive 20 s idle +
+  3 probes x 10 s, `TCP_USER_TIMEOUT` 60 s (needed as well: keepalive probes only run when no data is unacknowledged), Android sessions only (`sessions._stack_client`). Verified in place (keepalive timer `02` on the sockets) but it
+  was **not** what fixed the hang above; it covers a peer that dies without closing its sockets (host crash, network partition). Test `test_gateway_to_slot_connections_detect_a_dead_peer`.
+
+**Open findings**
+1. Intermittent: **3 of about 10 first runs of `e2e_android.py` on a slot a few minutes old failed `device_wait_for 'Example Domain'` (60 s)** and passed when repeated right away (and after a slot had idled 9 minutes).
+   Always the first run after a deploy or gateway restart. Network, DNS and the clock looked right when inspected on a good run; the script now prints the screen and network state when it happens. Not reproduced yet; watch in W7.
+2. Low priority: a call with a missing required argument answers `Error: 'ref'` (a leaked `KeyError`); fixing it touches `android-toolserver/` (a re-snapshot), so it was left.
+3. Every deploy that changes `docker-compose.yml` or env restarts the wrapper, whose `SIGTERM` trap removes all slots (see W4): such a `./deploy.sh` costs ~2 min without capacity even when only nginx changed.
 
 ### Fix 21: `verify` no longer lists `/sdcard` (decided by the user, 2026-10-26; supersedes fix 16)
 
@@ -453,8 +516,8 @@ gateways `research-android-clear`/`-tor`, both slots reaching `free`, tor, nginx
 | 2 | **Networks/DNS:** gateway and nginx resolve the slots; nginx reaches `:6080`; firewall list from a stack slot incl. overlay peers and gateway | [partly]: gateways reach their slots; clear-slot overlay peers unreachable by ping (stage 2). [todo] full list, nginx -> `:6080` |
 | 3 | **Tor** (see below) | [partly] |
 | 4 | **Gateway start:** slot slice, no errors; reset-at-start resets a slot left busy by killing the gateway mid-session | [partly]: gateways start and use their slice. [todo] the kill-gateway-mid-session check |
-| 5 | **MCP end to end through nginx** with a real client; script it (an Android case in `e2e_auth.py`) | [todo] (list below) |
-| 6 | **Quarantine path:** make verify fail on purpose; slot quarantined, capacity shrinks, gateway restart reinstates | [todo] |
+| 5 | **MCP end to end through nginx** with a real client; script it | [done] in W5: `e2e_android.py` (both egresses), `e2e_android_view.py`, `e2e_android_lifecycle.py` |
+| 6 | **Quarantine path:** make verify fail on purpose; slot quarantined, capacity shrinks, gateway restart reinstates | [done] in W5 |
 
 Step 3 (Tor), done: `tor` service reachable and route fixed (below); Chrome in the tor slot reaches `check.torproject.org`: `IsTor` true (exit
 204.8.96.176 / .141 on different runs). [todo] redirect rules check (`iptables -t nat -S PREROUTING` matches only the android_tor interface);
@@ -543,7 +606,7 @@ Exit: 50 clean sessions with flat resource use; redeploys behave as described.
 | Deliverable | Status |
 |---|---|
 | Fixes for everything found, each with a host regression test where it can be modelled without KVM | [partly]: tests added for watchdog, nofile flag, logcat, tor route; `ensure_network`, console.py and the sdcard baseline are only covered by live runs |
-| `smoke_android.py` run and output recorded; an Android case in `e2e_auth.py` (stub Keycloak, through nginx) that runs unattended on a KVM host | [partly]: smoke passes on the clear slot; e2e case [todo] |
+| `smoke_android.py` run and output recorded; an Android e2e through nginx that runs unattended on a KVM host | [done]: `e2e_android.py` / `_view.py` / `_lifecycle.py` (real Keycloak tokens on the dev stack; the stub IdP of `e2e_auth.py` cannot front the deployed gateways); smoke passes on the clear slot |
 | Measured numbers in the docs: boot/restore/reset times, per-slot CPU/RAM/disk, image and golden-volume size, slots per host | [todo]; numbers are in this file (Host, Stage 1, Stage 2) |
 | README "Android" section corrected (Play Store on Tor, first-run dialogs, host resources) | [todo] |
 | The implemented plan's "Not run" paragraph replaced by "Verified on KVM host <date, host type>" | [todo] |
@@ -557,7 +620,7 @@ Exit: 50 clean sessions with flat resource use; redeploys behave as described.
 | `android-toolserver/android_tools.py`, `device.py` | key names, install call, retries; then `export_tools.py` (done: logcat) |
 | `android-wrapper/reconcile.sh` | overlay creation, recreate-after-N-sessions if Stage 6 needs it (done: nofile, missing detection, boot timeout, tor route) |
 | `docker-compose.yml`, `deploy.sh`, `.env.example`, `tor/entrypoint.sh`, `nginx.conf.template`, `oauth2-proxy/` | Stage 4 findings (done: timeouts, RAM stamp, F-Droid URL, oauth2-proxy wget) |
-| `mcp-research/e2e_auth.py` | Android case |
+| `mcp-research/e2e_android.py`, `e2e_android_view.py`, `e2e_android_lifecycle.py`, `e2e_android_setup.sh` | new (W5); `e2e_auth.py` unchanged |
 | `README.md`, `docs/architecture/android.md`, `docs/operations/deploy-and-configure.md` | measured numbers, corrected claims, new env vars |
 | `docs/implemented-plans/android-hoarder.md` | replace "Not run" with the verification record |
 

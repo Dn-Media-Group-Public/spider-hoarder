@@ -72,7 +72,28 @@ def test_failed_stop_quarantines():
     asyncio.run(go())
 
 
+def test_cancelled_release_still_frees_the_uid():
+    """sessions.close times out and cancels the task awaiting release(); a slow stop (android reset: ~75 s) then still
+    finishes and the uid must end up free, not busy forever (every client got 503 'capacity reached' before)."""
+    class Slow(Fake):
+        async def stop(self, uid):
+            await asyncio.sleep(0.2)
+            await super().stop(uid)
+
+    async def go():
+        pool = Pool(Slow(), uids=range(20000, 20001))
+        uid = pool.take()
+        await pool.start(uid, {}, {})
+        waiter = asyncio.create_task(pool.release(uid))
+        await asyncio.sleep(0.05)
+        waiter.cancel()
+        await asyncio.sleep(0.4)
+        assert uid in pool.free and uid not in pool.busy
+    asyncio.run(go())
+
+
 if __name__ == "__main__":
     test_invariant()
+    test_cancelled_release_still_frees_the_uid()
     test_failed_stop_quarantines()
     print("ok")

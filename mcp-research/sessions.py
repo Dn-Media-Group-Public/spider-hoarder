@@ -61,6 +61,7 @@ class BrowserSession:
     running: bool = False
     ready: asyncio.Event = field(default_factory=asyncio.Event)
     closing: asyncio.Event = field(default_factory=asyncio.Event)
+    dead: asyncio.Event = field(default_factory=asyncio.Event)  # set when the session's upstream task has ended, however
     task: asyncio.Task | None = None
     last_used: float = field(default_factory=time.time)
     sid: str | None = None  # SDK MCP session id (no replica prefix)
@@ -96,6 +97,53 @@ async def _wait_http(url: str, timeout: float = 60, headers: dict | None = None)
     raise TimeoutError(f"browser session did not come up: {url}")
 
 
+# Gateway -> slot connections never legitimately stall: they stay inside the stack. A slot container that dies takes its network
+# namespace with it and nothing answers on the old address (no FIN, RST or ICMP), so without these the gateway waits on the
+# dead socket for the kernel's retransmission limit (many minutes). Keepalive covers an idle wait for a reply (20 s + 3 x 10 s),
+# TCP_USER_TIMEOUT unacknowledged data (a call sent after the death); both give up within about a minute.
+STACK_SOCKET_OPTIONS = [
+    (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1),
+    (socket.IPPROTO_TCP, socket.TCP_KEEPIDLE, 20),
+    (socket.IPPROTO_TCP, socket.TCP_KEEPINTVL, 10),
+    (socket.IPPROTO_TCP, socket.TCP_KEEPCNT, 3),
+    (socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, 60_000),
+]
+
+
+def _stack_client(headers=None, timeout=None, auth=None) -> httpx.AsyncClient:
+    """The MCP SDK's default client (create_mcp_http_client) plus STACK_SOCKET_OPTIONS."""
+    return httpx.AsyncClient(headers=headers, auth=auth, follow_redirects=True, timeout=timeout or httpx.Timeout(30.0),
+                             transport=httpx.AsyncHTTPTransport(socket_options=STACK_SOCKET_OPTIONS))
+
+
+class _Guarded:
+    """The session's upstream MCP client, except that a call also ends when the session's task does. When the upstream dies
+    (the slot container is killed, say) the task ends with an error, but the SDK never wakes a call already waiting for its
+    answer: the user's call hung until their own timeout. Everything but call_tool is the wrapped session."""
+
+    def __init__(self, cs: ClientSession, bs: "BrowserSession"):
+        self._cs, self._bs = cs, bs
+
+    def __getattr__(self, name):
+        return getattr(self._cs, name)
+
+    async def call_tool(self, *args, **kw):
+        call = asyncio.ensure_future(self._cs.call_tool(*args, **kw))
+        dead = asyncio.ensure_future(self._bs.dead.wait())
+        try:
+            await asyncio.wait({call, dead}, return_when=asyncio.FIRST_COMPLETED)
+            if call.done():
+                return call.result()
+            err = self._bs.error
+            while isinstance(err, BaseExceptionGroup) and err.exceptions:  # the task group's wrapper says nothing
+                err = err.exceptions[0]
+            why = f"{type(err).__name__}: {err}" if err else "it was closed"
+            raise RuntimeError(f"the {'device' if ANDROID else 'browser'} session ended unexpectedly ({why[:200]}); start a new one")
+        finally:
+            call.cancel()
+            dead.cancel()
+
+
 async def _run_client(bs: BrowserSession) -> None:
     """Owns the session's uid (android: slot) and its upstream MCP connection for its lifetime."""
     try:
@@ -110,10 +158,11 @@ async def _run_client(bs: BrowserSession) -> None:
             url, headers = f"http://127.0.0.1:{ports.mcp_port(bs.uid)}/mcp", {"Host": UPSTREAM_HOST}
         bs.running = True
         await _wait_http(url, headers=headers)
-        async with streamablehttp_client(url, headers=headers) as (r, w, _):
+        kw = {"httpx_client_factory": _stack_client} if ANDROID else {}
+        async with streamablehttp_client(url, headers=headers, **kw) as (r, w, _):
             async with ClientSession(r, w) as cs:
                 await cs.initialize()
-                bs.client = cs
+                bs.client = _Guarded(cs, bs)
                 bs.ready.set()
                 log.info("session %s started for %s on uid %s", bs.id[:8], bs.owner, bs.uid)
                 await bs.closing.wait()
@@ -121,6 +170,7 @@ async def _run_client(bs: BrowserSession) -> None:
         bs.error = e
         log.warning("session %s failed: %r", bs.id[:8], e)
     finally:
+        bs.dead.set()  # in-flight calls fail now, not after the reset below
         bs.ready.set()
         if bs.running:
             await pool.release(bs.uid)
@@ -136,6 +186,11 @@ async def _start(bs: BrowserSession) -> BrowserSession:
     return bs
 
 
+# An android slot is recreated and verified after every session (slots.RESET_TIMEOUT at most): closing must outlast that,
+# or the waiter is cancelled mid-reset (pool.release finishes on its own, but the caller sees a timeout).
+CLOSE_TIMEOUT = (slots.RESET_TIMEOUT + 90) if ANDROID else 60
+
+
 async def close(bs: BrowserSession) -> None:
     if by_mcp.get(id(bs.mcp_session)) is bs:
         del by_mcp[id(bs.mcp_session)]
@@ -143,7 +198,7 @@ async def close(bs: BrowserSession) -> None:
     bs.closing.set()
     if bs.task:
         with contextlib.suppress(Exception):
-            await asyncio.wait_for(bs.task, 60)
+            await asyncio.wait_for(bs.task, CLOSE_TIMEOUT)
     log.info("session %s closed", bs.id[:8])
 
 

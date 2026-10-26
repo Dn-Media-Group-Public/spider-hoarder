@@ -85,9 +85,24 @@ needed 240-540 s). The guest clock is the snapshot time plus the time since rest
 `slotd.set_guest_time()` sets it from the host clock (`cmd alarm set-time`, works as the shell uid) at the end of boot and again when a session starts.
 See also: [Plan: Android KVM bring-up](../plans/android-kvm-bringup.md)
 
-Idle timeout `ANDROID_IDLE_TIMEOUT` (600 s) ends the session and wipes the slot; a pending `device_request_human_help` suspends
-it (until the next tool call, at most `ANDROID_HELP_TIMEOUT`, 3600 s) and so does using the live view.
-`MAX_SESSIONS_PER_USER` is 1 in this mode.
+Idle timeout `ANDROID_IDLE_TIMEOUT` (600 s) ends the session and wipes the slot (the reaper looks every 60 s, so it takes up to a minute
+longer); a pending `device_request_human_help` suspends it (until the next tool call, at most `ANDROID_HELP_TIMEOUT`, 3600 s). A request through
+the live view's authz check (opening the page, the websocket handshake) also counts as use; an already open noVNC connection does not.
+A client that vanished without ending its session loses it after `DISCONNECT_TIMEOUT_MINUTES` (5). `MAX_SESSIONS_PER_USER` is 1 in this mode:
+a second `initialize` of the same user gets `503 {"error": "full", "message": "you already have 1 device sessions; end one first"}`, and any
+`initialize` with every slot taken gets `503 ... capacity reached; try again later` at once (the reservation is made at `initialize`).
+Ending a session (`device_end_session`, DELETE, reaper) waits for the slot's replacement: the gateway's `close()` allows `SLOT_RESET_TIMEOUT + 90 s`
+and `pool.release` finishes on its own task, so a caller that gives up cannot leave the slot `busy` in the pool.
+If the slot container dies mid-session (killed, OOM, daemon restart), the gateway's upstream task ends with the connection error and every call
+in flight or made afterwards fails at once with "the device session ended unexpectedly (...)" (`sessions._Guarded`); the cleanup does not need the
+dead container: it waits for the replacement to be `free` and verifies it. The gateway-to-slot connections also use TCP keepalive and
+`TCP_USER_TIMEOUT` (about a minute) for peers that vanish without closing their sockets.
+See also: [Plan: Android KVM bring-up](../plans/android-kvm-bringup.md) (fixes 22 and 26-28, W5 results)
+
+Through nginx, uploads (`get_upload_link`, APKs) may be up to 50 MB (`client_max_body_size` on the upload/blob location, the gateway's
+`MAX_FILE_BYTES` default; nginx's own 1 MB stopped every real APK), and the SSO redirect is relative (`absolute_redirect off`), so it keeps the
+published port in dev and the `https` of the load balancer in prod. The emulator runs with `-no-nested-warnings`: otherwise a modal "nested
+virtualization" dialog covers the device in every live view.
 
 ## Network and egress
 

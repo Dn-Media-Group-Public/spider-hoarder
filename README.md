@@ -122,4 +122,6 @@ Android (host, no KVM needed; `test_android.py` must run on its own because it s
 (cd android-toolserver && python test_android_toolserver.py)   # if you change the tools: python export_tools.py first
 (cd android-slot && python test_slot.py) && (cd android-wrapper && python test_reconcile.py)
 # on a KVM host, inside a research-android-* container as uid 1000: python smoke_android.py
+# on a KVM host, against the deployed --dev stack through nginx (real Keycloak tokens; see the docstrings for the docker run line):
+#   mcp-research/e2e_android_setup.sh; python e2e_android.py [android-clear|android-tor]; python e2e_android_view.py; python e2e_android_lifecycle.py <phase>
 ```

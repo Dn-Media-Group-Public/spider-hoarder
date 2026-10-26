@@ -191,7 +191,8 @@ def start_xvfb() -> None:
 
 def emulator_cmd() -> list:
     cmd = ["emulator", "-avd", "slot", "-port", str(EMU_PORT), "-read-only", "-snapshot", "clean", "-no-snapshot-save",
-           "-gpu", "swiftshader_indirect", "-no-audio", "-no-boot-anim", "-no-metrics"]
+           "-gpu", "swiftshader_indirect", "-no-audio", "-no-boot-anim", "-no-metrics",
+           "-no-nested-warnings"]  # else a modal "nested virtualization" dialog covers the device in every live view
     if EGRESS == "tor":
         cmd += ["-dns-server", "8.8.8.8"]  # a dummy public address: tor's DNSPort redirect answers it, no private-range exception needed
     return cmd

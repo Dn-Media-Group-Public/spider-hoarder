@@ -3,6 +3,7 @@
 Run on its own (it sets the mode before importing the gateway)."""
 
 import asyncio
+import httpx
 import json
 import os
 import subprocess
@@ -165,6 +166,51 @@ def test_gateway_start_resets_leftover_busy_slots():
             FakeSlotd.state, FakeSlotd.verify_ok = "busy", False
             await be.reset()  # cannot be proven clean: the next release retries and quarantines
             assert be.dirty == set(slots.SLOTS)
+        asyncio.run(go())
+    finally:
+        srv.shutdown()
+
+
+def test_a_call_in_flight_fails_when_the_session_task_dies():
+    """The slot container was killed mid-session: the upstream task ends with an error. A tool call already waiting for its answer
+    must fail then (it hung forever: the SDK does not wake it)."""
+    class Hangs:
+        async def call_tool(self, *a, **kw):
+            await asyncio.sleep(3600)
+
+    async def go():
+        bs = sessions.BrowserSession(owner="a@x.y", uid=1)
+        bs.error = ExceptionGroup("unhandled errors in a TaskGroup", [ConnectionError("Name or service not known")])
+        g = sessions._Guarded(Hangs(), bs)
+        asyncio.get_running_loop().call_later(0.05, bs.dead.set)
+        try:
+            await asyncio.wait_for(g.call_tool("device_snapshot", {}), 5)
+            raise AssertionError("the call should have failed")
+        except RuntimeError as e:
+            assert "ended unexpectedly" in str(e) and "ConnectionError: Name or service not known" in str(e), str(e)
+    asyncio.run(go())
+
+
+def test_reset_of_a_vanished_slot_waits_for_the_replacement_instead_of_failing():
+    srv = serve()
+    try:
+        class Gone(slots.SlotBackend):
+            async def _call(self, k, method, path, timeout, **kw):
+                if path == "/internal/reset":
+                    raise httpx.ConnectError("[Errno -2] Name or service not known")
+                return await super()._call(k, method, path, timeout, **kw)
+
+        async def go():
+            be = Gone()
+            FakeSlotd.state, FakeSlotd.verify_ok = "free", True  # the replacement is already up (the old one cannot be reached)
+            await be._reset_and_verify(slots.SLOTS[0])
+            FakeSlotd.verify_ok = False  # ... and still has to pass verify
+            try:
+                await be._reset_and_verify(slots.SLOTS[0])
+                raise AssertionError("verify failure must still raise")
+            except RuntimeError as e:
+                assert "not clean" in str(e)
+            FakeSlotd.verify_ok = True
         asyncio.run(go())
     finally:
         srv.shutdown()
@@ -343,6 +389,24 @@ def test_reserve_android_is_per_slot_not_per_total():
         sessions.reserve("c@x.y"); assert False  # both slots taken: busy, immediately
     except RuntimeError as e:
         assert "capacity" in str(e)
+
+
+def test_gateway_to_slot_connections_detect_a_dead_peer():
+    """A slot container that dies leaves the gateway's connection with no FIN/RST: keepalive and TCP_USER_TIMEOUT must be on
+    (they make the kernel give up within about a minute instead of the retransmission limit)."""
+    import socket
+    client = sessions._stack_client()
+    opts = client._transport._pool._socket_options
+    assert (socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1) in opts
+    assert (socket.IPPROTO_TCP, socket.TCP_USER_TIMEOUT, 60_000) in opts
+    assert sessions.STACK_SOCKET_OPTIONS == opts
+    srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(1)
+    c = socket.create_connection(srv.getsockname())  # the kernel accepts every option on a real connection
+    for level, name, value in opts:
+        c.setsockopt(level, name, value)
+        assert c.getsockopt(level, name) == value
+    c.close(); srv.close()
+    assert client.follow_redirects and client.timeout.read == 30.0
 
 
 if __name__ == "__main__":

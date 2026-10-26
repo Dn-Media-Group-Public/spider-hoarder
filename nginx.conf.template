@@ -31,7 +31,10 @@ server {
     proxy_set_header Upgrade $http_upgrade;
     proxy_set_header Connection $connection_upgrade;
 
-    # SSO 401 -> login (auth_request failures only: proxied 401s, e.g. the MCP bearer challenge, pass through)
+    # SSO 401 -> login (auth_request failures only: proxied 401s, e.g. the MCP bearer challenge, pass through).
+    # Relative Location: nginx would otherwise build it from its own listen port and scheme (http, :80), losing the
+    # published port in dev (localhost:7297 -> http://localhost/...) and the https of the TLS-terminating LB in prod.
+    absolute_redirect off;
     error_page 401 = @login;
     location @login { return 302 /oauth2/start?rd=$uri; }
 
@@ -85,6 +88,7 @@ server {
     # Signed capability links: the gateway checks the token.
     location ~ ^/(?:android-)?(?:tor|clear)/(blob|upload)/ {
         if ($url_ip = "") { return 400; }
+        client_max_body_size 50m;   # = the gateway's MAX_FILE_BYTES default; nginx's own 1m stops any real APK
         proxy_pass http://$url_ip:${GATEWAY_PORT};
     }
 

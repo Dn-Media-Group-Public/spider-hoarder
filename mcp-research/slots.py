@@ -95,7 +95,10 @@ class SlotBackend:
     async def _reset_and_verify(self, k: int) -> None:
         """The slot throws itself away (slotd exits, the wrapper recreates the container from scratch): wait for the new
         one to be free, then check it. The old one never reports free again, so this cannot see it by mistake."""
-        await self._ok(k, "POST", "/internal/reset", 30)
+        try:
+            await self._ok(k, "POST", "/internal/reset", 30)
+        except httpx.HTTPError as e:  # the container is already gone (killed, OOM): its replacement is fresh by construction
+            log.warning("slot %s unreachable at reset (%r): waiting for its replacement", k, e)
         await self._wait_free(k, RESET_TIMEOUT)
         v = await self._ok(k, "GET", "/internal/verify", 60)
         if not v.get("ok"):
