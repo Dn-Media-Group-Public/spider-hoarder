@@ -16,7 +16,6 @@ import re
 import stat
 import time
 import uuid
-import zipfile
 from typing import Any
 
 import anyio
@@ -49,8 +48,8 @@ MCP_PATH = f"/{EGRESS}/mcp"
 UPLOAD_MARK = "@upload"  # blobtoken path marking an upload-link token (never a real file path)
 INLINE_LIMIT = 50_000
 MAX_PARSE_BYTES = int(os.environ.get("MAX_PARSE_BYTES", 50 * 1024 * 1024))  # stored files have no cap; parsing does
-MAX_ZIP_BYTES = int(os.environ.get("MAX_ZIP_BYTES", 4 * 1024**3))  # total uncompressed bytes of one zip
-MAX_ZIP_MEMBERS = int(os.environ.get("MAX_ZIP_MEMBERS", 50_000))
+MAX_ARCHIVE_BYTES = int(os.environ.get("MAX_ARCHIVE_BYTES") or os.environ.get("MAX_ZIP_BYTES") or 4 * 1024**3)  # uncompressed, per archive
+MAX_ARCHIVE_MEMBERS = int(os.environ.get("MAX_ARCHIVE_MEMBERS") or os.environ.get("MAX_ZIP_MEMBERS") or 50_000)
 # Proxied tools whose output is a file in a job: name -> default job-internal file name when the agent gives
 # no `filename`.
 FILE_TOOLS = {
@@ -215,6 +214,14 @@ def _parse_one(key: str, path: str, raw: bytes, ctype: str, base_url: str, notes
     if path.lower().endswith((".md", ".markdown")):  # already Markdown: no parsed/, terse from the original
         text = raw.decode("utf-8", errors="replace")
         return text, f"original/{path}", _write_terse(key, path, text), f"terse/{path}"
+    if bkind := extract.binary_kind(ctype, path, raw):
+        try:
+            text = extract.binary_to_json(raw, bkind, ctype)
+        except Exception as e:  # noqa: BLE001  undecodable: noted, never fails the job
+            notes.append(f"{path} not parsed ({type(e).__name__}: {e})")
+            return None
+        storage.write_bytes(key, f"parsed/{path}.json", text.encode(), "application/json")
+        return text, f"parsed/{path}.json", "", ""
     is_html = "html" in ctype or path.lower().endswith((".html", ".htm"))
     if is_html and base_url:
         raw = extract.absolutize(raw, base_url)  # parsed/ and simplified/ get absolute links; original/ is stored untouched
@@ -234,7 +241,7 @@ def _parse_one(key: str, path: str, raw: bytes, ctype: str, base_url: str, notes
 def _store_one(key: str, path: str, src, ctype: str, base_url: str = "", notes: list | None = None,
                unzip: bool = True) -> tuple | None:
     """Store `src` (bytes or a file object) as original/<path> and parse it by the one rule for every file;
-    a zip is unpacked to <path>.d/ (once: members that are zips are only stored)."""
+    an archive is unpacked to <path>.d/ (once: members that are archives are only stored)."""
     notes = [] if notes is None else notes
     if isinstance(src, bytes):
         storage.write_bytes(key, f"original/{path}", src, ctype)
@@ -244,18 +251,18 @@ def _store_one(key: str, path: str, src, ctype: str, base_url: str = "", notes: 
     if size > MAX_PARSE_BYTES:
         notes.append(f"{path} not parsed ({size} bytes > MAX_PARSE_BYTES)")
         return None
-    if unzip and extract.is_zip(ctype, path):
+    if unzip and extract.archive_kind(ctype, path):
         try:
-            with storage.open_read(key, f"original/{path}") as zf:
+            with storage.open_read(key, f"original/{path}") as af:
                 members = ((n, f, mimetypes.guess_type(n)[0] or "application/octet-stream")
-                           for n, f in extract.unpack_zip(zf, MAX_ZIP_MEMBERS, MAX_ZIP_BYTES))
+                           for n, f in extract.unpack_archive(af, path, ctype, MAX_ARCHIVE_MEMBERS, MAX_ARCHIVE_BYTES, notes))
                 _store_tree(key, members, notes=notes, prefix=f"{path}.d/", unzip=False)
             return None
-        except extract.ZipLimit as e:
+        except extract.ArchiveLimit as e:
             notes.append(str(e))
             return None
-        except zipfile.BadZipFile:
-            pass  # named .zip but is not: parse it as any file
+        except extract.BadArchive:
+            pass  # named like an archive but is not: parse it as any file
     raw = src if isinstance(src, bytes) else storage.read_bytes(key, f"original/{path}")
     return _parse_one(key, path, raw, ctype, base_url, notes)
 

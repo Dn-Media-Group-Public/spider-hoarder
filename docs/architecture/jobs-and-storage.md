@@ -38,9 +38,22 @@ See also: [Plan: save-page target](../implemented-plans/save-page-target.md)
   jobs live on the replica that created them ([Scaling](scaling.md)).
 - `get_file_url` returns an HMAC-signed, short-lived (15 min) download link `…/blob/<rid>/<token>`; `get_upload_link` an upload page
   link (1 h) that carries the owner-scoped job key, so uploads need no SSO and cannot cross owners. Secret: `BLOB_TOKEN_SECRET`.
-- Every zip (upload, `ingest_page` download, network response body) is unpacked to `original/<zip path>.d/<relpath>`, members parsed as
-  any file (`parsed/<zip path>.d/<relpath>.md`); zips inside zips are only stored. Zip-slip is rejected (`test_security.py`).
-  Limits, enforced while extracting: `MAX_ZIP_MEMBERS` (50,000) and `MAX_ZIP_BYTES` (4 GiB uncompressed, counted from bytes actually
-  written); an aborted unpack is reported in `notes`. One parse rule serves every caller (`_store_one` / `_store_tree` in `app.py`).
-  See also: [Plan: network request jobs](../implemented-plans/network-request-jobs.md)
+- Every archive (upload, `ingest_page` download, network response body) is unpacked to `original/<archive path>.d/<relpath>`, members
+  parsed as any file (`parsed/<archive path>.d/<relpath>.md`); archives inside archives are only stored. Detected by extension or
+  content type only (`extract.archive_kind`): zip, tar (`.tar .tgz .tar.gz .tbz .tbz2 .tar.bz2 .txz .tar.xz`, streamed), 7z (`py7zr`),
+  rar (`rarfile`, needs `unar` in the image) and single-file `.gz/.bz2/.xz` (one member named without the suffix). Only regular files
+  are extracted: names with an absolute path or `..` are dropped, symlinks/hardlinks/devices/FIFOs are skipped and listed in `notes`
+  (`"<name> skipped (symlink)"`), never followed (`test_security.py`). Limits, enforced while extracting: `MAX_ARCHIVE_MEMBERS` (50,000)
+  and `MAX_ARCHIVE_BYTES` (4 GiB uncompressed, counted from bytes actually read; `MAX_ZIP_*` still read as fallbacks); an aborted unpack
+  is reported in `notes`. 7z members are extracted into memory in 64 MiB batches (by declared size). One parse rule serves every
+  caller (`_store_one` / `_store_tree` in `app.py`).
+  See also: [Plan: network request jobs](../implemented-plans/network-request-jobs.md), [Plan: more file formats](../implemented-plans/more-file-formats.md)
+- Binary structured data is decoded to pretty-printed JSON at `parsed/<path>.json` (`extract.binary_to_json`; the original is untouched,
+  `.json` originals are not parsed): msgpack (`.msgpack .mp`), CBOR (`.cbor`), BSON (`.bson`, the PyPI `bson` package, concatenated
+  documents give a list), plist (`.plist` or `bplist00` magic) and protobuf (`.pb`, `application/(x-)protobuf`, `application/grpc-web*`;
+  gRPC-web frames de-framed, `-text` base64-decoded, trailers as text). Detection is by extension / content type, no content sniffing
+  except the plist magic. Non-JSON values: bytes → `{"$base64": …}`, datetimes → ISO 8601, NaN/Inf and unknown types → string, sets →
+  lists, non-string keys → `str()`. Protobuf is schema-less (`blackboxprotobuf`): `{"message": {field number: value}, "typedef": {guessed
+  types}}`. A decode failure is noted in `notes`, the job does not fail.
+  See also: [Plan: more file formats](../implemented-plans/more-file-formats.md)
 - No retention/cleanup exists yet (out of scope of the plans).

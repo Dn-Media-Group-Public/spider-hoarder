@@ -11,3 +11,4 @@ Back to the [documentation index](../index.md). Open plans: [plans](../plans/ind
 - [oauth2-proxy registers itself via DCR](oauth2-proxy-dcr.md)
 - [Network requests as multi-file jobs, `new` flag, tree parsing](network-request-jobs.md)
 - [Scale `research-*` containers (sticky replicas on Swarm)](research-replicas.md)
+- [More archive formats and binary structured data → JSON](more-file-formats.md)

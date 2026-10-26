@@ -11,3 +11,9 @@ lxml_html_clean
 markdown-it-py
 linkify-it-py
 playwright==1.63.0
+msgpack
+cbor2
+bson
+py7zr
+rarfile
+blackboxprotobuf

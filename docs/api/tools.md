@@ -13,7 +13,7 @@ See also: [Plan: Browser sessions](../implemented-plans/browser-sessions-plan.md
 | `browser_save_page(target?, browser?)` | Convert the open page (or `target`: an element ref/selector) to Markdown and store it as a job. Prefer over `browser_snapshot` for content. |
 | `ingest_page(url, target?)` | One shot: ephemeral browser, navigate, save, destroy. `target` must be a selector. Non-HTML goes through `requests`. |
 | `browser_end_session(browser?)` | Close one browser, or all and the session. |
-| `get_upload_link()` | Page where the *user* uploads files into a new job (1 h). |
+| `get_upload_link()` | Page where the *user* uploads files into a new job (1 h). Archives are unpacked; binary formats (msgpack, CBOR, BSON, plist, protobuf) also get `parsed/*.json`. See also: [Plan: more file formats](../implemented-plans/more-file-formats.md) |
 | `list_files(job_id)` | Manifest of a job. |
 | `get_file_text(job_id, path, offset?, length?)` | Page through a stored file (20,000-char slices by default). |
 | `grep_file(job_id, path, pattern, context=2, max_matches=50)` | Regex search in a stored text file (`/pat/i` accepted). |

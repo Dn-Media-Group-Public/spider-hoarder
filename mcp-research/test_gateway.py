@@ -186,14 +186,14 @@ def test_tree_store_and_zip_limits():
     with zipfile.ZipFile(many, "w") as zf:
         for i in range(5):
             zf.writestr(f"m{i}.txt", "x" * 100)
-    app.MAX_ZIP_MEMBERS = 4
+    app.MAX_ARCHIVE_MEMBERS = 4
     r = app._store_and_parse(key, "many.zip", many.getvalue(), "application/zip")
-    assert r["notes"] == ["zip not unpacked: 5 members > MAX_ZIP_MEMBERS"] and not any("many.zip.d" in f["path"] for f in r["files"]), r
-    app.MAX_ZIP_MEMBERS, app.MAX_ZIP_BYTES = 50_000, 250
+    assert r["notes"] == ["archive not unpacked: 5 members > MAX_ARCHIVE_MEMBERS"] and not any("many.zip.d" in f["path"] for f in r["files"]), r
+    app.MAX_ARCHIVE_MEMBERS, app.MAX_ARCHIVE_BYTES = 50_000, 250
     r = app._store_and_parse(key, "many.zip", many.getvalue(), "application/zip")
-    assert "MAX_ZIP_BYTES" in r["notes"][0] and any(f["path"] == "original/many.zip" for f in r["files"]), r
+    assert "MAX_ARCHIVE_BYTES" in r["notes"][0] and any(f["path"] == "original/many.zip" for f in r["files"]), r
     assert sum("many.zip.d" in f["path"] and f["path"].startswith("original") for f in r["files"]) == 2  # written before the abort
-    app.MAX_ZIP_BYTES = 4 * 1024**3
+    app.MAX_ARCHIVE_BYTES = 4 * 1024**3
     # parse cap: stored (no cap) but not parsed
     app.MAX_PARSE_BYTES = 10
     r = app._store_and_parse(key, "big.html", b"<p>" + b"x" * 50 + b"</p>", "text/html")
@@ -428,6 +428,67 @@ def test_multi_browser_routing():
     run("browser_request_human_help", browser="x", reason="r")
     assert calls[-1] == ("browser_bring_to_front", {"browser": "x"})
     assert app.FILE_TOOLS["browser_storage_state"] and "browser_run_code_unsafe" not in app.FILE_TOOLS
+
+
+def test_archives_and_binary_formats():
+    import app, extract, storage, tempfile, io, tarfile, gzip, bz2, lzma, json, msgpack, cbor2, bson, plistlib, base64, py7zr
+    storage.BLOB_URL = "file://" + tempfile.mkdtemp()
+    key = app._key("a@x.y", f"{app.RID}.123e4567-e89b-12d3-a456-426614174011")
+
+    def paths(r):
+        return {f["path"] for f in r["files"]}
+
+    def tar(mode):
+        b = io.BytesIO()
+        with tarfile.open(fileobj=b, mode=mode) as tf:
+            for n, d in (("a/n.md", b"# H\n[l](u)"), ("in.tgz", b"x")):
+                ti = tarfile.TarInfo(n); ti.size = len(d); tf.addfile(ti, io.BytesIO(d))
+        return b.getvalue()
+    for name, mode in (("t.tar", "w"), ("t.tgz", "w:gz"), ("t.tar.bz2", "w:bz2"), ("t.txz", "w:xz")):
+        p = paths(app._store_and_parse(key, name, tar(mode), "application/octet-stream"))
+        assert {f"original/{name}.d/a/n.md", f"terse/{name}.d/a/n.md", f"original/{name}.d/in.tgz"} <= p, p  # no recursion
+    b = io.BytesIO()
+    with py7zr.SevenZipFile(b, "w") as z:
+        z.writestr(b"# H\n[l](u)", "a/n.md")
+    assert "terse/s.7z.d/a/n.md" in paths(app._store_and_parse(key, "s.7z", b.getvalue(), "application/x-7z-compressed"))
+    for name, comp in (("n.md.gz", gzip.compress), ("n.md.bz2", bz2.compress), ("n.md.xz", lzma.compress)):
+        assert f"terse/{name}.d/n.md" in paths(app._store_and_parse(key, name, comp(b"# H\n[l](u)"), "application/octet-stream"))
+    r = app._store_and_parse(key, "fake.gz", b"plain text", "application/gzip")  # not really gzip: parsed as any file
+    assert "original/fake.gz" in paths(r) and not any("fake.gz.d" in p for p in paths(r))
+    assert extract.archive_kind("application/x-7z-compressed", "x") == "7z" and extract.archive_kind("", "a.rar") == "rar"
+    assert extract.archive_kind("application/gzip", "a.tar.gz") == "tar" and extract.archive_kind("text/html", "a.html") is None
+    app.MAX_ARCHIVE_MEMBERS = 1
+    r = app._store_and_parse(key, "lim.tgz", tar("w:gz"), "application/gzip")
+    assert "MAX_ARCHIVE_MEMBERS" in r["notes"][0], r
+    app.MAX_ARCHIVE_MEMBERS, app.MAX_ARCHIVE_BYTES = 50_000, 5
+    r = app._store_and_parse(key, "lim.txz", tar("w:xz"), "application/octet-stream")
+    assert "MAX_ARCHIVE_BYTES" in r["notes"][0], r
+    app.MAX_ARCHIVE_BYTES = 4 * 1024**3
+
+    # binary structured data -> parsed/<path>.json; the original is untouched
+    obj = {"a": [1, 2.5], "b": b"\x00\x01"}
+    want = {"a": [1, 2.5], "b": {"$base64": "AAE="}}
+    for name, data, ct in (("d.msgpack", msgpack.packb(obj), ""), ("d.cbor", cbor2.dumps(obj), ""),
+                           ("d.bson", bson.dumps(obj), ""), ("d.plist", plistlib.dumps(obj, fmt=plistlib.FMT_BINARY), ""),
+                           ("noext", plistlib.dumps(obj, fmt=plistlib.FMT_BINARY), "application/octet-stream"),
+                           ("noext2", msgpack.packb(obj), "application/x-msgpack")):
+        r = app._store_and_parse(key, name, data, ct)
+        assert "parsed/%s.json" % name in paths(r), (name, paths(r))
+        assert json.loads(storage.read_text(key, f"parsed/{name}.json")) == want, name
+        assert storage.read_bytes(key, f"original/{name}") == data
+    assert json.loads(extract.binary_to_json(cbor2.dumps({1: float("nan")}), "cbor")) == {"1": "nan"}
+    pb = b"\x0a\x03abc\x10\x96\x01"
+    j = json.loads(extract.binary_to_json(pb, "protobuf"))
+    assert j["message"] == {"1": {"$base64": "YWJj"}, "2": 150} and j["typedef"]["2"]["type"] == "int", j
+    framed = b"\x00" + len(pb).to_bytes(4, "big") + pb + b"\x80" + (9).to_bytes(4, "big") + b"grpc-status: 0"[:9]
+    j = json.loads(extract.binary_to_json(framed, "protobuf", "application/grpc-web+proto"))
+    assert j[0]["message"]["2"] == 150 and j[1] == {"trailers": "grpc-stat"}, j
+    j = json.loads(extract.binary_to_json(base64.b64encode(framed), "protobuf", "application/grpc-web-text"))
+    assert len(j) == 2
+    r = app._store_and_parse(key, "bad.cbor", b"\xa1\x01", "")  # undecodable: noted, job not failed, no parsed/
+    assert "bad.cbor not parsed" in r["notes"][0] and "parsed/bad.cbor.json" not in paths(r), r
+    r = app._store_and_parse(key, "x.json", b'{"a":1}', "application/json")
+    assert storage.read_bytes(key, "original/x.json") == b'{"a":1}' and "parsed/x.json.json" not in paths(r)
 
 
 if __name__ == "__main__":
