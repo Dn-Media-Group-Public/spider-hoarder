@@ -35,7 +35,7 @@ state is tracked here; the detailed checklists stay in the stage sections above.
 | W1 | Slot isolation checks | Stage 2 step 6: TCP-level firewall proof (`10.0.2.2:9000/9001/5037/5900`, `169.254.169.254`, IPv6, svc-uid loopback-only), same list for a tor slot. Step 2: drop `NET_ADMIN` from `tini` or document it; tmpfs sizes under a session; whether `ANDROID_EMU_TMP` has any effect / `wipe()` covers emulator temp files | [done], results below (incl. fix 12) |
 | W2 | Reset and overlay hygiene | Stage 2 steps 4-5: reset during a running tool call; 5x reset with the full dirtying set (APK, account, Chrome login, clipboard); overlay upper size, golden checksum unchanged, recreate gives a fresh upper. Host regression tests for `ensure_network`, `console.py`, sdcard baseline | [done, see "W2 re-run 2" and fix 16] |
 | W3 | Tool server and device behaviour | Stage 3 leftovers: Unicode `device_type`, canvas tap, Play Store screen, check and trim `KEYS`, first-call latency after restore, F-Droid "first steps" hint in tool descriptions, then `export_tools.py`. Guest clock lag after restore (set time at session start) | [done], results below (fixes 17-20), re-tested on the deployed stack |
-| W4 | Stack lifecycle and Tor | Stage 4 steps 1-4: wrapper kill/recreate, spec-hash change, scale-0, wrapper isolation; networks/DNS and nginx -> `:6080`; Tor leak checks (iptables scope, distinct exits, `.onion`, UDP/ICMP fail, tor stopped = no egress, `-dns-server`, `research-tor` unaffected); kill-gateway-mid-session reset-at-start; oauth2-proxy DELETE path | [todo] |
+| W4 | Stack lifecycle and Tor | Stage 4 steps 1-4: wrapper kill/recreate, spec-hash change, scale-0, wrapper isolation; networks/DNS and nginx -> `:6080`; Tor leak checks (iptables scope, distinct exits, `.onion`, UDP/ICMP fail, tor stopped = no egress, `-dns-server`, `research-tor` unaffected); kill-gateway-mid-session reset-at-start; oauth2-proxy DELETE path | [done], results below; **one open finding: `verify` only holds for ~10 s after `free` (see "W4 results")** |
 | W5 | End to end through nginx | Stage 4 steps 5-6: Android case in `e2e_auth.py` (whole step 5 checklist), quarantine path, noVNC handoff in a real browser (mouse/keyboard, sizing, 403 for other user, link revoked after session) | [todo] |
 | W6 | Google sign-in and real apps (manual) | Stage 5, needs a human | [todo] |
 | W7 | Soak and capacity | Stage 6, plus stage 3 step 4 (two slots at once, RSS vs limit, OOM in `dmesg`); decide on periodic slot recreate | [todo]; **start with the memory finding in the W3 results (slot at its 6 GiB limit, OOM kill seen)** |
@@ -206,6 +206,42 @@ dialog, fix 20 live); Play Store signed-out outline has "Sign in". The emoji cas
 to paste it from the clipboard, which is how uiautomator2's `send_keys` types) but the accessibility dump returns characters outside the BMP as `..`, so
 `device_find`/`device_snapshot` cannot read an emoji back: a limit of the tree, noted in `docs/api/tools.md`. After the test the slot was reset: replacement
 `free`, `verify` ok.
+
+### W4 results (2026-10-22, deployed stack, clear slot and tor slot; guest traffic modelled as `docker exec -u 2000` in the slot; scripts kept outside the repo)
+
+**Wrapper lifecycle**
+- **Slot killed (`docker kill`):** the wrapper logged "exited, recreating from scratch" and had a new container within 3 s (the new slot reaches `free` after ~70-90 s).
+- **Wrapper `SIGKILL`ed** (swarm restarts it): both slots untouched (same container ids), nothing recreated.
+- **Any env change restarts the wrapper, and its `SIGTERM` trap removes every slot** (seen with `ANDROID_TOR_SLOTS` 1 to 2 and 2 to 1). So "only changed slots are recreated" cannot happen in
+  practice: the spec hash and the "extra slot" branch (`reconcile_egress`) are only reached by a wrapper that survives the change, which
+  does not occur with the compose file as it is. They are harmless, covered by `test_reconcile.py`, and the end result is right: after 2 to 1 the
+  `tor-2` container **and its `-avd`/`-state` volumes** were gone (no leaked volumes), slot 1 had a new container and empty upper. Not run separately: a `ANDROID_SLOT_CPUS` change (same path).
+- **`scale wrapper=0`:** all slots and all `*-avd`/`*-state` volumes gone after **7 s** (grace is 120 s); scale back to 1 recreates both, `free` after ~2-4 min on the cold start.
+- **Wrapper isolation:** only on `android_wrapper` (internal, alone), no published ports, no default route (`wget 1.1.1.1`: "Network unreachable"), no listener except Docker's own resolver on `127.0.0.11`.
+- **Not run:** a slot that crashes at start (tight recreate loop, 3 s pass each with a wipe): needs a deliberately broken image; do it in W7.
+
+**Networks / DNS**
+- nginx resolves `android-clear-1` and `android-tor-1` and the gateways; the clear gateway resolves only clear slots, the tor gateway only tor slots (`android-tor-1` is "Name or service not known" from the clear one).
+  From the gateway the slot's `9000` and `9001` are open; `6080`, `5900`, `5037` are refused (VNC is `-localhost`, websockify only after a session start). nginx
+  reaches the slot's `:6080` (`/vnc.html` 200) a second or two after `/internal/start`; `9000`/`9001` from nginx answer 403 without the secret (by design: the secret is the gate there).
+- The overlay IPs of the slots are not reachable from the host (use `docker exec` into a slot for direct control calls; `curl` from the host times out).
+
+**Tor** (tor slot, emu uid, two runs each, plus a clear-slot control)
+- nat `PREROUTING` has exactly two rules, both `-i eth1` (the `android_tor` interface, 10.99.0.x): TCP to `9040`, UDP 53 to `5353`; `FORWARD` policy DROP, `ip_forward` 1; tor's other interfaces untouched.
+- `check.torproject.org/api/ip`: `IsTor true` on every run; **two tor slots at once got different exits** (e.g. `...101.0`/`...101.6`, `...101.102`/`...101.6`, `...116.51`), single slot changes across tor restarts.
+- `.onion`: DNS via `8.8.8.8` (the emulator's `-dns-server`) is answered by `DNSPort` with a `10.192.0.0/10` virtual address (`dns .onion` and a normal name both answered), and the Tor Project's onion service loads over the transparent proxy. (The first attempt used a wrongly remembered onion address: "Invalid hostname" in tor's log, not a defect.)
+- **UDP and ICMP fail:** NTP (udp/123) and ICMP echo to public addresses get **no reply** in the tor slot, **and do get replies in the clear slot** (control). The container's own resolver (`127.0.0.11`) is rejected for the emu uid.
+- **Tor stopped (`scale tor=0`): no egress:** TCP to `1.1.1.1:443` and `93.184.216.34:80` fail, DNS to `8.8.8.8` times out. After `scale tor=1` the wrapper re-pointed the default route (log "tor task moved, default route re-pointed"), and the slot is back on Tor. **Replacement (`service update --force tor`): route re-pointed within 10 s** and `IsTor true` again.
+- **`research-tor` unaffected:** `tor` runs as uid 100, `CapEff 0`, `NoNewPrivs 1`; SocksPorts 9050/9051/9060 from the `research-tor` container each give `IsTor true` with different exits; 51 listeners (SocksPorts, 9040, 5353) up.
+
+**Gateway start:** with the clear slot **busy** (session started directly on slotd, nobody holding it), `service update --force research-android-clear` -> the new gateway sent `reset` + `verify` (both 200, no "not clean" error), the slot came back as a new container and `free` after 92 s. (The old gateway task's own shutdown does not touch slots.)
+
+**oauth2-proxy DELETE path:** the entrypoint only deletes at start, when the stored redirect URI differs from `${PUBLIC_SCHEME}://${PUBLIC_HOST}/oauth2/callback` (no trap on stop). Changing `PUBLIC_HOST` to `localhost:7299` -> the old Keycloak client was gone (`clients?clientId=` empty) and a new one registered with the new redirect URI; changing it back did the same again. Works. Note: from the host, `localhost:8085` hangs (IPv6?), `127.0.0.1:8085` works.
+
+**Open finding (needs a decision, nothing changed): `verify` is only true for ~10 s after `free`.** Polling `/internal/verify` every 6 s from the moment a fresh slot became `free`: `ok` at +1 s and +7 s, **false from +14 s on and for the rest of the 4 minutes watched**:
+the system keeps creating and removing files on `/sdcard` after the "settled" listing (the obb `.nomedia` disappears, the GMS `soda-*.zip` disappears (it was in the listing), a new `exo/<hex>.uid` appears), so a slot that has simply been idle for a minute fails `verify`
+(the tor slot, free for 25 min, too). It is not a leak (no user data). Today this does not quarantine anything because the gateway calls `verify` only straight after `_wait_free` (polls every 1 s), i.e. inside the window, but it is timing luck (a slow poll or a busy
+gateway and a clean slot is quarantined), and fix 16's "6/6 ok" was that luck. Options: (a) keep as is and document; (b) make `settled_sdcard_listing` wait for a long quiet period (>= 60 s, slows every start); (c) ignore a documented list of system paths (`*/cache/*`, `download_cache`, `obb/.nomedia`); (d) drop the `/sdcard` listing from `verify` (packages and accounts stay; a recreated slot has a fresh overlay anyway, fix 15). Recommendation: (d), or (c) if the file check is wanted.
 
 ## Host
 
@@ -405,7 +441,7 @@ gateways `research-android-clear`/`-tor`, both slots reaching `free`, tor, nginx
 
 | # | Step | Status / result |
 |---|---|---|
-| 1 | **Wrapper:** slot names, overlay volumes, `volume inspect` lower/upper/work; kill a slot (restarted/recreated); change `ANDROID_SLOT_CPUS` (only changed slots recreated, upper wiped); `scale wrapper=0` removes all slots within the 120 s grace; wrapper has no network and is unreachable | [partly]: slots exist and run. [todo] kill/recreate, spec-hash change, scale-0, wrapper isolation check |
+| 1 | **Wrapper (W4: done, see "W4 results"):** slot names, overlay volumes, `volume inspect` lower/upper/work; kill a slot (restarted/recreated); change `ANDROID_SLOT_CPUS` (only changed slots recreated, upper wiped); `scale wrapper=0` removes all slots within the 120 s grace; wrapper has no network and is unreachable | [partly]: slots exist and run. [todo] kill/recreate, spec-hash change, scale-0, wrapper isolation check |
 | 2 | **Networks/DNS:** gateway and nginx resolve the slots; nginx reaches `:6080`; firewall list from a stack slot incl. overlay peers and gateway | [partly]: gateways reach their slots; clear-slot overlay peers unreachable by ping (stage 2). [todo] full list, nginx -> `:6080` |
 | 3 | **Tor** (see below) | [partly] |
 | 4 | **Gateway start:** slot slice, no errors; reset-at-start resets a slot left busy by killing the gateway mid-session | [partly]: gateways start and use their slice. [todo] the kill-gateway-mid-session check |
