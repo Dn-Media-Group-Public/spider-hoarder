@@ -1,15 +1,29 @@
 # spider-hoarder
 
-Give Claude a real browser, safely. spider-hoarder is an MCP server that hands every user and conversation a private, isolated,
+Ever tried to **scrape a web site** using your LLM agent, only for it to get stuck on **CAPTCHAs**, **logins** or your model considering
+**robots.txt** over your direct request to read a specific page? Or hitting docx or pdf files?
+
+Spider-hoarder is an MCP server that hands every user and conversation a private, isolated,
 real (headed) Chromium that Claude drives with a full set of browser tools: navigate, click, type, snapshot, find, cookies and
 storage, screenshots, PDFs. It copes with JavaScript-heavy sites, consent walls and logins. When Claude hits a CAPTCHA or login
 it cannot pass, it sends you a link to the *same* browser (live view) to solve it, then carries on. Egress is either direct or
-anonymised through Tor. Pages come back as Markdown and everything bulky is stored as a *job* Claude can page through, search
+anonymised through Tor.
+
+Pages come back as Markdown and everything bulky is stored as a *job* Claude can page through, search
 (`grep_file`) or link to, so large pages never flood its context; Claude can also fetch a URL in one shot (`ingest_page`) or have
-you upload documents. Subagents can browse in parallel in their own windows while sharing logins. It knows nothing about any
-downstream database: Claude carries the text wherever it belongs.
+you upload documents. Subagents can browse in parallel in their own windows while sharing logins. 
 
 Documentation (architecture, API, design decisions): [docs/index.md](docs/index.md).
+
+## Features
+
+* Uses a real headed chromium browser - javascript rendered pages work fine
+* Browser-in-browser view (uses vnc) whenever the agent gets stuck on a captcha
+* Converts everything to markdown using [markitdown](https://github.com/microsoft/markitdown)
+* Sessions live in isolated docker containers and all storage is cleared after use
+* TOR support for anonymous browsing and accessing .onion sites
+* Browser automation using [playwright](https://playwright.dev/)
+* SSO integration (OAUth2)
 
 ## Quick start
 
