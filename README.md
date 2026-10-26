@@ -17,7 +17,9 @@ Documentation (architecture, API, design decisions): [docs/index.md](docs/index.
 
 ## Features
 
-* Uses a real headed chromium browser - javascript rendered pages work fine
+(features marked ^ exist in plain playwright-mcp)
+
+* Uses a real headed chromium browser - javascript rendered pages work fine ^
 * Browser-in-browser view (uses vnc) whenever the agent gets stuck on a captcha
 * Converts everything to markdown using [markitdown](https://github.com/microsoft/markitdown)
 * Sessions live in isolated docker containers and all storage is cleared after use
