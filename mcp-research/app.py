@@ -16,6 +16,7 @@ import re
 import stat
 import time
 import uuid
+import zipfile
 from typing import Any
 
 import anyio
@@ -47,13 +48,15 @@ BASE = f"{SCHEME}://{PUBLIC_HOST}/{EGRESS}"
 MCP_PATH = f"/{EGRESS}/mcp"
 UPLOAD_MARK = "@upload"  # blobtoken path marking an upload-link token (never a real file path)
 INLINE_LIMIT = 50_000
-MAX_FILE_BYTES = int(os.environ.get("MAX_FILE_BYTES", 50 * 1024 * 1024))
+MAX_PARSE_BYTES = int(os.environ.get("MAX_PARSE_BYTES", 50 * 1024 * 1024))  # stored files have no cap; parsing does
+MAX_ZIP_BYTES = int(os.environ.get("MAX_ZIP_BYTES", 4 * 1024**3))  # total uncompressed bytes of one zip
+MAX_ZIP_MEMBERS = int(os.environ.get("MAX_ZIP_MEMBERS", 50_000))
 # Proxied tools whose output is a file in a job: name -> default job-internal file name when the agent gives
 # no `filename`.
 FILE_TOOLS = {
     "browser_take_screenshot": "screenshot.png", "browser_pdf_save": "page.pdf",
     "browser_snapshot": "snapshot.yml", "browser_find": "matches.txt", "browser_evaluate": "evaluate.json",
-    "browser_console_messages": "console.txt", "browser_network_request": "network-request.txt",
+    "browser_console_messages": "console.txt", "browser_network_request": "network-request",
     "browser_network_requests": "network-requests.txt", "browser_storage_state": "storage-state.json",
 }
 CAPPED_TOOLS = ("browser_snapshot", "browser_find")  # take `text_cap`
@@ -207,27 +210,71 @@ def _check_rel_path(path: str) -> str:
     return path
 
 
-def _store_and_parse(key: str, filename: str, raw: bytes, content_type: str, base_url: str = "") -> dict:
-    storage.write_bytes(key, f"original/{filename}", raw, content_type)
-    text = None
-    if extract.is_zip(content_type, filename):
-        for rel_path, data in extract.unpack_zip(raw).items():
-            storage.write_bytes(key, f"original/{rel_path}", data, "application/octet-stream")
-            md = extract.file_to_markdown(data, rel_path)
-            storage.write_bytes(key, f"parsed/{rel_path}.md", md.encode(), "text/markdown")
-            _write_terse(key, f"{rel_path}.md", md)
-        return _job_result(key)
-    if filename.lower().endswith((".md", ".markdown")):  # already Markdown: no parsed/, terse from the original
+def _parse_one(key: str, path: str, raw: bytes, ctype: str, base_url: str, notes: list) -> tuple | None:
+    """Parse one stored file: (text, text_path, terse, terse_path) for _job_result, or None if nothing was made."""
+    if path.lower().endswith((".md", ".markdown")):  # already Markdown: no parsed/, terse from the original
         text = raw.decode("utf-8", errors="replace")
-        return _job_result(key, text, f"original/{filename}", _write_terse(key, filename, text), f"terse/{filename}")
-    is_html = "html" in content_type
-    if is_html:
-        raw = extract.absolutize(raw, base_url)  # parsed/ and simplified/ get absolute links; original/ is stored untouched above
-    text = extract.html_to_markdown(raw) if is_html else extract.file_to_markdown(raw, filename)
-    storage.write_bytes(key, f"parsed/{filename}.md", text.encode(), "text/markdown")
+        return text, f"original/{path}", _write_terse(key, path, text), f"terse/{path}"
+    is_html = "html" in ctype or path.lower().endswith((".html", ".htm"))
+    if is_html and base_url:
+        raw = extract.absolutize(raw, base_url)  # parsed/ and simplified/ get absolute links; original/ is stored untouched
+    try:
+        text = extract.html_to_markdown(raw) if is_html else extract.file_to_markdown(raw, path)
+    except Exception as e:  # noqa: BLE001  one unparseable file never fails the job
+        notes.append(f"{path} not parsed ({type(e).__name__}: {e})")
+        return None
+    if not is_html and not text.strip():
+        return None
+    storage.write_bytes(key, f"parsed/{path}.md", text.encode(), "text/markdown")
     if is_html and (simple := extract.html_to_simplified(raw)):
-        storage.write_bytes(key, f"simplified/{filename}.md", simple.encode(), "text/markdown")
-    return _job_result(key, text, f"parsed/{filename}.md", _write_terse(key, f"{filename}.md", text), f"terse/{filename}.md")
+        storage.write_bytes(key, f"simplified/{path}.md", simple.encode(), "text/markdown")
+    return text, f"parsed/{path}.md", _write_terse(key, f"{path}.md", text), f"terse/{path}.md"
+
+
+def _store_one(key: str, path: str, src, ctype: str, base_url: str = "", notes: list | None = None,
+               unzip: bool = True) -> tuple | None:
+    """Store `src` (bytes or a file object) as original/<path> and parse it by the one rule for every file;
+    a zip is unpacked to <path>.d/ (once: members that are zips are only stored)."""
+    notes = [] if notes is None else notes
+    if isinstance(src, bytes):
+        storage.write_bytes(key, f"original/{path}", src, ctype)
+        size = len(src)
+    else:
+        size = storage.write_stream(key, f"original/{path}", src, ctype)
+    if size > MAX_PARSE_BYTES:
+        notes.append(f"{path} not parsed ({size} bytes > MAX_PARSE_BYTES)")
+        return None
+    if unzip and extract.is_zip(ctype, path):
+        try:
+            with storage.open_read(key, f"original/{path}") as zf:
+                members = ((n, f, mimetypes.guess_type(n)[0] or "application/octet-stream")
+                           for n, f in extract.unpack_zip(zf, MAX_ZIP_MEMBERS, MAX_ZIP_BYTES))
+                _store_tree(key, members, notes=notes, prefix=f"{path}.d/", unzip=False)
+            return None
+        except extract.ZipLimit as e:
+            notes.append(str(e))
+            return None
+        except zipfile.BadZipFile:
+            pass  # named .zip but is not: parse it as any file
+    raw = src if isinstance(src, bytes) else storage.read_bytes(key, f"original/{path}")
+    return _parse_one(key, path, raw, ctype, base_url, notes)
+
+
+def _store_tree(key: str, files, base_url: str = "", notes: list | None = None, prefix: str = "",
+                unzip: bool = True) -> dict:
+    """_store_one for each (path, fileobj, ctype); returns {path: parse result}."""
+    notes = [] if notes is None else notes
+    return {path: _store_one(key, prefix + path, f, ctype, base_url, notes, unzip) for path, f, ctype in files}
+
+
+def _store_and_parse(key: str, filename: str, raw: bytes, content_type: str, base_url: str = "") -> dict:
+    notes = []
+    info = _store_one(key, filename, raw, content_type, base_url, notes)
+    return _with_notes(_job_result(key, *(info or ())), notes)
+
+
+def _with_notes(result: dict, notes: list) -> dict:
+    return {**result, "notes": notes} if notes else result
 
 
 def _write_terse(key: str, name: str, md: str) -> str:
@@ -250,25 +297,48 @@ def _job_result(key: str, text: str | None = None, path: str | None = None,
     return result
 
 
-def _read_out(uid: int, name: str) -> bytes:
-    """Read <home>/out/<name> from a session without trusting anything the session controls: every path
-    component is opened O_NOFOLLOW relative to the previous fd (a session owns out/ and could swap it for
-    a symlink), O_NONBLOCK so a planted FIFO cannot hang us, regular files only, size-capped."""
+_NET_FILE = re.compile(r"headers\.json|body\.[A-Za-z0-9]{1,10}")  # the only names read from a network request dir
+
+
+def _out_files(uid: int, name: str, tree: bool = False):
+    """Yield (relative_path, file) for <home>/out/<name> from a session without trusting anything it controls:
+    every path component is opened O_NOFOLLOW relative to the previous fd (a session owns out/ and could swap
+    it for a symlink), O_NONBLOCK so a planted FIFO cannot hang us, regular files only. A file yields ("", f).
+    With `tree`, name is a network request dir: only request|response/<_NET_FILE> are read, the rest ignored.
+    Each file is closed when the next one is asked for."""
     fds = []
+
+    def open_(n, flags, dir_fd):
+        fds.append(os.open(n, flags | os.O_NOFOLLOW, dir_fd=dir_fd))
+        return fds[-1]
+
+    def regular(n, dir_fd):
+        try:
+            fd = open_(n, os.O_RDONLY | os.O_NONBLOCK, dir_fd)
+        except OSError:  # symlink or vanished: skipped like any other junk
+            return None
+        return fd if stat.S_ISREG(os.fstat(fd).st_mode) else None
+
     try:  # O_PATH: the session home is 0o710 (traverse only), which O_RDONLY cannot open
         fds.append(os.open(ports.home(uid), os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW))
-        fds.append(os.open("out", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fds[-1]))
-        fds.append(os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fds[-1]))
-        st = os.fstat(fds[-1])
-        if not stat.S_ISREG(st.st_mode):
-            raise ValueError("output is not a regular file")
-        if st.st_size > MAX_FILE_BYTES:
-            raise ValueError(f"output file too large ({st.st_size} > {MAX_FILE_BYTES} bytes)")
-        with os.fdopen(os.dup(fds[-1]), "rb") as f:
-            data = f.read(MAX_FILE_BYTES + 1)
-        if len(data) > MAX_FILE_BYTES:
-            raise ValueError("output file too large")
-        return data
+        out = open_("out", os.O_RDONLY | os.O_DIRECTORY, fds[-1])
+        if not tree:
+            fd = open_(name, os.O_RDONLY | os.O_NONBLOCK, out)
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise ValueError("output is not a regular file")
+            with os.fdopen(os.dup(fd), "rb") as f:
+                yield "", f
+            return
+        root = open_(name, os.O_RDONLY | os.O_DIRECTORY, out)
+        for sub in ("request", "response"):
+            try:
+                d = open_(sub, os.O_RDONLY | os.O_DIRECTORY, root)
+            except OSError:
+                continue
+            for n in sorted(os.listdir(d)):
+                if _NET_FILE.fullmatch(n) and (fd := regular(n, d)) is not None:
+                    with os.fdopen(os.dup(fd), "rb") as f:
+                        yield f"{sub}/{n}", f
     finally:
         for fd in fds:
             os.close(fd)
@@ -281,8 +351,16 @@ def _job_name(filename: Any, default: str) -> str:
 
 
 def _store_file(key: str, name: str, raw: bytes) -> dict:
-    ctype = mimetypes.guess_type(name)[0] or "application/octet-stream"
-    storage.write_bytes(key, f"original/{name}", raw, ctype)
+    storage.write_bytes(key, f"original/{name}", raw, _ctype(name))
+    return _describe_file(key, name, raw)
+
+
+def _ctype(name: str) -> str:
+    return mimetypes.guess_type(name)[0] or "application/octet-stream"
+
+
+def _describe_file(key: str, name: str, raw: bytes) -> dict:
+    """Job result for a tool's stored output file: PDFs are parsed, text is returned as is."""
     if name.lower().endswith(".pdf"):
         text = extract.file_to_markdown(raw, name)
         storage.write_bytes(key, f"parsed/{name}.md", text.encode(), "text/markdown")
@@ -295,23 +373,43 @@ def _store_file(key: str, name: str, raw: bytes) -> dict:
     return _job_result(key)
 
 
+def _ingest_out(uid: int, private: str, key: str, jname: str, tree: bool, base_url: str = "") -> dict:
+    """Copy a tool's output (file, or request dir if `tree`) from the session into the job; blocking."""
+    notes = []
+    if tree:
+        infos = _store_tree(key, ((rel, f, _ctype(rel)) for rel, f in _out_files(uid, private, True)), base_url, notes)
+        body = next((i for p, i in infos.items() if p.startswith("response/body.")), None)
+        return _with_notes(_job_result(key, *(body or ())), notes)
+    for _, f in _out_files(uid, private):
+        size = storage.write_stream(key, f"original/{jname}", f, _ctype(jname))
+    if size > MAX_PARSE_BYTES:
+        notes.append(f"original/{jname} not parsed ({size} bytes > MAX_PARSE_BYTES)")
+        return _with_notes(_job_result(key), notes)
+    return _describe_file(key, jname, storage.read_bytes(key, f"original/{jname}"))
+
+
 async def _file_tool(bs: sessions.BrowserSession, name: str, arguments: dict) -> types.CallToolResult:
     """Run a file-producing upstream tool; the file ends up under a new job_id."""
-    jname = _job_name(arguments.get("filename"), FILE_TOOLS[name])
+    tree = name == "browser_network_request"  # its output is a directory, named by the gateway alone
+    jname = FILE_TOOLS[name] if tree else _job_name(arguments.get("filename"), FILE_TOOLS[name])
     job_id = _new_job_id()
     private = f"{uuid.uuid4()}-{jname}"  # gateway-chosen, relative: lands in out/, never an agent-chosen path
     res = await bs.client.call_tool(name, {**arguments, "filename": private})
-    if res.isError:
+    up = sessions.result_text(res)
+    if res.isError or "](out/" not in up:  # an error, or a plain text answer such as "No new requests."
         return res
-    try:
-        raw = await asyncio.to_thread(_read_out, bs.uid, private)
-    except (OSError, ValueError) as e:
-        return _text(f"{name} produced no readable output file ({e}). Upstream said: {sessions.result_text(res)}", True)
-    key = _key(bs.owner, job_id)
-    result = _store_file(key, jname, raw)
     meta = {}
+    if tree:  # the toolserver's request line: `<n>. [METHOD] url => [status] text`
+        m = re.search(r"^\d+\. \[(\S+)\] (\S+) => \[(\w+)\]", up, re.M)
+        if m:
+            meta = {"url": m.group(2), "method": m.group(1), "status": int(m.group(3)) if m.group(3).isdigit() else None}
+    key = _key(bs.owner, job_id)
+    try:
+        result = await asyncio.to_thread(_ingest_out, bs.uid, private, key, jname, tree, meta.get("url", ""))
+    except (OSError, ValueError) as e:
+        return _text(f"{name} produced no readable output file ({e}). Upstream said: {up}", True)
     if name in CAPPED_TOOLS:
-        m = re.search(r"^- Page URL: (.+)$", sessions.result_text(res), re.M)
+        m = re.search(r"^- Page URL: (.+)$", up, re.M)
         meta = {"url": m and m.group(1), "target": arguments.get("target"), "depth": arguments.get("depth"),
                 "text_cap": arguments.get("text_cap", DEFAULT_TEXT_CAP)}
         if name == "browser_find":
@@ -355,12 +453,20 @@ def _text(msg: str, error: bool = False) -> types.CallToolResult:
     return types.CallToolResult(content=[types.TextContent(type="text", text=msg)], isError=error)
 
 
+def _without_filename(t: types.Tool) -> types.Tool:
+    """browser_network_request fills a whole job: the agent has no filename to choose."""
+    sch = {**t.inputSchema, "properties": {k: v for k, v in t.inputSchema.get("properties", {}).items() if k != "filename"}}
+    desc = (t.description or "").replace(" `filename` only names the file inside the job.", "")
+    return t.model_copy(update={"inputSchema": sch, "description": desc})
+
+
 @server.list_tools()
 async def list_tools() -> list[types.Tool]:
     own = {t.name for t in EXTRA_TOOLS}  # the gateway's versions replace the upstream ones of the same name
     tools = [t for t in await sessions.upstream_tools() if t.name not in HIDDEN | own]
     tools = [t.model_copy(update={"description": (t.description or "") + FILE_TOOLS_NOTE}) if t.name in FILE_TOOLS else t
              for t in tools]
+    tools = [_without_filename(t) if t.name == "browser_network_request" else t for t in tools]
     tools = [t.model_copy(update={"description": f"[{EGRESS.upper()}] {EGRESS_NOTE}\n\n{t.description or ''}"}) if t.name == "browser_navigate" else t
              for t in tools]
     return tools + EXTRA_TOOLS

@@ -60,13 +60,36 @@ def safe_zip_members(zf: zipfile.ZipFile) -> list[str]:
     return names
 
 
-def unpack_zip(data: bytes) -> dict[str, bytes]:
-    """Returns {relative_path: bytes} for every safe member in the zip."""
-    out = {}
-    with zipfile.ZipFile(io.BytesIO(data)) as zf:
-        for name in safe_zip_members(zf):
-            out[name] = zf.read(name)
-    return out
+class ZipLimit(ValueError):
+    pass
+
+
+class _Counted:
+    """Member reader charging every byte actually read against a shared budget (declared sizes can lie)."""
+
+    def __init__(self, f, left: list, max_bytes: int):
+        self.f, self.left, self.max = f, left, max_bytes
+
+    def read(self, n=-1):
+        data = self.f.read(n)
+        self.left[0] -= len(data)
+        if self.left[0] < 0:
+            raise ZipLimit(f"zip not unpacked: more than {self.max} uncompressed bytes > MAX_ZIP_BYTES")
+        return data
+
+
+def unpack_zip(f, max_members: int, max_bytes: int):
+    """Yields (relative_path, file) for every safe member of the zip `f` (seekable); the file must be
+    consumed before the next one is asked for. Raises ZipLimit over the member count or uncompressed bytes."""
+    left = [max_bytes]
+    with zipfile.ZipFile(f) as zf:
+        if len(zf.namelist()) > max_members:
+            raise ZipLimit(f"zip not unpacked: {len(zf.namelist())} members > MAX_ZIP_MEMBERS")
+        for i, name in enumerate(safe_zip_members(zf), 1):
+            if i > max_members:
+                raise ZipLimit(f"zip not unpacked: {i} members > MAX_ZIP_MEMBERS")
+            with zf.open(name) as m:
+                yield name, _Counted(m, left, max_bytes)
 
 
 def grep_text(text: str, pattern: str, context: int = 2, max_matches: int = 50, width: int = 300, limit: int = 50_000) -> str:

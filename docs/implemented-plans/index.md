@@ -9,4 +9,5 @@ Back to the [documentation index](../index.md). Open plans: [plans](../plans/ind
 - [Jobs for all output tools, text cap, `grep_file`, no post-action snapshots](jobs-for-all-tools.md)
 - [Terse outline view of job content](terse-view.md)
 - [oauth2-proxy registers itself via DCR](oauth2-proxy-dcr.md)
+- [Network requests as multi-file jobs, `new` flag, tree parsing](network-request-jobs.md)
 - [Scale `research-*` containers (sticky replicas on Swarm)](research-replicas.md)

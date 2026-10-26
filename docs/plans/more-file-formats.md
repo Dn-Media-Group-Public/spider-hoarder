@@ -1,6 +1,6 @@
 # Plan: more archive formats and binary-structured-data → JSON
 
-Depends on [Network request jobs](network-request-jobs.md) (must be implemented first): this plan builds on its `unpack_zip`
+Depends on [Network request jobs](../implemented-plans/network-request-jobs.md) (must be implemented first): this plan builds on its `unpack_zip`
 generator, `_store_one` / `_store_tree`, and the `MAX_PARSE_BYTES` cap. See also [Jobs, storage and links](../architecture/jobs-and-storage.md).
 
 ## Problem / Goal
@@ -65,7 +65,7 @@ YAGNI: Avro, Parquet, Thrift, FlatBuffers need schemas or heavy dependencies; no
 
 ## Implementation order
 
-1. Wait for / implement [network-request-jobs](network-request-jobs.md).
+1. Wait for / implement [network-request-jobs](../implemented-plans/network-request-jobs.md).
 2. `requirements.txt` + image: `msgpack cbor2 bson py7zr rarfile blackboxprotobuf`; `unrar` (or `unar`) system package.
 3. `extract.py`: `archive_kind`, `unpack_archive` (tar, 7z, rar, single-file-compressed alongside zip) with the safety rules; tests.
 4. `app.py`: `_store_and_parse` uses `archive_kind` / `unpack_archive`; rename env vars with fallbacks.

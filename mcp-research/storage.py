@@ -1,5 +1,6 @@
 """fsspec-backed blob storage: <job_uuid>/original|parsed/... + index.json manifest."""
 
+import io
 import json
 import os
 
@@ -17,13 +18,27 @@ def _job_path(job_id: str, *parts: str) -> str:
     return "/".join([root.rstrip("/"), job_id, *parts])
 
 
-def write_bytes(job_id: str, rel_path: str, data: bytes, content_type: str) -> None:
+def write_stream(job_id: str, rel_path: str, fileobj, content_type: str) -> int:
+    """Copy `fileobj` into the job in 1 MiB chunks (constant memory); returns the size written."""
     fs, _ = _fs()
     path = _job_path(job_id, rel_path)
     fs.makedirs(os.path.dirname(path), exist_ok=True)
+    size = 0
     with fs.open(path, "wb") as f:
-        f.write(data)
-    _update_manifest(job_id, rel_path, len(data), content_type)
+        while chunk := fileobj.read(1 << 20):
+            f.write(chunk)
+            size += len(chunk)
+    _update_manifest(job_id, rel_path, size, content_type)
+    return size
+
+
+def write_bytes(job_id: str, rel_path: str, data: bytes, content_type: str) -> None:
+    write_stream(job_id, rel_path, io.BytesIO(data), content_type)
+
+
+def open_read(job_id: str, rel_path: str):
+    fs, _ = _fs()
+    return fs.open(_job_path(job_id, rel_path), "rb")
 
 
 def read_bytes(job_id: str, rel_path: str) -> bytes:

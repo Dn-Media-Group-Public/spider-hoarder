@@ -93,28 +93,26 @@ def test_file_outputs():
     os.mkdir(home + "/out")
     w = lambda n, b: open(f"{home}/out/{n}", "wb").write(b)
     w("ok.txt", b"hi")
-    assert app._read_out(1, "ok.txt") == b"hi"
-    w("big", b"x" * 11)
-    app.MAX_FILE_BYTES = 10
-    for bad in ("big", "missing"):
+    read = lambda n, tree=False: [(r, f.read()) for r, f in app._out_files(1, n, tree)]
+    assert read("ok.txt") == [("", b"hi")]
+    for bad in ("missing",):
         try:
-            app._read_out(1, bad); assert False, bad
-        except (ValueError, OSError):
+            read(bad); assert False, bad
+        except OSError:
             pass
-    app.MAX_FILE_BYTES = 1000
     os.symlink("/etc/passwd", home + "/out/link")
     os.mkfifo(home + "/out/fifo")
     for bad in ("link", "fifo"):  # symlink refused, FIFO neither hangs nor is read
         try:
-            app._read_out(1, bad); assert False, bad
+            read(bad); assert False, bad
         except (ValueError, OSError):
             pass
     os.chmod(home, 0o100)  # sessiond's home is traverse-only for the gateway: still readable via O_PATH
-    assert app._read_out(1, "ok.txt") == b"hi"
+    assert read("ok.txt") == [("", b"hi")]
     os.chmod(home, 0o700)
     shutil.move(home + "/out", home + "/real"); os.symlink(home + "/real", home + "/out")  # swapped out/ dir
     try:
-        app._read_out(1, "ok.txt"); assert False
+        read("ok.txt"); assert False
     except OSError:
         pass
     for given in ("../../etc/passwd", "/etc/passwd", "a\\..\\b.png", "", "..", None):
@@ -129,6 +127,88 @@ def test_file_outputs():
     assert r["text"] == "# page"
     app.INLINE_LIMIT = 3
     assert "text" not in app._store_file(key, "snap2.md", b"# page")
+
+
+def test_tree_reader():
+    import app, tempfile
+    home = tempfile.mkdtemp()
+    app.ports.home = lambda uid: home
+    d = home + "/out/net"
+    os.makedirs(d + "/request"); os.makedirs(d + "/response"); os.makedirs(d + "/other")
+    w = lambda n, b: open(f"{d}/{n}", "wb").write(b)
+    w("request/headers.json", b"{}"); w("response/headers.json", b"{}"); w("response/body.png", b"\0\1")
+    w("response/evil.txt", b"x"); w("other/headers.json", b"x"); w("response/body.", b"x")
+    os.symlink("/etc/passwd", d + "/response/body.txt")  # symlink at the file level: ignored
+    os.mkfifo(d + "/request/body.bin")  # non-regular: ignored
+    got = lambda n="net": {r: f.read() for r, f in app._out_files(1, n, True)}
+    assert got() == {"request/headers.json": b"{}", "response/headers.json": b"{}", "response/body.png": b"\0\1"}, got()
+    shutil.move(d + "/response", home + "/elsewhere"); os.symlink(home + "/elsewhere", d + "/response")  # symlinked subdir
+    assert set(got()) == {"request/headers.json"}
+    shutil.move(d, home + "/out/real"); os.symlink(home + "/out/real", d)  # symlinked tree root
+    try:
+        got(); assert False
+    except OSError:
+        pass
+    try:
+        list(app._out_files(1, "real", False)); assert False  # a directory is not a file
+    except ValueError:
+        pass
+
+
+def test_tree_store_and_zip_limits():
+    import app, extract, storage, tempfile, io, zipfile
+    storage.BLOB_URL = "file://" + tempfile.mkdtemp()
+    app.INLINE_LIMIT = 50_000
+    key = app._key("a@x.y", f"{app.RID}.123e4567-e89b-12d3-a456-426614174010")
+    page = b"<html><body><article><h1>T</h1><p>" + b"Some long article text here. " * 20 + b"</p><a href='/x'>l</a></article></body></html>"
+    # tree: HTML gets absolutized only with a base_url, nested path kept, JSON parsed by the generic rule
+    infos = app._store_tree(key, [("response/body.html", io.BytesIO(page), "text/html"),
+                                  ("response/headers.json", io.BytesIO(b'{"a": 1}'), "application/json")], "http://h.test/p")
+    paths = {f["path"] for f in storage.get_manifest(key)["files"]}
+    assert {"original/response/body.html", "parsed/response/body.html.md", "simplified/response/body.html.md"} <= paths, paths
+    assert "http://h.test/x" in storage.read_text(key, "parsed/response/body.html.md")
+    assert infos["response/body.html"][1] == "parsed/response/body.html.md"
+    # zip: members under <zip>.d/, HTML member gets simplified/ but no absolutizing, md member only terse/
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("a/b.html", page); zf.writestr("n.md", "# H\n[l](u)"); zf.writestr("in.zip", b"PK")
+    r = app._store_and_parse(key, "bundle.zip", buf.getvalue(), "application/zip", "http://h.test/p")
+    paths = {f["path"] for f in r["files"]}
+    assert {"original/bundle.zip", "original/bundle.zip.d/a/b.html", "parsed/bundle.zip.d/a/b.html.md",
+            "simplified/bundle.zip.d/a/b.html.md", "terse/bundle.zip.d/n.md", "original/bundle.zip.d/in.zip"} <= paths, paths
+    assert "parsed/bundle.zip.d/n.md.md" not in paths and "notes" not in r and "text" not in r
+    assert "http://h.test/x" not in storage.read_text(key, "parsed/bundle.zip.d/a/b.html.md")
+    # a zip as a network response body is unpacked next to it
+    r = app._store_and_parse(key, "response/body.zip", buf.getvalue(), "application/zip")
+    assert "original/response/body.zip.d/a/b.html" in {f["path"] for f in r["files"]}
+    # limits: member count (up front) and the running uncompressed total (each member alone is under the cap)
+    many = io.BytesIO()
+    with zipfile.ZipFile(many, "w") as zf:
+        for i in range(5):
+            zf.writestr(f"m{i}.txt", "x" * 100)
+    app.MAX_ZIP_MEMBERS = 4
+    r = app._store_and_parse(key, "many.zip", many.getvalue(), "application/zip")
+    assert r["notes"] == ["zip not unpacked: 5 members > MAX_ZIP_MEMBERS"] and not any("many.zip.d" in f["path"] for f in r["files"]), r
+    app.MAX_ZIP_MEMBERS, app.MAX_ZIP_BYTES = 50_000, 250
+    r = app._store_and_parse(key, "many.zip", many.getvalue(), "application/zip")
+    assert "MAX_ZIP_BYTES" in r["notes"][0] and any(f["path"] == "original/many.zip" for f in r["files"]), r
+    assert sum("many.zip.d" in f["path"] and f["path"].startswith("original") for f in r["files"]) == 2  # written before the abort
+    app.MAX_ZIP_BYTES = 4 * 1024**3
+    # parse cap: stored (no cap) but not parsed
+    app.MAX_PARSE_BYTES = 10
+    r = app._store_and_parse(key, "big.html", b"<p>" + b"x" * 50 + b"</p>", "text/html")
+    assert "text" not in r and r["notes"] == ["big.html not parsed (57 bytes > MAX_PARSE_BYTES)"], r
+    assert any(f["path"] == "original/big.html" and f["size"] == 57 for f in r["files"]) and "parsed/big.html.md" not in storage.get_manifest(key)["files"].__str__()
+    app.MAX_PARSE_BYTES = 50 * 1024 * 1024
+
+
+def test_write_stream():
+    import storage, tempfile, io
+    storage.BLOB_URL = "file://" + tempfile.mkdtemp()
+    data = b"abc" * (1 << 20)  # 3 MiB: several chunks
+    assert storage.write_stream("j", "original/big.bin", io.BytesIO(data), "x/y") == len(data)
+    assert storage.read_bytes("j", "original/big.bin") == data
+    assert storage.get_manifest("j")["files"] == [{"path": "original/big.bin", "size": len(data), "content_type": "x/y"}]
 
 
 def test_text_cap_and_grep():
@@ -197,6 +277,30 @@ def test_file_tools_are_jobs():
     m = storage.get_manifest(app._key("a@b.c", out["job_id"]))
     assert out["files"][0]["path"] == "original/m.txt" and m["text_cap"] is None and m["query"] == {"regex": "/x/i"} and "target" not in m, m
     assert json.loads(run("browser_evaluate", function="() => 1").content[0].text)["files"][0]["path"] == "original/evaluate.json"
+
+    class NetClient:
+        async def call_tool(self, name, args):
+            if name == "browser_network_requests":
+                return mt.CallToolResult(content=[mt.TextContent(type="text", text="### Result\nNo new requests.")])
+            d = f"{home}/out/{args['filename']}"
+            os.makedirs(d + "/response")
+            open(d + "/response/headers.json", "w").write("{}")
+            open(d + "/response/body.html", "w").write("<html><body><a href='/x'>l</a></body></html>")
+            open(d + "/response/body.png", "wb").write(b"\x89PNG\0")
+            return mt.CallToolResult(content=[mt.TextContent(type="text", text="### Result\n- [Network request](out/x)\n3. [GET] http://n.test/p => [200] OK")])
+
+    bs.client = NetClient()
+    r = run("browser_network_requests", new=True)
+    assert r.content[0].text == "### Result\nNo new requests." and not r.isError  # no file: passed through
+    net = json.loads(run("browser_network_request", index=3, filename="ignored").content[0].text)
+    paths = {f["path"] for f in net["files"]}
+    assert {"original/response/headers.json", "original/response/body.html", "parsed/response/body.html.md",
+            "original/response/body.png"} <= paths and not any("ignored" in p for p in paths), paths
+    assert "http://n.test/x" in net["text"] and net["text_path"] == "parsed/response/body.html.md", net
+    m = storage.get_manifest(app._key("a@b.c", net["job_id"]))
+    assert (m["url"], m["method"], m["status"]) == ("http://n.test/p", "GET", 200), m
+    assert "filename" not in app._without_filename(mt.Tool(name="browser_network_request", inputSchema={"type": "object", "properties": {"index": {}, "filename": {}}})).inputSchema["properties"]
+    bs.client = Client()
 
     key = app._key("a@b.c", out["job_id"])
     storage.write_bytes(key, "original/b.bin", b"\0\1", "application/octet-stream")

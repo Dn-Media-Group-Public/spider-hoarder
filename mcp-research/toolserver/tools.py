@@ -5,6 +5,7 @@ Schemas for the playwright-mcp tools come from tools.json (from tools.json.upstr
 import asyncio
 import base64
 import json
+import mimetypes
 import os
 import re
 import time
@@ -386,47 +387,58 @@ async def network_requests(R, bid, a):
     if a.get("filter"):
         m = re.fullmatch(r"/(.*)/([a-z]*)", a["filter"], re.S)
         rx = re.compile(m.group(1) if m else a["filter"], re.I if m and "i" in m.group(2) else 0)
-    lines = [net_line(i, e) for i, e in enumerate(R.state[R.page(bid)].network, 1)
+    st = R.state[R.page(bid)]
+    start, end = (st.net_mark if a.get("new") else 0), len(st.network)
+    if a.get("new"):
+        st.net_mark = end  # moves whether or not filter/static hide some of them
+    lines = [net_line(i, e) for i, e in enumerate(st.network[start:end], start + 1)
              if (a.get("static") or not e["resp"] or e["resp"].ok is False or e["req"].resource_type not in STATIC)
              and (not rx or rx.search(e["req"].url))]
+    if a.get("new") and not lines:
+        return result("No new requests.")
     body = "\n".join(lines)
     if a.get("filename"):
         return file_result("Network requests", write_out(a["filename"], body))
     return result(body)
 
 
+EXT_FIX = {"application/xml": ".xml", "application/javascript": ".js"}  # what mimetypes gets wrong or lacks
+
+
+def body_ext(headers: dict) -> str:
+    ct = headers.get("content-type", "").split(";")[0].strip().lower()
+    return EXT_FIX.get(ct) or mimetypes.guess_extension(ct) or ".bin"
+
+
 @tool("browser_network_request")
 async def network_request(R, bid, a):
+    """Writes a directory (named by `filename`): request/ and response/, each headers.json and body.<ext>,
+    only the parts that exist."""
     net = R.state[R.page(bid)].network
     if not 1 <= a["index"] <= len(net):
         raise ToolError(f"No request with index {a['index']}")
+    if not a.get("filename"):
+        raise ToolError("filename is required")
     e = net[a["index"] - 1]
-    req, resp, part = e["req"], e["resp"], a.get("part")
-
-    async def get(p):
-        if p == "request-headers":
-            return await req.all_headers()
-        if p == "request-body":
-            return req.post_data or ""
-        if not resp:
-            return ""
-        if p == "response-headers":
-            return await resp.all_headers()
+    req, resp = e["req"], e["resp"]
+    root = out_path(a["filename"])
+    parts = {}  # relative path -> bytes
+    hdrs = await req.all_headers()
+    parts["request/headers.json"] = json.dumps(hdrs, indent=1).encode()
+    if (body := req.post_data_buffer) is not None:
+        parts[f"request/body{body_ext(hdrs)}"] = body
+    if resp:
+        hdrs = await resp.all_headers()
+        parts["response/headers.json"] = json.dumps(hdrs, indent=1).encode()
         try:
-            return (await resp.body()).decode("utf-8", "replace")
-        except PWError:
-            return ""
-
-    fmt = lambda v: v if isinstance(v, str) else json.dumps(v, indent=1)
-    if part:
-        text = fmt(await get(part))
-    else:
-        text = net_line(a["index"], e)
-        for p in ("request-headers", "request-body", "response-headers", "response-body"):
-            text += f"\n-- {p} --\n{fmt(await get(p))}"
-    if a.get("filename"):
-        return file_result("Network request", write_out(a["filename"], text))
-    return result(text)
+            parts[f"response/body{body_ext(hdrs)}"] = await resp.body()
+        except PWError:  # e.g. redirects and evicted bodies have none
+            pass
+    for rel, data in parts.items():
+        os.makedirs(os.path.join(root, os.path.dirname(rel)), exist_ok=True)
+        with open(os.path.join(root, rel), "wb") as f:
+            f.write(data)
+    return file_result("Network request", os.path.basename(root)) + "\n" + net_line(a["index"], e)
 
 
 # --------------------------------------------------------------------- tabs

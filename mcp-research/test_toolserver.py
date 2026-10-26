@@ -42,6 +42,33 @@ def call(R, name, /, bid=None, **a):
     return run_loop.run_until_complete(go())
 
 
+def tmp_path_out():
+    return tools.OUT
+
+
+def test_network_new_cursor_and_binary_body(env):
+    R = env
+    png = bytes(range(256)) * 4
+    run_loop.run_until_complete(R.ctx.route("https://n.test/**", lambda r: r.fulfill(
+        body=png if r.request.url.endswith(".png") else "<title>n</title>",
+        content_type="image/png" if r.request.url.endswith(".png") else "text/html")))
+    call(R, "browser_navigate", url="https://n.test/a")
+    first = call(R, "browser_network_requests", new=True)
+    assert "n.test/a" in first
+    assert call(R, "browser_network_requests", new=True) == "### Result\nNo new requests."
+    call(R, "browser_evaluate", function="() => fetch('/b.png').then(r => r.arrayBuffer())")
+    call(R, "browser_navigate", url="about:blank")
+    assert "n.test/a" in call(R, "browser_network_requests")  # no `new`: whole log, mark untouched
+    call(R, "browser_navigate", url="https://n.test/c")
+    second = call(R, "browser_network_requests", new=True, filter="/zzz/")  # filtered out, mark still moves
+    assert second == "### Result\nNo new requests."
+    assert call(R, "browser_network_requests", new=True) == "### Result\nNo new requests."
+    i = next(int(l.split(".")[0]) for l in call(R, "browser_network_requests", static=True).splitlines() if "b.png" in l)
+    assert i > 1  # indexes stay global
+    call(R, "browser_network_request", index=i, filename="img")
+    assert open(tools.OUT + "/img/response/body.png", "rb").read() == png
+
+
 def val(text):
     return json.loads(text.split("### Result\n", 1)[1].split("\n### ", 1)[0])
 
@@ -56,7 +83,12 @@ def test_schemas_match_golden():
             assert props.pop("browser")
             if n in ("browser_snapshot", "browser_find"):
                 assert props.pop("text_cap")["default"] == 128
-            assert props == g["inputSchema"].get("properties", {}), n
+            want = dict(g["inputSchema"].get("properties", {}))
+            if n == "browser_network_requests":
+                assert props.pop("new")["type"] == "boolean"
+            if n == "browser_network_request":
+                want.pop("part")  # replaced by a job with a file per part
+            assert props == want, n
     assert {"browser_start_session", "browser_cookie_list", "browser_localstorage_set", "browser_set_storage_state"} <= set(ours)
     assert len([n for n in ours if "cookie" in n or "storage" in n]) == 17
     assert set(ours) <= set(tools.HANDLERS)
@@ -136,8 +168,9 @@ def test_find_refs_survive_actions_and_fail_after_navigation(env):
 def test_text_cap_via_tools(env):
     R = env
     call(R, "browser_navigate", url="data:text/html,<p>" + "word " * 100 + "NEEDLE " + "tail " * 100 + "</p>")
-    assert "..." in call(R, "browser_snapshot") and "NEEDLE" not in call(R, "browser_snapshot")
-    assert "NEEDLE" in call(R, "browser_snapshot", text_cap=None)
+    snap = lambda **a: call(R, "browser_snapshot", **a).split("### Snapshot", 1)[1]  # ### Page echoes the data: URL
+    assert "..." in snap() and "NEEDLE" not in snap()
+    assert "NEEDLE" in snap(text_cap=None)
     out = call(R, "browser_find", text="needle", text_cap=40)
     assert "...NEEDLE" in out or "NEEDLE" in out and out.count("...") == 2, out  # window around the match
     with pytest.raises(tools.ToolError):
@@ -209,7 +242,12 @@ def test_storage_and_console(env):
     call(R, "browser_localstorage_clear")
     assert val(call(R, "browser_localstorage_list")) == {}
     assert "s.test" in call(R, "browser_network_requests", static=True)
-    assert "-- response-body --" in call(R, "browser_network_request", index=1)
+    d = tmp_path_out()
+    assert "](out/net)" in call(R, "browser_network_request", index=1, filename="net") and "s.test" in call(R, "browser_network_request", index=1, filename="net")
+    tree = sorted(os.path.relpath(os.path.join(r, f), d + "/net") for r, _, fs in os.walk(d + "/net") for f in fs)
+    assert tree == ["request/headers.json", "response/body.html", "response/headers.json"], tree  # no request body: no file
+    assert open(d + "/net/response/body.html", "rb").read() == b"<title>s</title>"
+    assert json.load(open(d + "/net/response/headers.json"))["content-type"] == "text/html"
     state = {"cookies": [], "origins": [{"origin": "https://s.test", "localStorage": [{"name": "x", "value": "y"}]}]}
     call(R, "browser_set_storage_state", state=state)
     assert val(call(R, "browser_localstorage_get", key="x")) == "y"

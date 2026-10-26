@@ -24,6 +24,7 @@ class PageState:
     def __init__(self, page: Page):
         self.console: list[tuple[str, str, str]] = []  # (level, text, location)
         self.network: list[dict] = []  # {"req", "resp"} in completion order
+        self.net_mark = 0  # network[:net_mark] was already shown by browser_network_requests(new=true)
         self.dialog = None
         self.chooser = None
         self.console_mark = 0  # console[console_mark:] = since the last navigation

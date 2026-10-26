@@ -26,6 +26,10 @@ Every one takes optional `browser` (default `main`).
 - Reading (always jobs): `browser_snapshot` and `browser_find` (`text_cap`, default 128), `browser_evaluate`,
   `browser_console_messages`, `browser_network_requests`, `browser_network_request`, `browser_take_screenshot`, `browser_pdf_save`,
   `browser_storage_state`.
+- `browser_network_requests` takes `new` (only requests since the last `new: true` call on the tab; "No new requests." as plain text
+  if none). `browser_network_request(index)` returns a job: `original/request|response/headers.json` and `body.<ext>` (raw bytes;
+  absent parts have no file), parsed like any file; no `part`/`filename`. `index.json` has `url`, `method`, `status`.
+  See also: [Plan: network request jobs](../implemented-plans/network-request-jobs.md)
 - Windows: `browser_start_session` (returns a new id; subagents must use their own, never `main`).
 - Storage: `browser_cookie_{get,list,set,delete,clear}`, `browser_localstorage_*`, `browser_sessionstorage_*`,
   `browser_set_storage_state` (state inline).

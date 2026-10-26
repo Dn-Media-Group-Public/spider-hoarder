@@ -521,6 +521,11 @@
      "description": "Only return requests whose URL matches this regexp (e.g. \"/api/.*user\").",
      "type": "string"
     },
+    "new": {
+     "default": false,
+     "description": "If true, return only requests completed since the last call to this tool with `new: true` on this tab (everything since page load on the first such call), then remember the position. Call it repeatedly with `new: true` between actions, e.g. after each click, to see exactly which requests each action caused. Indexes stay global: they are the same numbers `browser_network_request` takes. The position moves whether or not `filter`/`static` hide some of the new requests. Calls without `new` neither read nor move the position. Requests still in flight when you call appear in the next call. If there are no new requests the result is a short text, not a file.",
+     "type": "boolean"
+    },
     "filename": {
      "description": "File name to save the network requests to. Relative file names are resolved against the workspace root. If not provided, requests are returned as text.",
      "type": "string"
@@ -540,7 +545,7 @@
  },
  {
   "name": "browser_network_request",
-  "description": "Returns full details (headers and body) of a single network request, or a single part if `part` is set. Use the number from browser_network_requests.",
+  "description": "Returns the full details of a single network request as a job: request/ and response/ each hold headers.json and the body (raw bytes, extension from its content-type); parts that do not exist are absent, and parseable bodies (HTML, PDF, ...) are parsed like any file. Use the number from browser_network_requests.",
   "inputSchema": {
    "$schema": "https://json-schema.org/draft/2020-12/schema",
    "type": "object",
@@ -550,16 +555,6 @@
      "minimum": 1,
      "maximum": 9007199254740991,
      "description": "1-based index of the request, as printed by browser_network_requests."
-    },
-    "part": {
-     "description": "Return only this part of the request. Omit to return full details.",
-     "type": "string",
-     "enum": [
-      "request-headers",
-      "request-body",
-      "response-headers",
-      "response-body"
-     ]
     },
     "filename": {
      "description": "File name to save the result to. Relative file names are resolved against the workspace root. If not provided, output is returned as text.",

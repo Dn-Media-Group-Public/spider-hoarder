@@ -33,6 +33,10 @@ original, checked by `test_toolserver.py`) plus a `browser` property. Added: 15 
   `browser_find` again after an action. See also: [Plan: Jobs for all tools](../implemented-plans/jobs-for-all-tools.md)
 - `text_cap` (default 128, `null` = none) shortens pure text nodes in snapshots/finds; `find` matches the full text and centres the
   window on the match. `browser_find` shows each match with its ancestor chain (refs), the way to locate a content container.
+- Network log: `PageState.network` is append-only; `PageState.net_mark` is the position `browser_network_requests(new=true)` reads
+  from and then advances (per tab; calls without `new` leave it). `browser_network_request` writes a directory (`request/`,
+  `response/`, each `headers.json` and `body.<ext>`, extension from the content-type via `mimetypes`) instead of one text file.
+  See also: [Plan: network request jobs](../implemented-plans/network-request-jobs.md)
 - `browser_pdf_save` uses CDP `Page.printToPDF` (Playwright's `page.pdf` is headless-only).
 - Files (screenshots, PDFs, `filename=` outputs) go to `$HOME/out`; the gateway copies them into jobs ([Jobs](jobs-and-storage.md)).
 
