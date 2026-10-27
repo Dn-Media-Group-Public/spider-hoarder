@@ -1,4 +1,4 @@
-# Replaces Caddy. Routes by egress (/tor, /clear) and, once a session exists, by the replica id
+# Replaces Caddy. Routes by egress (/tor, /clear, /i2p) and, once a session exists, by the replica id
 # `rid` (the research task's IP, dashes for dots) carried in the MCP session id and in blob / upload /
 # view URLs. nginx proxies straight to that IP on ${GATEWAY_PORT}. envsubst fills in ${GATEWAY_PORT} only.
 # TLS is terminated by the load balancer in front (Google LB in prod); dev has none.
@@ -18,7 +18,7 @@ map $http_mcp_session_id $sid_ip {
 # rid in /<egress>/{blob,upload,view}/<rid>/... -> dotted IP ("" = none/malformed)
 map $request_uri $url_ip {
     default "";
-    "~^/(?:tor|clear)/(?:blob|upload|view)/(?<a>[0-9]{1,3})-(?<b>[0-9]{1,3})-(?<c>[0-9]{1,3})-(?<d>[0-9]{1,3})/" "$a.$b.$c.$d";
+    "~^/(?:tor|clear|i2p)/(?:blob|upload|view)/(?<a>[0-9]{1,3})-(?<b>[0-9]{1,3})-(?<c>[0-9]{1,3})-(?<d>[0-9]{1,3})/" "$a.$b.$c.$d";
 }
 
 server {
@@ -67,7 +67,7 @@ server {
 
     # MCP endpoint (bearer auth is done by the gateway itself). Without a session id (initialize):
     # any replica, next one on 503 = full (no side effects yet). With one: the replica in its prefix.
-    location ~ ^/(?<egress>tor|clear)/mcp {
+    location ~ ^/(?<egress>tor|clear|i2p)/mcp {
         if ($sid_ip = invalid) { return 400; }
         set $target $sid_ip;
         if ($sid_ip = "") { set $target tasks.research-$egress; }
@@ -78,18 +78,18 @@ server {
         proxy_next_upstream_tries 0;
     }
 
-    location ~ ^/\.well-known/oauth-protected-resource/(?<egress>tor|clear)/mcp$ {
+    location ~ ^/\.well-known/oauth-protected-resource/(?<egress>tor|clear|i2p)/mcp$ {
         proxy_pass http://tasks.research-$egress:${GATEWAY_PORT};
     }
 
     # Signed capability links: the gateway checks the token.
-    location ~ ^/(tor|clear)/(blob|upload)/ {
+    location ~ ^/(tor|clear|i2p)/(blob|upload)/ {
         if ($url_ip = "") { return 400; }
         proxy_pass http://$url_ip:${GATEWAY_PORT};
     }
 
     # Handoff link: SSO, then that replica checks ownership and redirects to noVNC.
-    location ~ ^/(tor|clear)/view/[0-9-]+/[A-Za-z0-9_-]+/start$ {
+    location ~ ^/(tor|clear|i2p)/view/[0-9-]+/[A-Za-z0-9_-]+/start$ {
         if ($url_ip = "") { return 400; }
         auth_request /_sso;
         auth_request_set $email $upstream_http_x_auth_request_email;
@@ -101,7 +101,7 @@ server {
     # Live view (noVNC page + websocket). nginx has one auth_request per request and none in subrequests, so:
     # stage 1 = SSO (sets $email), then try_files hops to @view2 = ownership via the replica's /authz,
     # then straight to that session's websockify port. $upstream only ever comes from /authz's answer.
-    location ~ ^/(tor|clear)/view/[0-9-]+/[A-Za-z0-9_-]+/ {
+    location ~ ^/(tor|clear|i2p)/view/[0-9-]+/[A-Za-z0-9_-]+/ {
         if ($url_ip = "") { return 400; }
         auth_request /_sso;
         auth_request_set $email $upstream_http_x_auth_request_email;
@@ -111,12 +111,12 @@ server {
     location @view2 {
         auth_request /_authz;
         auth_request_set $upstream $upstream_http_x_upstream;
-        rewrite ^/(?:tor|clear)/view/[0-9-]+/[A-Za-z0-9_-]+(/.*)$ $1 break;
+        rewrite ^/(?:tor|clear|i2p)/view/[0-9-]+/[A-Za-z0-9_-]+(/.*)$ $1 break;
         proxy_pass http://$upstream;
         proxy_read_timeout 1h;
     }
 
-    location ~ ^/(tor|clear)/(blob|upload|view)/ { return 400; }   # malformed rid
+    location ~ ^/(tor|clear|i2p)/(blob|upload|view)/ { return 400; }   # malformed rid
 
     location = / {
         set $any tasks.research-clear;

@@ -13,13 +13,18 @@ x11vnc -display "$DISPLAY" -passwdfile "$HOME/vncpass" -localhost -rfbport "$VNC
        -forever -shared -quiet -o "$HOME/x11vnc.log" &
 websockify --web /usr/share/novnc "0.0.0.0:$WS_PORT" "127.0.0.1:$VNC_PORT" &
 
-# Tor: Chromium talks to a local filtering SOCKS relay (blocklist), which forwards to Tor
+# Tor/I2P: Chromium talks to a local filtering SOCKS relay (blocklist), which forwards to the router
 if [ -n "${UPSTREAM_SOCKS:-}" ]; then
   /venv/bin/python /app/filter_proxy.py "$FILTER_PORT" "${UPSTREAM_SOCKS%:*}" "${UPSTREAM_SOCKS#*:}" &
   PROXY_SERVER="socks5://127.0.0.1:$FILTER_PORT"
 fi
 
 ARGS='"--window-position=0,0","--window-size=1440,900","--disable-dev-shm-usage","--force-webrtc-ip-handling-policy=disable_non_proxied_udp"'
+NAV_TIMEOUT=30000
+if [ -n "${ALLOW_SUFFIX:-}" ]; then  # i2p: eepsites are http, and the first connect takes tens of seconds
+  ARGS="$ARGS,\"--disable-features=HttpsUpgrades,HttpsFirstBalancedModeAutoEnable\""
+  NAV_TIMEOUT=120000
+fi
 [ -n "${PROXY_SERVER:-}" ] && ARGS="$ARGS,\"--proxy-server=$PROXY_SERVER\""
 [ -s "$HOME/hostrules" ] && ARGS="$ARGS,\"--host-rules=$(cat "$HOME/hostrules")\""
 
@@ -29,6 +34,7 @@ cat > "$HOME/toolserver.json" <<JSON
   "args": [$ARGS],
   "initScript": "/app/consent.js",
   "outDir": "$HOME/out",
+  "navTimeout": $NAV_TIMEOUT,
   "port": $MCP_PORT
 }
 JSON

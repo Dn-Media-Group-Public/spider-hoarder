@@ -80,6 +80,10 @@ EGRESS_NOTE = {
         "not be traceable, or when the clear variant (spider-hoarder-clear) is blocked or geo-restricted. "
         "Slower, and many sites show CAPTCHAs or block Tor exit nodes; use browser_request_human_help for those "
         "or fall back to the clear variant when anonymity is not needed."),
+    "i2p": (
+        "I2P: traffic goes through the I2P network and ONLY *.i2p addresses (eepsites, .b32.i2p) are reachable; "
+        "clearnet and .onion sites are not. Use it for I2P-hosted content. Slow: the first request on a fresh "
+        "session can take a minute while tunnels are built, and eepsites are often offline."),
 }[EGRESS]
 
 _ENFORCED_SCOPES = [os.environ["MCP_SCOPE"]] if os.environ.get("MCP_SCOPE") else []
@@ -428,7 +432,7 @@ async def _file_tool(bs: sessions.BrowserSession, name: str, arguments: dict) ->
 async def _ingest_page(owner: str, url: str, live: sessions.BrowserSession | None = None, target: str | None = None) -> dict:
     job_id = _new_job_id()
     kw = {}
-    if live:  # preflight/download as the real browser session: its cookies, its Tor circuit
+    if live:  # preflight/download as the real browser session: its cookies, its Tor circuit / I2P destination
         kw = {"cookies": await sessions.cookies_for(live, url), "socks_port": ports.socks_port(live.uid)}
     ctype = await asyncio.to_thread(fetch.content_type, url, **kw)
     if "text/html" in ctype or ctype == "":
@@ -609,13 +613,13 @@ async def index_page(request: Request) -> Response:
     """Public landing page (no auth): how to add both servers; URLs come from PUBLIC_SCHEME/PUBLIC_HOST."""
     root = f"{SCHEME}://{PUBLIC_HOST}"
     cmds = "\n".join(
-        f"claude mcp add --transport http spider-hoarder-{e} {root}/{e}/mcp" for e in ("clear", "tor"))
+        f"claude mcp add --transport http spider-hoarder-{e} {root}/{e}/mcp" for e in ("clear", "tor", "i2p"))
     return HTMLResponse(
         "<!doctype html><html><head><meta charset=utf-8><title>spider-hoarder</title></head><body>"
         "<h1>spider-hoarder</h1><p>Add the MCP servers to Claude Code:</p>"
         f"<pre>{html.escape(cmds)}</pre>"
         "<p>Then run <code>/mcp</code>, pick the server and choose Authenticate. "
-        "<b>clear</b> browses directly; <b>tor</b> browses via Tor.</p></body></html>")
+        "<b>clear</b> browses directly; <b>tor</b> browses via Tor; <b>i2p</b> reaches *.i2p via I2P.</p></body></html>")
 
 
 @mcp.custom_route(f"/{EGRESS}/upload/{{rid}}/{{token}}", methods=["GET"])

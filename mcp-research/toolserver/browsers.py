@@ -181,6 +181,7 @@ async def launch(cfg: dict):
         cfg["userDataDir"], headless=cfg.get("headless", False), chromium_sandbox=False, no_viewport=True,
         # --enable-automation is what sets navigator.webdriver and the "controlled by automated software" bar
         ignore_default_args=["--enable-automation"], args=[*cfg["args"], "--disable-blink-features=AutomationControlled"])
+    ctx.set_default_navigation_timeout(cfg.get("navTimeout", 30000))
     if cfg.get("initScript"):
         await ctx.add_init_script(path=cfg["initScript"])
     return pw, Registry(ctx)

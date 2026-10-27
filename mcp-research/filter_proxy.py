@@ -4,12 +4,17 @@ relayed untouched with the hostname passed on, so Tor still resolves names.
 Usage: filter_proxy.py LISTEN_PORT UPSTREAM_HOST UPSTREAM_PORT  (stdlib + cmp_rules only)"""
 
 import asyncio
-import struct
+import os
 import sys
 
 import cmp_rules
 
 BLOCKED = frozenset(cmp_rules.hosts())
+ALLOW_SUFFIX = os.environ.get("ALLOW_SUFFIX", "")  # i2p: ".i2p" = refuse every other name and all raw IPs
+
+
+def is_allowed(host: str, atyp: int) -> bool:
+    return not ALLOW_SUFFIX or (atyp == 3 and host.lower().rstrip(".").endswith(ALLOW_SUFFIX))
 
 
 def is_blocked(host: str, blocked=BLOCKED) -> bool:
@@ -43,7 +48,7 @@ async def handle(cr, cw, up_host, up_port):
         else:
             return
         port = await cr.readexactly(2)
-        if cmd != 1 or (atyp == 3 and is_blocked(host)):
+        if cmd != 1 or (atyp == 3 and is_blocked(host)) or not is_allowed(host, atyp):
             cw.write(b"\x05\x02\x00\x01\x00\x00\x00\x00\x00\x00")  # not allowed
             return
         ur, uw = await asyncio.open_connection(up_host, up_port)

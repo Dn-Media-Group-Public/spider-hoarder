@@ -5,8 +5,8 @@ See also: [Plan: Browser sessions](../implemented-plans/browser-sessions-plan.md
 [Plan: Scale research containers](../implemented-plans/research-replicas.md)
 
 ## Stack
-`deploy.sh` builds `mcp-research:local`, `spider-hoarder-tor:local`, `oauth2-proxy-dcr:local` (Swarm ignores `build:`), inits Swarm, runs
-`docker stack deploy`, then force-updates `nginx`, `research-*`, `tor` so fresh `:local` images and an edited `nginx.conf.template` are
+`deploy.sh` builds `mcp-research:local`, `spider-hoarder-tor:local`, `spider-hoarder-i2pd:local`, `spider-hoarder-i2pd-seed:local`, `oauth2-proxy-dcr:local` (Swarm ignores `build:`), inits Swarm, runs
+`docker stack deploy`, then force-updates `nginx`, `research-*`, `tor`, `i2pd`, `i2pd-seed` so fresh `:local` images and an edited `nginx.conf.template` are
 picked up. Swarm constraints: no `security_opt` (entrypoint sets `no_new_privs`), no `shm_size` (Chromium uses
 `--disable-dev-shm-usage`). One image: Debian bookworm + Python venv, Playwright's Chromium, Xvfb, x11vnc, noVNC, websockify, iptables.
 
@@ -20,6 +20,9 @@ picked up. Swarm constraints: no `security_opt` (entrypoint sets `no_new_privs`)
 | `MAX_SESSIONS_TOTAL` (18, max 48), `MAX_SESSIONS_PER_USER` (3), `IDLE_TIMEOUT` (1800 s), `DISCONNECT_TIMEOUT_MINUTES` (5) | per-container limits |
 | `HTTP_PORT`, `GATEWAY_PORT` | published nginx port; port gateways listen on (nothing else may use it) |
 | `RESEARCH_TOR_REPLICAS`, `RESEARCH_CLEAR_REPLICAS`, `MAX_REPLICAS` | scaling ([Scaling](../architecture/scaling.md)) |
+| `RESEARCH_I2P_REPLICAS` (1) | replicas of both `research-i2p` and `i2pd` |
+| `I2P_SOCKS_BASE` (4500), `I2P_TUNNEL_QUANTITY` (2), `I2P_TUNNEL_LENGTH` (3) | first SOCKS port per router; tunnels per session destination; hops. See also: [Plan: I2P egress](../implemented-plans/i2p-egress.md)
+| `I2P_SNAPSHOT_INTERVAL` (1800 s), `I2P_PROBE_HOST` (`stats.i2p`) | seed snapshot period; eepsite probed for readiness |
 | `KC_*` | dev Keycloak and `keycloak/setup.sh` only |
 
 ## Dev mode

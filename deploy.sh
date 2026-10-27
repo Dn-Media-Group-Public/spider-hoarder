@@ -44,6 +44,8 @@ done
 docker build -t mcp-research:local mcp-research
 docker build -t spider-hoarder-tor:local tor
 docker build -t oauth2-proxy-dcr:local oauth2-proxy
+docker build -t spider-hoarder-i2pd:local i2pd
+docker build -t spider-hoarder-i2pd-seed:local i2pd-seed
 
 # Initialize swarm if not already active
 docker info --format '{{.Swarm.LocalNodeState}}' | grep -q active || docker swarm init
@@ -51,6 +53,6 @@ docker info --format '{{.Swarm.LocalNodeState}}' | grep -q active || docker swar
 docker stack deploy --resolve-image never "${FILES[@]}" "$STACK"
 
 # Force restart so freshly-built :local images (and an edited nginx.conf.template) are picked up.
-for s in nginx research-tor research-clear tor; do
+for s in nginx research-tor research-clear research-i2p tor i2pd i2pd-seed; do
   docker service update --force --no-resolve-image "${STACK}_$s"
 done

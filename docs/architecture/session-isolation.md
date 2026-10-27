@@ -48,9 +48,21 @@ Firewall rules are installed per session uid by `entrypoint.sh` (`iptables -m ow
 |---|---|
 | `research-clear` | Public internet only. REJECT RFC1918, link-local, CGNAT, loopback, cloud-metadata and other stack services (this is the SSRF fix for browsers). Configured DNS resolvers stay reachable. |
 | `research-tor` | ACCEPT only the session's own Tor SocksPort on `tor`; REJECT everything else. IPv6 is rejected for all session uids. |
+| `research-i2p` | ACCEPT only the session's own SOCKS port on `i2pd-<slot>`; REJECT everything else. |
 
 The gateway's own `requests` downloads (non-HTML) use `netguard.py` on clear (resolve, reject non-public, pin the IP, re-check every
 redirect) and `socks5h://tor:<port>` on Tor.
+
+## I2P
+
+Each router has one `type=socks` section per session slot with `keys=transient`: its own destination, tunnel pool and leaseset
+(`tunnels.conf` is generated at start, no dynamic add/remove). No outproxy: i2pd refuses clearnet names and raw IPs (SOCKS 0x08), and
+`filter_proxy.py` (`ALLOW_SUFFIX=.i2p`) refuses everything but `*.i2p` first; `fetch.py` does the same. Browsers are on the internal
+network `sessions_i2p`, so only the routers see the internet. Before a session's first use the gateway probes an eepsite
+(`I2P_PROBE_HOST`) and returns "not ready, retry" instead of hanging; Chromium's HTTPS upgrades are off and navigation timeout is 120 s.
+**Known limitation:** sessions on one replica share the router identity, exploratory tunnels and transports, so a router-level observer
+(or a hop seeing several pools) could correlate them; tunnel isolation is per destination only. Upgrade path: one router per session
+slot. Fingerprinting caveats are those of Chromium over Tor. See also: [Plan: I2P egress](../implemented-plans/i2p-egress.md)
 
 ## Tor
 

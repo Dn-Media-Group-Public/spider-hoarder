@@ -34,7 +34,7 @@ SESSION_GROUP = os.environ.get("SESSION_GROUP", "/app/session-group.sh")
 WIPE_ROOTS = ["/home", "/tmp", "/var/tmp", "/dev/shm", "/run"]
 NPROC = os.environ.get("SESSION_NPROC", "1024")  # Chromium's process tree is hundreds
 NOFILE = os.environ.get("SESSION_NOFILE", "8192")
-ENV_KEYS = {"UPSTREAM_SOCKS"}  # the only gateway-supplied env a session may get
+ENV_KEYS = {"UPSTREAM_SOCKS", "ALLOW_SUFFIX"}  # the only gateway-supplied env a session may get
 
 FREE, BUSY, QUARANTINED = "free", "busy", "quarantined"
 state: dict[int, str] = {}

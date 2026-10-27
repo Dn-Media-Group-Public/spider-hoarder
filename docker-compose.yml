@@ -1,5 +1,6 @@
 # Per-user isolated browser sessions + fetch/parse/blob tools.
 #   $PUBLIC_SCHEME://$PUBLIC_HOST/tor/mcp     browsers egress via Tor only
+#   $PUBLIC_SCHEME://$PUBLIC_HOST/i2p/mcp     browsers reach only *.i2p, through an i2pd router (one per replica)
 #   $PUBLIC_SCHEME://$PUBLIC_HOST/clear/mcp   browsers egress directly (public internet only)
 # Auth: an external OIDC IdP (OIDC_ISSUER, Keycloak); `./deploy.sh --dev` adds a local one
 # (docker-compose.dev.yml). Set it up with keycloak/setup.sh (realm, scopes, DCR for Claude, a user).
@@ -49,7 +50,7 @@ services:
       GATEWAY_PORT: ${GATEWAY_PORT}
     volumes:
       - ./nginx.conf.template:/etc/nginx/templates/default.conf.template:ro
-    networks: [auth, sessions_tor, sessions_clear]
+    networks: [auth, sessions_tor, sessions_clear, sessions_i2p]
 
   # Human SSO for the live view (MCP bearer tokens are verified by the gateways)
   oauth2-proxy:
@@ -96,6 +97,41 @@ services:
       EGRESS: clear
     networks: [sessions_clear, public]
 
+  research-i2p:
+    <<: *research
+    deploy:
+      <<: *research-deploy
+      replicas: ${RESEARCH_I2P_REPLICAS:-1}
+    environment:
+      <<: *research-env
+      EGRESS: i2p
+      I2P_SOCKS_BASE: ${I2P_SOCKS_BASE:-4500}
+      I2P_PROBE_HOST: ${I2P_PROBE_HOST:-stats.i2p}
+    networks: [sessions_i2p, public]   # public: the gateway reaches the IdP; browsers (session uids) are firewalled to their own i2pd port
+
+  # One router per research-i2p replica: research-i2p slot k talks to i2pd-k (hostname from the task slot, overlay DNS).
+  i2pd:
+    image: spider-hoarder-i2pd:local
+    hostname: "i2pd-{{.Task.Slot}}"
+    deploy:
+      replicas: ${RESEARCH_I2P_REPLICAS:-1}
+      restart_policy: { condition: any }
+    environment:
+      MAX_SESSIONS_TOTAL: ${MAX_SESSIONS_TOTAL:-18}
+      I2P_SOCKS_BASE: ${I2P_SOCKS_BASE:-4500}
+      I2P_TUNNEL_QUANTITY: ${I2P_TUNNEL_QUANTITY:-2}
+      I2P_TUNNEL_LENGTH: ${I2P_TUNNEL_LENGTH:-3}
+    networks: [i2p_egress, sessions_i2p]
+
+  # Warm netDb served as snapshot.tgz so the routers above start fast; falls back to the public reseed if down.
+  i2pd-seed:
+    image: spider-hoarder-i2pd-seed:local
+    deploy: { replicas: 1, restart_policy: { condition: any } }
+    environment:
+      I2P_SNAPSHOT_INTERVAL: ${I2P_SNAPSHOT_INTERVAL:-1800}
+    volumes: [i2pd_seed_data:/var/lib/i2pd]
+    networks: [i2p_egress]
+
   tor:
     image: spider-hoarder-tor:local
     deploy: { replicas: 1, restart_policy: { condition: any } }
@@ -110,9 +146,12 @@ networks:
   auth: { driver: overlay, internal: true }           # nginx <-> oauth2-proxy only
   tor_egress: { driver: overlay }
   sessions_tor: { driver: overlay, internal: true }   # tor browsers: no internet, only tor:9050+
+  i2p_egress: { driver: overlay }
+  sessions_i2p: { driver: overlay, internal: true }   # i2p browsers: no internet, only their i2pd-<slot>
   sessions_clear: { driver: overlay }                 # clear browsers -> internet (uid firewall blocks private ranges)
 
 volumes:
   tor_data: {}
+  i2pd_seed_data: {}
   research_data: {}
   o2p_state: {}   # oauth2-proxy's DCR registration

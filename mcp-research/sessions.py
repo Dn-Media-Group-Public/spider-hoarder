@@ -19,12 +19,13 @@ from mcp import ClientSession, types
 from mcp.client.streamable_http import streamablehttp_client
 
 import cmp_rules
+import fetch
 import ports
 from pool import Pool, Sessiond
 
 log = logging.getLogger("sessions")
 
-EGRESS = os.environ.get("EGRESS", "clear")  # "tor" | "clear"
+EGRESS = os.environ.get("EGRESS", "clear")  # "tor" | "clear" | "i2p"
 IDLE_TIMEOUT = int(os.environ.get("IDLE_TIMEOUT", "1800"))
 DISCONNECT_TIMEOUT = float(os.environ.get("DISCONNECT_TIMEOUT_MINUTES", "5")) * 60  # no open request this long = client gone
 MAX_PER_USER = int(os.environ.get("MAX_SESSIONS_PER_USER", "3"))
@@ -94,9 +95,14 @@ async def _wait_http(url: str, timeout: float = 60) -> None:
 async def _run_client(bs: BrowserSession) -> None:
     """Owns the session's uid and its upstream MCP connection for its lifetime."""
     try:
-        env = {"UPSTREAM_SOCKS": f"tor:{ports.socks_port(bs.uid)}"} if EGRESS == "tor" else {}
-        # clear: Chromium --host-rules; tor: the filter relay (host-rules don't apply when a proxy resolves names)
-        files = {"vncpass": bs.vnc_password, "hostrules": "" if EGRESS == "tor" else _HOST_RULES}
+        proxied = EGRESS in ("tor", "i2p")
+        env = {"UPSTREAM_SOCKS": f"{ports.SOCKS_HOST}:{ports.socks_port(bs.uid)}"} if proxied else {}
+        if EGRESS == "i2p":
+            env["ALLOW_SUFFIX"] = ".i2p"
+            if not await asyncio.to_thread(fetch.i2p_ready, ports.socks_port(bs.uid)):
+                raise RuntimeError("I2P router/tunnels not ready yet; retry in a minute")
+        # clear: Chromium --host-rules; tor/i2p: the filter relay (host-rules don't apply when a proxy resolves names)
+        files = {"vncpass": bs.vnc_password, "hostrules": "" if proxied else _HOST_RULES}
         await pool.start(bs.uid, env, files)
         bs.running = True
         url = f"http://127.0.0.1:{ports.mcp_port(bs.uid)}/mcp"

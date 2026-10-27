@@ -10,11 +10,19 @@ assert POOL_SIZE <= 50, "port ranges overlap above 50 sessions"
 
 # Replica `REPLICA_SLOT` (1..MAX_REPLICAS, Swarm's {{.Task.Slot}}) of this egress service gets its own
 # slice of the shared `tor` service's SocksPorts: slot 1 is exactly the single-container layout.
+EGRESS = os.environ.get("EGRESS", "clear")
 MAX_REPLICAS = int(os.environ.get("MAX_REPLICAS", "4"))
 SLOT = int(os.environ.get("REPLICA_SLOT", "1"))
-assert 1 <= SLOT <= MAX_REPLICAS, f"REPLICA_SLOT {SLOT} outside 1..MAX_REPLICAS ({MAX_REPLICAS}); raise MAX_REPLICAS and redeploy tor"
-SOCKS_STRIDE = POOL_SIZE + 1  # + the gateway's own port
-SOCKS_BASE = 9050 + (SLOT - 1) * SOCKS_STRIDE
+if EGRESS == "i2p":
+    # slot k pairs with its own router `i2pd-k` (one router per replica, no stride, no MAX_REPLICAS)
+    assert SLOT >= 1, f"REPLICA_SLOT {SLOT}"
+    SOCKS_HOST = f"i2pd-{SLOT}"
+    SOCKS_BASE = int(os.environ.get("I2P_SOCKS_BASE", "4500"))
+else:
+    assert 1 <= SLOT <= MAX_REPLICAS, f"REPLICA_SLOT {SLOT} outside 1..MAX_REPLICAS ({MAX_REPLICAS}); raise MAX_REPLICAS and redeploy tor"
+    SOCKS_HOST = "tor"
+    SOCKS_STRIDE = POOL_SIZE + 1  # + the gateway's own port
+    SOCKS_BASE = 9050 + (SLOT - 1) * SOCKS_STRIDE
 
 UIDS = range(UID_BASE, UID_BASE + POOL_SIZE)
 

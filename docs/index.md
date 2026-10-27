@@ -4,11 +4,11 @@ Start with the [README](../README.md) (what it is, quick start, how to use it).
 
 ## Architecture
 - [Overview](architecture/overview.md) — components, request flow, code map
-- [Session isolation, egress and Tor](architecture/session-isolation.md) — uid pool, firewall, Tor, consent banners
+- [Session isolation, egress and Tor](architecture/session-isolation.md) — uid pool, firewall, Tor, I2P, consent banners
 - [Browser tool server](architecture/browser-toolserver.md) — multiple browsers per session, refs, text cap
 - [Jobs, storage and links](architecture/jobs-and-storage.md) — job layout, HTML conversion, terse/simplified views, signed links
 - [Authentication and live view](architecture/auth.md) — Keycloak, DCR, oauth2-proxy, human handoff
-- [Scaling and routing](architecture/scaling.md) — nginx, replica ids, Tor port slices
+- [Scaling and routing](architecture/scaling.md) — nginx, replica ids, Tor port slices, I2P router pairing
 
 ## API
 - [Tool reference](api/tools.md)

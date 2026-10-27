@@ -39,3 +39,5 @@ Every one takes optional `browser` (default `main`).
 ## Egress
 `/tor/mcp` browses only via Tor (anonymised, but some sites block Tor); `/clear/mcp` browses directly
 (public internet only, not `.onion`). Use Tor for sensitive research, clear when a site blocks Tor.
+`/i2p/mcp` reaches only `*.i2p` (eepsites, `.b32.i2p`), nothing else. The first request on a fresh session can take a minute (tunnel build);
+until then tools fail with "I2P router/tunnels not ready, retry". See also: [Plan: I2P egress](../implemented-plans/i2p-egress.md)

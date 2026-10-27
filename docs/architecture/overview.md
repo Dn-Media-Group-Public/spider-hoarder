@@ -12,7 +12,8 @@ See also: [Plan: Browser sessions](../implemented-plans/browser-sessions-plan.md
 
 ```
 Claude ──Bearer JWT──▶ nginx ─▶ research-tor ──▶ tor ──▶ internet      /tor/mcp
-                         │  └─▶ research-clear ───────▶ internet       /clear/mcp
+                         │  ├─▶ research-clear ───────▶ internet       /clear/mcp
+                         │  └─▶ research-i2p ─▶ i2pd-k ─▶ I2P (*.i2p)  /i2p/mcp   (i2pd-seed: warm netDb snapshot)
 Human (live view) ─SSO─▶ nginx ─▶ oauth2-proxy ─▶ Keycloak (external OIDC)
 
 research-<egress> container (1..N replicas):
@@ -27,10 +28,11 @@ research-<egress> container (1..N replicas):
 
 | Service | Role | Source |
 |---|---|---|
-| `nginx` | Only published port. Routes by egress (`/tor`, `/clear`) and by replica id; SSO for the live view. TLS ends at the load balancer in front of it. | `nginx.conf.template` |
+| `nginx` | Only published port. Routes by egress (`/tor`, `/clear`, `/i2p`) and by replica id; SSO for the live view. TLS ends at the load balancer in front of it. | `nginx.conf.template` |
 | `oauth2-proxy` | Human SSO for the live view only (MCP uses bearer JWTs verified by the gateway). Registers its own OIDC client. | `oauth2-proxy/` |
 | `research-tor`, `research-clear` | The gateway + `sessiond` + per-session browsers; one image, `EGRESS` selects the policy. Shared by all users, **not** one container per session. | `mcp-research/` |
 | `tor` | A single Tor daemon with a pool of SocksPorts. | `tor/` |
+| `research-i2p`, `i2pd`, `i2pd-seed` | I2P egress: one `i2pd` router per `research-i2p` replica (slot k ↔ `i2pd-k`), a SOCKS destination per session; `i2pd-seed` serves a netDb snapshot so routers start fast. See also: [Plan: I2P egress](../implemented-plans/i2p-egress.md) | `i2pd/`, `i2pd-seed/` |
 | Keycloak | External OIDC provider (prod); a throwaway one in `--dev`. | `keycloak/setup.sh` |
 
 ### Why one container per egress, not per session
