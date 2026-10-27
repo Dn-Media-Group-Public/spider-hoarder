@@ -9,10 +9,12 @@ See also: [Plan: Browser sessions](../implemented-plans/browser-sessions-plan.md
 ## Gateway tools
 | Tool | Behaviour |
 |---|---|
+| `open_session(media?, allow?, deny?)` | **Must be the first call, once.** Sets the session's immutable no-media policy; every other tool fails until then. Ask the user about security settings first; pass `allow` / `deny` (MIME types or `type/*`) only on request. `media` defaults to false on Tor / I2P, true on clear. Returns the effective policy. See also: [Plan: No-media sessions](../implemented-plans/no-media-sessions.md) |
+| `get_session()` | Read-only: `{egress, opened, media, blocked_resource_types, allowed_content_types, denied_content_types}`. Works before `open_session` (`opened: false`, the defaults). For subagents. |
 | `browser_request_human_help(reason, browser?)` | Link for the user to solve a CAPTCHA/login in the live view (owner-only, SSO). Wait for the user. |
 | `browser_save_page(target?, browser?)` | Convert the open page (or `target`: an element ref/selector) to Markdown and store it as a job. Prefer over `browser_snapshot` for content. |
-| `ingest_page(url, target?)` | One shot: ephemeral browser, navigate, save, destroy. `target` must be a selector. Non-HTML goes through `requests`. |
-| `browser_end_session(browser?)` | Close one browser, or all and the session. |
+| `ingest_page(url, target?)` | One shot: ephemeral browser, navigate, save, destroy. `target` must be a selector. Non-HTML goes through `requests`. Uses the session's media policy: blocked content types error with `blocked: media disabled for this session (<type>)`. |
+| `browser_end_session(browser?)` | Close one browser, or all and the session; the result counts requests the media policy blocked. |
 | `get_upload_link()` | Page where the *user* uploads files into a new job (1 h). Archives are unpacked; binary formats (msgpack, CBOR, BSON, plist, protobuf) also get `parsed/*.json`. See also: [Plan: more file formats](../implemented-plans/more-file-formats.md) |
 | `list_files(job_id)` | Manifest of a job. |
 | `get_file_text(job_id, path, offset?, length?)` | Page through a stored file (20,000-char slices by default). |
@@ -30,6 +32,7 @@ Every one takes optional `browser` (default `main`).
   if none). `browser_network_request(index)` returns a job: `original/request|response/headers.json` and `body.<ext>` (raw bytes;
   absent parts have no file), parsed like any file; no `part`/`filename`. `index.json` has `url`, `method`, `status`.
   See also: [Plan: network request jobs](../implemented-plans/network-request-jobs.md)
+  Requests stopped by the media policy show as `[BLOCKED] blocked: media policy`. See also: [Plan: No-media sessions](../implemented-plans/no-media-sessions.md)
 - Windows: `browser_start_session` (returns a new id; subagents must use their own, never `main`).
 - Storage: `browser_cookie_{get,list,set,delete,clear}`, `browser_localstorage_*`, `browser_sessionstorage_*`,
   `browser_set_storage_state` (state inline).

@@ -72,6 +72,25 @@ Chromium cannot do SOCKS auth, so per-session credentials are not an option. Chr
 With several replicas each gets its own slice of the SocksPort range (`SOCKS_STRIDE = POOL_SIZE + 1`, offset by task slot);
 see [Scaling](scaling.md).
 
+## No-media sessions
+
+Loading an image, video or audio file can be a legal risk on the dark web, so the user chooses once per gateway session (before anything
+else; fail-closed gate in the gateway and the toolserver) via `open_session(media?, allow?, deny?)`. The policy is immutable, lives in
+`sessions.policies` keyed by MCP session id (outliving individual browsers), is installed in the toolserver at browser start, and applies
+to every window and to `ingest_page`. `media` defaults to false on Tor / I2P. `get_session()` reports it read-only.
+
+| Layer | Where | Blocks |
+|---|---|---|
+| A | `context.route`, by resource type | `<img>`, `srcset`, favicons, CSS backgrounds, `<video>`, `<audio>`, `<object>`, web fonts: never requested |
+| D | CDP `Fetch` at response headers, documents only | navigations and iframes whose `Content-Type` is not allowed: text allowlist + `allow`, minus `deny` (deny, then allow, then default) |
+| fetch.py | `requests` streaming | same Content-Type rule; connection closed before the body is read |
+
+`allow` / `deny` only affect layer D and fetch.py: `allow=["image/svg+xml"]` lets you navigate to an SVG, `<img src=svg>` still does not
+load. Not done: disk-cache flags, placeholders, extension denylists, relay-level filtering. **Residual risks:** a server lying about
+`Content-Type`; headers of blocked responses (and for D, the request itself) reach the browser; the first request of a popup and
+cross-origin iframes can bypass D; the policy is only as good as the question the agent asked the user. The effective policy is logged
+(`app` logger) and returned by `open_session`. See also: [Plan: No-media sessions](../implemented-plans/no-media-sessions.md)
+
 ## Consent banners
 
 `consent.js` (init script in every page) auto-clicks consent buttons. Known consent-vendor hosts (Fanboy Cookiemonster list, ~670, fetched

@@ -8,6 +8,7 @@ import time
 import types
 
 import jwt
+import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 os.environ.setdefault("BLOB_TOKEN_SECRET", "test-secret")
@@ -262,7 +263,8 @@ def test_file_tools_are_jobs():
 
     async def get_session(*a, **k):
         return bs
-    app._caller = lambda: (None, "a@b.c", None)
+    app._caller = lambda: (None, "a@b.c", "sid1")
+    sessions.policies["sid1"] = app.Policy.make("clear")
     sessions.get_session = get_session
     app.INLINE_LIMIT = 50_000
     run = lambda name, **a: asyncio.run(app.call_tool(name, a))
@@ -311,7 +313,8 @@ def test_file_tools_are_jobs():
     assert g(path="original/none", pattern="x").content[0].text == "file not found"
     app._caller = lambda: (None, "other@b.c", None)
     assert g(path="original/m.txt", pattern="x").isError  # another owner's job is not reachable
-    app._caller = lambda: (None, "a@b.c", None)
+    app._caller = lambda: (None, "a@b.c", "sid1")
+    sessions.policies["sid1"] = app.Policy.make("clear")
 
 
 def test_terse():
@@ -404,7 +407,7 @@ def test_multi_browser_routing():
     class Client:
         async def call_tool(self, name, args):
             calls.append((name, args))
-            text = '### Result\n{"remaining": %d}' % remaining[0] if name == "browser_end_session" else "### Result\n\"ok\""
+            text = '### Result\n{"remaining": %d, "blocked": 0}' % remaining[0] if name == "browser_end_session" else "### Result\n\"ok\""
             return mt.CallToolResult(content=[mt.TextContent(type="text", text=text)])
 
     bs = types.SimpleNamespace(client=Client(), owner="a@b.c", id="v", uid=1, last_used=0)
@@ -415,7 +418,8 @@ def test_multi_browser_routing():
     async def close(b):
         closed.append(b)
 
-    app._caller = lambda: (None, "a@b.c", None)
+    app._caller = lambda: (None, "a@b.c", "sid1")
+    sessions.policies["sid1"] = app.Policy.make("clear")
     sessions.get_session, sessions.close = get_session, close
     run = lambda n, **a: asyncio.run(app.call_tool(n, a))
     run("browser_end_session", browser="x")
@@ -424,7 +428,7 @@ def test_multi_browser_routing():
     run("browser_end_session", browser="x")
     assert closed == [bs]  # last browser closed -> session ends
     run("browser_end_session")
-    assert len(closed) == 2 and calls[-1][1] == {"browser": "x"}  # no id: no upstream call
+    assert len(closed) == 2 and calls[-1] == ("browser_end_session", {})  # no id: ends them all (and reports the blocked count)
     run("browser_request_human_help", browser="x", reason="r")
     assert calls[-1] == ("browser_bring_to_front", {"browser": "x"})
     assert app.FILE_TOOLS["browser_storage_state"] and "browser_run_code_unsafe" not in app.FILE_TOOLS
@@ -496,3 +500,66 @@ if __name__ == "__main__":
         if n.startswith("test_"):
             f()
     print("ok")
+
+
+def test_open_session_gate_and_get_session():
+    import json
+    import app
+    from mcp import types as mt
+    app._caller = lambda: (None, "a@b.c", "sid-gate")
+    sessions.policies.clear()
+    run = lambda n, **a: asyncio.run(app.call_tool(n, a))
+    text = lambda r: r.content[0].text
+    for name, args in (("browser_navigate", {"url": "x"}), ("ingest_page", {"url": "x"}), ("list_files", {"job_id": "j"}),
+                       ("browser_set_policy", {"policy": {}})):
+        r = run(name, **args)
+        assert r.isError, name  # fail closed before open_session; browser_set_policy is never client-callable
+    # get_session works before open_session and equals the no-argument defaults
+    before = json.loads(text(run("get_session")))
+    assert before["opened"] is False and before["egress"] == app.EGRESS
+    r = run("open_session")
+    after = json.loads(text(r))
+    assert after == {**before, "opened": True} and not r.isError
+    assert json.loads(text(run("get_session"))) == after
+    r = run("open_session", media=True)  # the policy cannot change
+    assert r.isError and json.loads(text(run("get_session"))) == after
+    assert run("open_session", allow=["nonsense"]).isError
+    # allow / deny land in the effective lists
+    app._caller = lambda: (None, "a@b.c", "sid-2")
+    s = json.loads(text(run("open_session", media=False, allow=["image/svg+xml"], deny=["text/csv"])))
+    assert s["media"] is False and "image/svg+xml" in s["allowed_content_types"] and s["denied_content_types"] == ["text/csv"]
+    # tools exposed to clients: open_session / get_session take no way to change policy via get_session; set_policy is hidden
+    sessions._tools_cache = [mt.Tool(name=n, inputSchema={"type": "object"}) for n in ("browser_navigate", "browser_set_policy")]
+    names = [t.name for t in asyncio.run(app.list_tools())]
+    assert {"open_session", "get_session"} <= set(names) and "browser_set_policy" not in names
+    assert next(t for t in asyncio.run(app.list_tools()) if t.name == "get_session").inputSchema["properties"] == {}
+    sessions.policies.clear()
+
+
+def test_ingest_page_blocks_media_on_nomedia_session(monkeypatch):
+    import app
+    import fetch
+    from toolserver.mediapolicy import Policy
+
+    class Resp:
+        headers = {"Content-Type": "image/png"}
+        closed = False
+
+        @property
+        def content(self):
+            raise AssertionError("body must not be read")
+
+        def raise_for_status(self):
+            pass
+
+        def close(self):
+            self.closed = True
+
+    resp = Resp()
+    monkeypatch.setattr(fetch, "_request", lambda *a, **k: resp)
+    monkeypatch.setattr(fetch, "content_type", lambda *a, **k: "image/png")
+    with pytest.raises(ValueError, match="blocked: media disabled"):
+        asyncio.run(app._ingest_page("a@b.c", "http://x/a.png", None, None, Policy.make("tor")))
+    assert resp.closed
+    with pytest.raises(ValueError, match="blocked"):
+        fetch.download("http://x/a.png", Policy.make("clear", deny=["image/png"]))

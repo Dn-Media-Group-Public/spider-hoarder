@@ -53,6 +53,8 @@ if [ -z "$(id_of users username "$USERNAME" || true)" ]; then
   $K create users -r "$REALM" -s username="$USERNAME" -s enabled=true -s email="$EMAIL" \
      -s emailVerified=true -s firstName=Initial -s lastName=User
 fi
+# the gateway requires an email claim: also fix a user that exists without one
+$K update "users/$(id_of users username "$USERNAME")" -r "$REALM" -s email="$EMAIL" -s emailVerified=true -s firstName=Initial -s lastName=User
 $K set-password -r "$REALM" --username "$USERNAME" --new-password "$KC_USER_PASSWORD"
 
 echo "Realm '$REALM' ready. Issuer: $KC_URL/realms/$REALM  user: $USERNAME"

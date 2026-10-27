@@ -10,6 +10,7 @@ import asyncio
 import contextlib
 import html
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -36,9 +37,11 @@ import fetch
 import ports
 import sessions
 import storage
+from toolserver.mediapolicy import Policy
 from toolserver.textcap import DEFAULT_TEXT_CAP
 
 EGRESS = sessions.EGRESS
+log = logging.getLogger("app")
 DEFAULT_TEXT_LENGTH = 20000  # chars; keeps get_file_text results LLM-sized
 PUBLIC_HOST = os.environ["PUBLIC_HOST"]
 SCHEME = os.environ.get("PUBLIC_SCHEME", "https")  # TLS ends at the load balancer; dev uses http
@@ -102,7 +105,8 @@ mcp = FastMCP(
         "terse/<name>.md is an outline (headings, links, images) of parsed/<name>.md; simplified/<name>.md is an "
         "automatic main-content extraction that may omit text. Before browser_save_page, use browser_find to "
         "locate the main content element and pass its ref as `target`. "
-        "Call browser_end_session when finished."
+        "Call browser_end_session when finished. "
+        "FIRST call open_session (after asking the user about security settings): every other tool fails until then."
     ),
     token_verifier=auth.KeycloakVerifier(
         OIDC_ISSUER, os.environ.get("MCP_SCOPE", ""),
@@ -127,7 +131,21 @@ BROWSER_ARG = {"browser": "Browser id from browser_start_session; omit for the s
 SAVE_TARGET_ARG = "Element to convert: a ref from browser_snapshot/browser_find, or a unique selector; omit for the whole page"
 
 
+_MIME_LIST = {"type": "array", "items": {"type": "string"}}
 EXTRA_TOOLS = [
+    types.Tool(name="open_session", inputSchema={"type": "object", "properties": {
+                   "media": {"type": "boolean", "description": "true = load images, video, audio and other media; false = never request or download them. "
+                             "Default: false on Tor and I2P, true on clear."},
+                   "allow": {**_MIME_LIST, "description": "Extra content types allowed for direct navigation/downloads, e.g. ['image/svg+xml']"},
+                   "deny": {**_MIME_LIST, "description": "Content types always blocked for direct navigation/downloads, e.g. ['text/geojson']"}}},
+               description="Set this session's media policy. Must be the FIRST tool call and can be called ONCE; the policy cannot be "
+               "changed afterwards, and every other tool fails until it has been called. Browsing the dark web can expose the user to legal "
+               "risk if images, video or audio are even loaded, so BEFORE calling this, explicitly ask the user about their security "
+               "settings. Call it before any browser call. Pass `allow` / `deny` only if the user asked for a specific security setup; "
+               "otherwise call it with no arguments for the defaults. Returns the effective policy (same as get_session)."),
+    types.Tool(name="get_session", inputSchema={"type": "object", "properties": {}},
+               description="Read-only: the session's effective media policy (`opened` is false until open_session has been called, "
+               "and the rest are then the defaults open_session() would apply). Subagents: call this to see what was decided; do not call open_session."),
     types.Tool(name="browser_request_human_help", inputSchema=_schema(BROWSER_ARG, reason="What the user needs to do, e.g. 'solve the CAPTCHA'"),
                description="Get a link that lets the user see and control THIS conversation's browser in a new tab. "
                "Use it for a CAPTCHA, bot challenge, login, 2FA or anything else a human should do. Give the link to "
@@ -178,7 +196,7 @@ EXTRA_TOOLS = [
     types.Tool(name="get_file_url", inputSchema=_schema(job_id="Job id", path="File path from the manifest"),
                description="Mint a short-lived opaque signed URL for one blob (original or parsed)."),
 ]
-HIDDEN = {"browser_install", "browser_bring_to_front"}
+HIDDEN = {"browser_install", "browser_bring_to_front", "browser_set_policy"}  # the last is the gateway's own call at session start
 
 
 def _caller() -> tuple[Any, str, str | None]:
@@ -429,17 +447,18 @@ async def _file_tool(bs: sessions.BrowserSession, name: str, arguments: dict) ->
     return _text(json.dumps({"job_id": job_id, **result}))
 
 
-async def _ingest_page(owner: str, url: str, live: sessions.BrowserSession | None = None, target: str | None = None) -> dict:
+async def _ingest_page(owner: str, url: str, live: sessions.BrowserSession | None = None, target: str | None = None,
+                       policy: Policy | None = None) -> dict:
     job_id = _new_job_id()
     kw = {}
     if live:  # preflight/download as the real browser session: its cookies, its Tor circuit / I2P destination
         kw = {"cookies": await sessions.cookies_for(live, url), "socks_port": ports.socks_port(live.uid)}
     ctype = await asyncio.to_thread(fetch.content_type, url, **kw)
     if "text/html" in ctype or ctype == "":
-        html, _ = await sessions.fetch_html(owner, url, live, target)
+        html, _ = await sessions.fetch_html(owner, url, live, target, policy)
         raw, ctype = html.encode(), "text/html"
     else:
-        raw, ctype = await asyncio.to_thread(fetch.download, url, **kw)
+        raw, ctype = await asyncio.to_thread(fetch.download, url, policy, **kw)
     filename = os.path.basename(url.split("?")[0]) or "page"
     key = _key(owner, job_id)
     result = _store_and_parse(key, filename, raw, ctype, url)
@@ -490,18 +509,34 @@ async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
     if name in HIDDEN:
         return _text(f"{name} is disabled", True)
     try:
+        if name == "open_session":
+            if not sid or sid in sessions.policies:
+                return _text("open_session was already called: the media policy of a session cannot change", True)
+            sessions.policies[sid] = Policy.make(EGRESS, args.get("media"), args.get("allow"), args.get("deny"))
+            log.info("session %s opened: %s", sid[:8], sessions.policies[sid].summary(EGRESS, True))
+            return _text(json.dumps(sessions.policies[sid].summary(EGRESS, True)))
+        if name == "get_session":
+            return _text(json.dumps((sessions.policies.get(sid or "") or Policy.make(EGRESS)).summary(EGRESS, sid in sessions.policies)))
+        if sid not in sessions.policies:  # fail closed: the agent cannot skip the question
+            return _text("session not opened: ask the user about security settings, then call open_session first", True)
         if name == "browser_end_session":
             bs = await sessions.get_session(mcp_session, owner, create=False)
-            if bs and args.get("browser"):
-                res = await bs.client.call_tool("browser_end_session", {"browser": args["browser"]})
-                if res.isError or sessions.parse_result(sessions.result_text(res))["remaining"] > 0:
-                    return res
+            blocked = None
             if bs:
+                res = await bs.client.call_tool("browser_end_session", {k: args[k] for k in ("browser",) if args.get(k)})
+                if res.isError and args.get("browser"):
+                    return res
+                if not res.isError:
+                    info = sessions.parse_result(sessions.result_text(res))
+                    if args.get("browser") and info["remaining"] > 0:
+                        return res
+                    blocked = info["blocked"]
                 await sessions.close(bs)  # no id, or the last browser was closed
-            return _text("Browser session closed.")
+            return _text("Browser session closed." + (f" Media policy blocked {blocked} request(s)." if blocked else ""))
         if name == "ingest_page":
             return _text(json.dumps(await _ingest_page(
-                owner, args["url"], await sessions.get_session(mcp_session, owner, create=False), args.get("target"))))
+                owner, args["url"], await sessions.get_session(mcp_session, owner, create=False), args.get("target"),
+                sessions.policies[sid])))
         if name == "get_upload_link":
             job_id = _new_job_id()
             token = blobtoken.mint(_key(owner, job_id), UPLOAD_MARK, ttl=3600)

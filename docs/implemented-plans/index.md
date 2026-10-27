@@ -13,3 +13,4 @@ Back to the [documentation index](../index.md). Open plans: [plans](../plans/ind
 - [Scale `research-*` containers (sticky replicas on Swarm)](research-replicas.md)
 - [I2P egress (`/i2p/mcp`)](i2p-egress.md)
 - [More archive formats and binary structured data → JSON](more-file-formats.md)
+- [No-media sessions (`open_session`, block media at request and header level)](no-media-sessions.md)

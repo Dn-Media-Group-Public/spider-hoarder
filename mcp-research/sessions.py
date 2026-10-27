@@ -22,6 +22,7 @@ import cmp_rules
 import fetch
 import ports
 from pool import Pool, Sessiond
+from toolserver.mediapolicy import Policy
 
 log = logging.getLogger("sessions")
 
@@ -61,6 +62,7 @@ class BrowserSession:
     task: asyncio.Task | None = None
     last_used: float = field(default_factory=time.time)
     sid: str | None = None  # SDK MCP session id (no replica prefix)
+    policy: Policy | None = None  # the MCP session's no-media policy, installed in the toolserver at start
 
 
 @dataclass
@@ -73,6 +75,7 @@ class Reservation:
 
 by_mcp: dict[int, BrowserSession] = {}   # id(ServerSession) -> session
 by_view: dict[str, BrowserSession] = {}  # view id -> session
+policies: dict[str, Policy] = {}         # MCP session id -> policy chosen by open_session (immutable; outlives its browsers)
 reserved: dict[str, Reservation] = {}    # MCP session id -> uid held for its first browser
 conn: dict[str, list] = {}               # MCP session id -> [requests in flight (open SSE stream counts), last activity]
 _lock = asyncio.Lock()
@@ -110,6 +113,10 @@ async def _run_client(bs: BrowserSession) -> None:
         async with streamablehttp_client(url, headers={"Host": UPSTREAM_HOST}) as (r, w, _):
             async with ClientSession(r, w) as cs:
                 await cs.initialize()
+                if bs.policy:
+                    res = await cs.call_tool("browser_set_policy", {"policy": bs.policy.to_json()})
+                    if res.isError:
+                        raise RuntimeError(result_text(res))
                 bs.client = cs
                 bs.ready.set()
                 log.info("session %s started for %s on uid %s", bs.id[:8], bs.owner, bs.uid)
@@ -181,15 +188,17 @@ async def unreserve(sid: str) -> None:
 async def end_mcp_session(sid: str) -> None:
     """MCP session closed (DELETE): free its reservation and any browser."""
     conn.pop(sid, None)
+    policies.pop(sid, None)
     await unreserve(sid)
     for bs in [b for b in by_mcp.values() if b.sid == sid]:
         await close(bs)
 
 
-async def new_session(owner: str, mcp_session: Any = None, uid: int | None = None, sid: str | None = None) -> BrowserSession:
+async def new_session(owner: str, mcp_session: Any = None, uid: int | None = None, sid: str | None = None,
+                      policy: Policy | None = None) -> BrowserSession:
     """Start a session on a uid (taken here unless reserved); registered only if mcp_session given."""
     uid = pool.take() if uid is None else uid
-    bs = BrowserSession(owner=owner, uid=uid, mcp_session=mcp_session, sid=sid)
+    bs = BrowserSession(owner=owner, uid=uid, mcp_session=mcp_session, sid=sid, policy=policy)
     if mcp_session is not None:
         by_mcp[id(mcp_session)] = bs
         by_view[bs.id] = bs
@@ -216,7 +225,7 @@ async def get_session(mcp_session: Any, owner: str, sid: str | None = None, crea
         # reserve now, which can fail with "capacity reached"
         r = reserved.pop(sid or "", None)
         uid = r.uid if r else reserve(owner)
-        return await new_session(owner, mcp_session, uid, sid)
+        return await new_session(owner, mcp_session, uid, sid, policies.get(sid or ""))
 
 
 async def upstream_tools() -> list[types.Tool]:
@@ -286,7 +295,8 @@ async def cookies_for(bs: BrowserSession, url: str) -> dict:
     return {c["name"]: c["value"] for c in parse_result(result_text(res))}
 
 
-async def fetch_html(owner: str, url: str, live: BrowserSession | None = None, target: str | None = None) -> tuple[str, str]:
+async def fetch_html(owner: str, url: str, live: BrowserSession | None = None, target: str | None = None,
+                     policy: Policy | None = None) -> tuple[str, str]:
     """One-shot: navigate, read HTML. Without `live`: ephemeral session (own uid), destroyed after.
     With `live`: a temporary browser (window) in that session, so its cookies apply but nobody's page is clobbered."""
     if live:
@@ -298,7 +308,7 @@ async def fetch_html(owner: str, url: str, live: BrowserSession | None = None, t
             return await _navigate_read(live, url, browser, target)
         finally:
             await live.client.call_tool("browser_end_session", {"browser": browser})
-    bs = await new_session(owner)
+    bs = await new_session(owner, policy=policy)
     try:
         return await _navigate_read(bs, url, None, target)
     finally:

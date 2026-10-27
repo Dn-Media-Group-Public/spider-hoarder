@@ -10,6 +10,7 @@ import requests
 
 import netguard
 import ports
+from toolserver.mediapolicy import Policy, blocked_message
 
 CHROME_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -47,10 +48,17 @@ def content_type(url: str, **kw) -> str:
     return resp.headers.get("Content-Type", "")
 
 
-def download(url: str, **kw) -> tuple[bytes, str]:
-    resp = _request("GET", url, timeout=60, **kw)
-    resp.raise_for_status()
-    return resp.content, resp.headers.get("Content-Type", "")
+def download(url: str, policy: Policy | None = None, **kw) -> tuple[bytes, str]:
+    """With a no-media `policy`, a blocked Content-Type closes the connection before the body is read."""
+    resp = _request("GET", url, timeout=60, stream=True, **kw)
+    try:
+        resp.raise_for_status()
+        ctype = resp.headers.get("Content-Type", "")
+        if policy and policy.content_type_blocked(ctype):
+            raise ValueError(blocked_message(ctype))
+        return resp.content, ctype
+    finally:
+        resp.close()
 
 
 def i2p_ready(socks_port: int, wait: float = 240) -> bool:

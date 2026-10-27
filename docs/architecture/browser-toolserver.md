@@ -40,7 +40,18 @@ original, checked by `test_toolserver.py`) plus a `browser` property. Added: 15 
 - `browser_pdf_save` uses CDP `Page.printToPDF` (Playwright's `page.pdf` is headless-only).
 - Files (screenshots, PDFs, `filename=` outputs) go to `$HOME/out`; the gateway copies them into jobs ([Jobs](jobs-and-storage.md)).
 
+## Media policy
+Fail closed: until the internal one-shot `browser_set_policy` (not in the tool list, hidden by the gateway, called by it right after
+`initialize`) has run, every tool errors without even launching Chromium. It stores the `Policy` (`toolserver/mediapolicy.py`) on the
+`Registry` and, when it blocks anything, installs **layer A** (`context.route("**/*")` aborting `image`, `media`, `object`, `imageset`,
+`font` requests, so they never leave the browser) and **layer D** (CDP `Fetch.enable`, response stage, `Document` resources only, on
+every page including later ones: `Content-Type` is checked at the headers and the request is failed before the body is read).
+Blocked requests are logged in `Registry.blocked`, marked in `browser_network_requests`, and counted by `browser_end_session`
+(`{"remaining", "blocked"}`). Limits: a popup's very first request can precede its hook; cross-origin (out-of-process) iframes are covered
+by layer A for subresources but not by layer D; a lying `Content-Type` passes. See [Session isolation](session-isolation.md#no-media-sessions).
+See also: [Plan: No-media sessions](../implemented-plans/no-media-sessions.md)
+
 ## Gateway interplay
-`browser_end_session` upstream returns `{"remaining": n}`; the gateway ends the session at 0. `browser_request_human_help` raises the
+`browser_end_session` upstream returns `{"remaining": n, "blocked": m}`; the gateway ends the session at 0. `browser_request_human_help` raises the
 right window through a hidden `browser_bring_to_front`. Cookies for the gateway's own downloads come from `browser_cookie_list`;
 `fetch_html` uses a temporary browser so it cannot clobber anyone's page.

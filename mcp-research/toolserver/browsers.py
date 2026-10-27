@@ -10,6 +10,8 @@ import secrets
 
 from playwright.async_api import BrowserContext, Page, async_playwright
 
+from .mediapolicy import Policy
+
 MAIN = "main"
 WINDOW = {"left": 0, "top": 0, "width": 1440, "height": 900}
 
@@ -48,6 +50,9 @@ class Registry:
         self._ignore = False  # pages created for internal use (storage state) stay unattributed
         self._tasks: set[asyncio.Task] = set()
         self._new = asyncio.Lock()  # only serialises window creation (claims), not tool calls
+        self.policy: Policy | None = None  # set once by set_policy; until then every tool but that one fails
+        self.blocked: list[dict] = []  # {url, kind, layer}: requests the media policy stopped
+        self.blocked_urls: set[str] = set()
         ctx.on("page", self._on_page)
         for p in ctx.pages:  # the initial page is main's first tab
             self._add(MAIN, p)
@@ -84,6 +89,58 @@ class Registry:
             self.cur.pop(bid, None)
         elif self.cur.get(bid) is page:
             self.cur[bid] = self.tabs[bid][-1]
+
+    async def set_policy(self, policy: Policy) -> None:
+        """One-shot: install layer A (route on resource type) and layer D (CDP Fetch on Content-Type of documents)."""
+        if self.policy:
+            raise ToolError("policy already set")
+        self.policy = policy
+        if policy.active:
+            if not policy.media:
+                await self.ctx.route("**/*", self._route)
+            self.ctx.on("page", lambda p: self._spawn(self._hook(p)))
+            for p in self.ctx.pages:
+                await self._hook(p)
+
+    def _spawn(self, coro) -> None:
+        t = asyncio.create_task(coro)
+        self._tasks.add(t)
+        t.add_done_callback(self._tasks.discard)
+
+    def _block(self, url: str, kind: str, layer: str) -> None:
+        self.blocked.append({"url": url, "kind": kind, "layer": layer})
+        self.blocked_urls.add(url)
+
+    async def _route(self, route) -> None:
+        r = route.request
+        if self.policy.resource_blocked(r.resource_type):
+            self._block(r.url, r.resource_type, "A")
+            await route.abort("blockedbyclient")
+        else:
+            await route.continue_()
+
+    async def _hook(self, page: Page) -> None:
+        try:
+            cdp = await self.ctx.new_cdp_session(page)
+            cdp.on("Fetch.requestPaused", lambda ev: self._spawn(self._paused(cdp, page, ev)))
+            await cdp.send("Fetch.enable", {"patterns": [{"urlPattern": "*", "resourceType": "Document", "requestStage": "Response"}]})
+        except Exception:  # noqa: BLE001  the page closed under us
+            pass
+
+    async def _paused(self, cdp, page: Page, ev: dict) -> None:
+        status = ev.get("responseStatusCode")
+        ctype = next((h["value"] for h in ev.get("responseHeaders", []) if h["name"].lower() == "content-type"), None)
+        bodyless = status is None or 300 <= status < 400 or status in (204, 205)  # redirects and empty replies carry no media
+        blocked = not bodyless and self.policy.content_type_blocked(ctype)
+        if blocked:
+            self._block(ev["request"]["url"], ctype or "", "D")
+        try:
+            if blocked:
+                await cdp.send("Fetch.failRequest", {"requestId": ev["requestId"], "errorReason": "BlockedByClient"})
+            else:
+                await cdp.send("Fetch.continueRequest", {"requestId": ev["requestId"]})
+        except Exception:  # noqa: BLE001  the page closed or navigated away
+            pass
 
     async def settle(self) -> None:
         """Wait for popups opened by the last action to be attributed."""

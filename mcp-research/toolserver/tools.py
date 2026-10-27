@@ -4,6 +4,7 @@ Schemas for the playwright-mcp tools come from tools.json (from tools.json.upstr
 
 import asyncio
 import base64
+import contextlib
 import json
 import mimetypes
 import os
@@ -13,6 +14,7 @@ import time
 from playwright.async_api import Error as PWError
 
 from .browsers import MAIN, Registry, ToolError, locator
+from .mediapolicy import Policy, blocked_message
 from .textcap import DEFAULT_TEXT_CAP, cap_found_line, cap_snapshot
 
 OUT = os.environ.get("TOOLSERVER_OUT", "out")
@@ -101,7 +103,15 @@ async def navigate(R, bid, a):
     url = a["url"]
     if not re.match(r"^[a-z][a-z0-9+.-]*:", url, re.I):
         url = "https://" + url
-    await R.page(bid).goto(url)
+    try:
+        await R.page(bid).goto(url)
+    except PWError as e:
+        if "ERR_BLOCKED_BY_CLIENT" in str(e) and (b := next((b for b in reversed(R.blocked) if b["url"] == url), None)):
+            if not R.page(bid).url.startswith("chrome-error:"):  # let Chromium commit its error page, or the next goto is "interrupted"
+                with contextlib.suppress(PWError):
+                    await R.page(bid).wait_for_url("chrome-error://*", timeout=3000)
+            raise ToolError(blocked_message(b["kind"]))
+        raise
     return await post(R, bid)
 
 
@@ -376,9 +386,10 @@ async def console_messages(R, bid, a):
 STATIC = {"image", "font", "stylesheet", "script", "media"}
 
 
-def net_line(i, e):
+def net_line(i, e, blocked=()):
     r, resp = e["req"], e["resp"]
-    return f"{i}. [{r.method}] {r.url} => " + (f"[{resp.status}] {resp.status_text}" if resp else f"[FAILED] {r.failure}")
+    return f"{i}. [{r.method}] {r.url} => " + (f"[{resp.status}] {resp.status_text}" if resp
+                                              else "[BLOCKED] blocked: media policy" if r.url in blocked else f"[FAILED] {r.failure}")
 
 
 @tool("browser_network_requests")
@@ -391,7 +402,7 @@ async def network_requests(R, bid, a):
     start, end = (st.net_mark if a.get("new") else 0), len(st.network)
     if a.get("new"):
         st.net_mark = end  # moves whether or not filter/static hide some of them
-    lines = [net_line(i, e) for i, e in enumerate(st.network[start:end], start + 1)
+    lines = [net_line(i, e, R.blocked_urls) for i, e in enumerate(st.network[start:end], start + 1)
              if (a.get("static") or not e["resp"] or e["resp"].ok is False or e["req"].resource_type not in STATIC)
              and (not rx or rx.search(e["req"].url))]
     if a.get("new") and not lines:
@@ -438,7 +449,7 @@ async def network_request(R, bid, a):
         os.makedirs(os.path.join(root, os.path.dirname(rel)), exist_ok=True)
         with open(os.path.join(root, rel), "wb") as f:
             f.write(data)
-    return file_result("Network request", os.path.basename(root)) + "\n" + net_line(a["index"], e)
+    return file_result("Network request", os.path.basename(root)) + "\n" + net_line(a["index"], e, R.blocked_urls)
 
 
 # --------------------------------------------------------------------- tabs
@@ -495,7 +506,14 @@ async def start_session(R, bid, a):
 @tool("browser_end_session")
 async def end_session(R, bid, a):
     remaining = await R.end(a.get("browser"))
-    return result(json.dumps({"remaining": remaining}))
+    return result(json.dumps({"remaining": remaining, "blocked": len(R.blocked)}))
+
+
+@tool("browser_set_policy")
+async def set_policy(R, bid, a):
+    """Internal (the gateway calls it once at session start; not in the tool list). Locks the media policy."""
+    await R.set_policy(Policy.from_json(a["policy"]))
+    return result("ok")
 
 
 @tool("browser_bring_to_front")

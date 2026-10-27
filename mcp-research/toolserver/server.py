@@ -113,8 +113,10 @@ def build(port: int) -> FastMCP:
         try:
             if name not in tools.HANDLERS:
                 raise tools.ToolError(f"unknown tool {name}")
+            if name != "browser_set_policy" and not (_reg and _reg.policy):  # fail closed: no tool runs before the media policy is set
+                raise tools.ToolError("media policy not set: call open_session first")
             R = await registry()
-            bid = None if name in ("browser_start_session", "browser_end_session") else await R.resolve(args.get("browser"))
+            bid = None if name in ("browser_start_session", "browser_end_session", "browser_set_policy") else await R.resolve(args.get("browser"))
             return reply(await tools.HANDLERS[name](R, bid, args))
         except Exception as e:  # noqa: BLE001
             msg = str(e).split("\nCall log:")[0].strip()

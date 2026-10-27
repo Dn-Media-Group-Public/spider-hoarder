@@ -10,6 +10,7 @@ import pytest
 
 from toolserver import tools
 from toolserver.browsers import launch
+from toolserver.mediapolicy import Policy
 from toolserver.server import GOLDEN, TOOLS
 
 PAGE = ("data:text/html,<title>T</title><input id=i><button onclick=\"document.title='clicked'\">Go</button>"
@@ -27,6 +28,7 @@ def env(tmp_path):
     async def mk():
         return await launch({"userDataDir": str(tmp_path / "p"), "args": ["--no-sandbox"], "headless": True})
     pw, R = run_loop.run_until_complete(mk())
+    run_loop.run_until_complete(R.set_policy(Policy.make("clear")))
     yield R
     run_loop.run_until_complete(R.ctx.close())
     run_loop.run_until_complete(pw.stop())
@@ -37,7 +39,7 @@ run_loop = asyncio.new_event_loop()
 
 def call(R, name, /, bid=None, **a):
     async def go():
-        b = None if name in ("browser_start_session", "browser_end_session") else await R.resolve(bid)
+        b = None if name in ("browser_start_session", "browser_end_session", "browser_set_policy") else await R.resolve(bid)
         return await tools.HANDLERS[name](R, b, a)
     return run_loop.run_until_complete(go())
 
@@ -205,10 +207,10 @@ def test_two_browsers_are_isolated_and_share_logins(env):
     call(R, "browser_cookie_set", name="sid", value="1", domain="example.org", path="/")
     assert val(call(R, "browser_cookie_get", bid=other, name="sid"))["value"] == "1"
     assert val(call(R, "browser_cookie_list", url="https://example.org/"))[0]["name"] == "sid"
-    assert val(call(R, "browser_end_session", browser=other)) == {"remaining": 1}
+    assert val(call(R, "browser_end_session", browser=other)) == {"remaining": 1, "blocked": 0}
     with pytest.raises(tools.ToolError):
         call(R, "browser_tabs", bid=other, action="list")
-    assert val(call(R, "browser_end_session")) == {"remaining": 0}
+    assert val(call(R, "browser_end_session")) == {"remaining": 0, "blocked": 0}
     call(R, "browser_navigate", url="data:text/html,<title>again</title>")  # main comes back on demand
 
 
@@ -251,3 +253,109 @@ def test_storage_and_console(env):
     state = {"cookies": [], "origins": [{"origin": "https://s.test", "localStorage": [{"name": "x", "value": "y"}]}]}
     call(R, "browser_set_storage_state", state=state)
     assert val(call(R, "browser_localstorage_get", key="x")) == "y"
+
+
+# ------------------------------------------------------------ no-media policy
+@pytest.fixture
+def media_site():
+    """Local site serving a page full of media plus direct media URLs; records which paths were requested."""
+    import http.server
+    import threading
+    hits = []
+    PNG = bytes(range(64))
+    pages = {
+        "/": ("text/html", b"<link rel=icon href=/fav.png><style>@font-face{font-family:f;src:url(/f.woff2)}"
+              b"div{background:url(/bg.png);font-family:f}</style><title>site</title><img src=/a.png><img src=/s.svg>"
+              b"<video src=/v.mp4></video><div>hello</div><iframe src=/i.png></iframe>"),
+        "/a.png": ("image/png", PNG), "/i.png": ("image/png", PNG), "/bg.png": ("image/png", PNG), "/fav.png": ("image/png", PNG), "/v.mp4": ("video/mp4", PNG),
+        "/f.woff2": ("font/woff2", PNG), "/s.svg": ("image/svg+xml", b"<svg xmlns='http://www.w3.org/2000/svg'/>"),
+        "/data.json": ("application/json", b"{}"), "/plain": ("text/plain", b"x"),
+    }
+
+    class H(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            hits.append(self.path)
+            ct, body = pages.get(self.path, ("text/html", b"nope"))
+            self.send_response(200 if self.path in pages else 404)
+            self.send_header("Content-Type", ct)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *a):
+            pass
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{srv.server_port}", hits
+    srv.shutdown()
+
+
+@pytest.fixture
+def nomedia(tmp_path):
+    """Like env, but the policy is chosen by the test (R.policy is unset on entry)."""
+    tools.OUT = str(tmp_path)
+    pw, R = run_loop.run_until_complete(launch({"userDataDir": str(tmp_path / "p"), "args": ["--no-sandbox"], "headless": True}))
+    yield R
+    run_loop.run_until_complete(R.ctx.close())
+    run_loop.run_until_complete(pw.stop())
+
+
+def set_policy(R, **kw):
+    call(R, "browser_set_policy", policy=Policy.make("tor", **kw).to_json())
+
+
+def test_policy_is_one_shot_and_not_listed(nomedia):
+    set_policy(nomedia)
+    with pytest.raises(Exception, match="already set"):
+        set_policy(nomedia)
+    assert "browser_set_policy" not in {t.name for t in TOOLS}
+
+
+def test_nomedia_blocks_subresources_and_media_navigation(nomedia, media_site):
+    R, (base, hits) = nomedia, media_site
+    set_policy(R)
+    call(R, "browser_navigate", url=base + "/")
+    call(R, "browser_wait_for", time=1)
+    assert "hello" in call(R, "browser_snapshot")
+    assert set(hits) <= {"/", "/i.png"}, hits  # img, video, css background, favicon, font: never requested; the iframe is stopped at its headers (layer D)
+    with pytest.raises(Exception, match=r"blocked: media disabled for this session \(image/png\)"):
+        call(R, "browser_navigate", url=base + "/a.png")
+    assert "/a.png" in hits  # layer D sees headers, so the request itself is made (documented limit)
+    call(R, "browser_navigate", url=base + "/data.json")
+    call(R, "browser_navigate", url=base + "/plain")
+    assert "x" in call(R, "browser_evaluate", function="() => document.body.innerText")
+    call(R, "browser_navigate", url=base + "/")
+    net = call(R, "browser_network_requests", static=True)
+    assert "/a.png => [BLOCKED] blocked: media policy" in net
+    assert val(call(R, "browser_end_session"))["blocked"] >= 6
+
+
+def test_allow_svg_navigation_not_img_tag(nomedia, media_site):
+    R, (base, hits) = nomedia, media_site
+    set_policy(R, allow=["image/svg+xml"])
+    call(R, "browser_navigate", url=base + "/s.svg")  # navigation: allowed at layer D
+    call(R, "browser_navigate", url=base + "/")
+    call(R, "browser_wait_for", time=1)
+    assert hits.count("/s.svg") == 1  # the <img src=s.svg> at layer A never loaded
+    with pytest.raises(Exception, match="blocked"):
+        call(R, "browser_navigate", url=base + "/a.png")
+
+
+def test_second_window_inherits_policy(nomedia, media_site):
+    R, (base, hits) = nomedia, media_site
+    set_policy(R)
+    b2 = val(call(R, "browser_start_session"))
+    call(R, "browser_navigate", bid=b2, url=base + "/")
+    call(R, "browser_wait_for", bid=b2, time=1)
+    assert set(hits) <= {"/", "/i.png"}
+    with pytest.raises(Exception, match="blocked"):
+        call(R, "browser_navigate", bid=b2, url=base + "/v.mp4")
+
+
+def test_deny_with_media_true(nomedia, media_site):
+    R, (base, hits) = nomedia, media_site
+    call(R, "browser_set_policy", policy=Policy.make("clear", deny=["text/plain"]).to_json())
+    call(R, "browser_navigate", url=base + "/a.png")  # media allowed
+    with pytest.raises(Exception, match="blocked"):
+        call(R, "browser_navigate", url=base + "/plain")

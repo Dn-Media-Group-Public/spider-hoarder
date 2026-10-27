@@ -27,6 +27,7 @@ if [ "$DEV" -eq 1 ]; then
   echo "Deploying in DEV mode (local Keycloak, http://localhost, no TLS)"
   export PUBLIC_HOST=localhost:$HTTP_PORT PUBLIC_SCHEME=http
   export OIDC_ISSUER="http://localhost:${KC_DEV_PORT:-8085}/realms/${KC_REALM:-newsroom}"
+  export KC_SETUP_HASH=$(md5sum keycloak/setup.sh | cut -c1-8)
   FILES+=(-c docker-compose.dev.yml)
   REQUIRED+=(KC_USER_PASSWORD)
 fi
