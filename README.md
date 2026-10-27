@@ -20,10 +20,11 @@ Documentation (architecture, API, design decisions): [docs/index.md](docs/index.
 (features marked ^ exist in plain playwright-mcp)
 
 * Uses a real headed chromium browser - javascript rendered pages work fine ^
-* Browser-in-browser view (uses vnc) whenever the agent gets stuck on a captcha
+* Browser-in-browser view (using [noVNC](https://novnc.com/)) whenever the agent gets stuck on a captcha
 * Converts everything to markdown using [markitdown](https://github.com/microsoft/markitdown)
 * Sessions live in isolated docker containers and all storage is cleared after use
-* TOR support for anonymous browsing and accessing .onion sites
+* [TOR](https://www.torproject.org/) support for anonymous browsing and accessing .onion sites
+* [i2p](https://i2p.net/) support
 * Browser automation using [playwright](https://playwright.dev/)
 * SSO integration (OAUth2)
 
