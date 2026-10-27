@@ -25,6 +25,7 @@ Documentation (architecture, API, design decisions): [docs/index.md](docs/index.
 * Sessions live in isolated docker containers and all storage is cleared after use
 * [TOR](https://www.torproject.org/) support for anonymous browsing and accessing .onion sites
 * [i2p](https://i2p.net/) support
+* Configurable optional media blocking (images, movies etc)
 * Browser automation using [playwright](https://playwright.dev/)
 * SSO integration (OAUth2)
 
