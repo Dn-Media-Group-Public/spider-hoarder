@@ -44,6 +44,15 @@ adb_ wait-for-device
 for i in $(seq 1 180); do [ "$(adb_ shell getprop sys.boot_completed </dev/null | tr -d '\r')" = 1 ] && break; sleep 2; done
 [ "$(adb_ shell getprop sys.boot_completed </dev/null | tr -d '\r')" = 1 ] || { echo "guest did not boot" >&2; exit 1; }
 
+# No Bluetooth in a slot. The emulator's virtual controller (netsimd) talks over loopback, which the slot firewall rejects for the
+# emulator uid (netsimd panics "failed to create signal pipe: Connection refused"; the emulator logs "no bluetooth emulation
+# available"). Here, without the firewall, it works, so the snapshot holds a Bluetooth stack that is up; restored in a slot it has no
+# controller: it aborts ("Can't start stack ... starting Controller"), restarts, and now and then a "Bluetooth keeps stopping" dialog
+# covers the screen and hides the app from uiautomator. Off, and stays off in the snapshot.
+adb_ shell cmd bluetooth_manager disable </dev/null | grep -q "disable: Success" || { echo "could not disable Bluetooth" >&2; exit 1; }
+adb_ shell cmd bluetooth_manager wait-for-state:STATE_OFF </dev/null | grep -q "Success" || { echo "Bluetooth did not turn off" >&2; exit 1; }
+[ "$(adb_ shell settings get global bluetooth_on </dev/null | tr -d '\r')" = 0 ] || { echo "bluetooth_on is not 0" >&2; exit 1; }
+
 adb_ install /opt/fdroid.apk </dev/null
 # uiautomator2 3.x pushes its jar and starts the on-device agent on demand; start it now so it is running in the snapshot
 as "$SVC_UID" env HOME=/home/svc python -c "

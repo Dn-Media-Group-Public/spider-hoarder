@@ -93,6 +93,10 @@ a second `initialize` of the same user gets `503 {"error": "full", "message": "y
 `initialize` with every slot taken gets `503 ... capacity reached; try again later` at once (the reservation is made at `initialize`).
 Ending a session (`device_end_session`, DELETE, reaper) waits for the slot's replacement: the gateway's `close()` allows `SLOT_RESET_TIMEOUT + 90 s`
 and `pool.release` finishes on its own task, so a caller that gives up cannot leave the slot `busy` in the pool.
+Bluetooth is switched off in the golden snapshot: the emulator's virtual controller (`netsimd`) needs loopback, which the slot firewall rejects for the
+emulator uid, so a restored guest with Bluetooth on crashes its stack in every session and sometimes shows "Bluetooth keeps stopping" over the app (hiding it
+from uiautomator). Wi-Fi uses the emulator's user-mode stack either way. See also: [Plan: Android KVM bring-up](../plans/android-kvm-bringup.md) (fix 29)
+
 If the slot container dies mid-session (killed, OOM, daemon restart), the gateway's upstream task ends with the connection error and every call
 in flight or made afterwards fails at once with "the device session ended unexpectedly (...)" (`sessions._Guarded`); the cleanup does not need the
 dead container: it waits for the replacement to be `free` and verifies it. The gateway-to-slot connections also use TCP keepalive and

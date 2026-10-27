@@ -172,6 +172,7 @@ async def main():
         # 3. snapshot / find / click / type / screenshot job / get_file_url / grep
         err, text = await a.call("device_snapshot")
         snap = json.loads(text)
+        first_screen = snap.get("text", "")
         check("device_snapshot job", not err and snap["files"][0]["path"].endswith("snapshot.txt"), str(snap["files"]))
         err, text = await a.call("grep_file", job_id=snap["job_id"], path=snap["files"][0]["path"], pattern="/chrome|settings|play store/i", context=0)
         check("grep_file over a snapshot job", not err and "-- line" in text, text[:100].replace("\n", " | "))
@@ -180,6 +181,7 @@ async def main():
         err, text = await a.call("device_wait_for", text="Example Domain", timeout=60)
         check("device_wait_for 'Example Domain'", not err, text[:100])
         if err:  # what is on the screen? (a fresh slot's first page load has failed before)
+            print("  first screen of the session:", first_screen[:400].replace("\n", " ; "))
             e2, t2 = await a.call("device_snapshot")
             print("  screen:", json.loads(t2).get("text", t2)[:600].replace("\n", " ; "))
             e3, t3 = await a.call("device_shell", command="ping -c1 -W3 example.com | tail -2; dumpsys connectivity | grep -i 'validated' | head -3; logcat -d -s chromium:E cr_X:E | tail -5")

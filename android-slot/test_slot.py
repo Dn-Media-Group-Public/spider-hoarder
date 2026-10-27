@@ -146,6 +146,14 @@ class _Proc:
         return self.returncode
 
 
+def test_init_turns_bluetooth_off_before_the_snapshot_is_saved():
+    """netsimd (the emulator's Bluetooth controller) cannot run behind the slot firewall, so a snapshot with Bluetooth on crashes its
+    stack after every restore (and sometimes shows 'Bluetooth keeps stopping' over the app)."""
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "init-snapshot.sh")).read()
+    assert "cmd bluetooth_manager disable" in src and "wait-for-state:STATE_OFF" in src
+    assert src.index("bluetooth_manager disable") < src.index("snapshot save clean")
+
+
 def test_emulator_is_started_without_the_nested_virtualization_dialog():
     os.environ["SLOT_SECRET"] = "s3cret"
     import slotd
@@ -318,6 +326,7 @@ if __name__ == "__main__":
     test_firewall_clear()
     test_firewall_tor()
     test_slotd_files_and_auth()
+    test_init_turns_bluetooth_off_before_the_snapshot_is_saved()
     test_emulator_is_started_without_the_nested_virtualization_dialog()
     test_watchdog_marks_dead_emulator_broken()
     test_verify_checks_packages_and_accounts_not_sdcard()
