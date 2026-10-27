@@ -6,8 +6,7 @@ Ever tried to **scrape a web site** using your LLM agent, only for it to get stu
 Spider-hoarder is an MCP server that hands every user and conversation a private, isolated,
 real (headed) Chromium that Claude drives with a full set of browser tools: navigate, click, type, snapshot, find, cookies and
 storage, screenshots, PDFs. It copes with JavaScript-heavy sites, consent walls and logins. When Claude hits a CAPTCHA or login
-it cannot pass, it sends you a link to the *same* browser (live view) to solve it, then carries on. Egress is either direct or
-anonymised through Tor.
+it cannot pass, it sends you a link to the *same* browser (live view) to solve it, then carries on. Egress is direct, anonymised through Tor, or via i2p.
 
 Pages come back as Markdown and everything bulky is stored as a *job* Claude can page through, search
 (`grep_file`) or link to, so large pages never flood its context; Claude can also fetch a URL in one shot (`ingest_page`) or have
@@ -24,7 +23,11 @@ Documentation (architecture, API, design decisions): [docs/index.md](docs/index.
 * Converts everything to markdown using [markitdown](https://github.com/microsoft/markitdown)
 * Sessions live in isolated docker containers and all storage is cleared after use
 * [TOR](https://www.torproject.org/) support for anonymous browsing and accessing .onion sites
-* [i2p](https://i2p.net/) support
+* [i2p](https://i2p.net/) support: `*.i2p` eepsites only, no outproxy
+* No-media sessions: images, video and audio are never requested or stored (default on Tor and i2p), chosen once via `open_session`
+* Network inspection: list a page's requests (`new` shows only those since last call); each is saved as a job with request and response as separate files
+* Archives (zip, tar, tgz, 7z, rar, gz/bz2/xz) are unpacked, and msgpack, CBOR, BSON, plist and protobuf are turned into JSON
+* Terse outline view of every parsed document (headings, links, images) for cheap skimming
 * Browser automation using [playwright](https://playwright.dev/)
 * SSO integration (OAUth2)
 
@@ -36,10 +39,11 @@ cp .env.example .env   # fill in PUBLIC_HOST, OIDC_ISSUER and the secrets
 ./deploy.sh --dev      # local: same stack + a local Keycloak, http://localhost:7297, no TLS
 ```
 
-Two MCP endpoints appear:
+Three MCP endpoints appear:
 
 - `$PUBLIC_SCHEME://$PUBLIC_HOST/tor/mcp` — browsers egress via Tor only
 - `$PUBLIC_SCHEME://$PUBLIC_HOST/clear/mcp` — direct egress, public internet only
+- `$PUBLIC_SCHEME://$PUBLIC_HOST/i2p/mcp` — i2p only, reaches `*.i2p` sites and nothing else (first request can take a minute while tunnels build)
 
 TLS must end in front of nginx (the stack only speaks http); auth is an external OIDC provider (Keycloak). More replicas:
 `docker service scale spider-hoarder_research-clear=3`. Details: [deploying and configuring](docs/operations/deploy-and-configure.md),
@@ -79,6 +83,7 @@ of the egress you want, then sign in as the Keycloak user above (a consent scree
 |---|---|
 | browsers via Tor | `$PUBLIC_SCHEME://$PUBLIC_HOST/tor/mcp` |
 | browsers direct | `$PUBLIC_SCHEME://$PUBLIC_HOST/clear/mcp` |
+| browsers via i2p | `$PUBLIC_SCHEME://$PUBLIC_HOST/i2p/mcp` |
 
 **claude.ai / Claude Desktop:** Settings → Connectors → *Add custom connector* → paste the URL →
 *Connect* → sign in.
@@ -90,12 +95,12 @@ claude mcp add --transport http spider-hoarder $PUBLIC_SCHEME://$PUBLIC_HOST/cle
 # then in Claude Code: /mcp -> spider-hoarder -> Authenticate (opens the Keycloak login)
 ```
 
-What to tell Claude: nothing special, the server sends its own instructions. In short: it gets a
-private browser per conversation (`browser_*` tools), `browser_request_human_help` gives a link
+What to tell Claude: nothing special, the server sends its own instructions. In short: it calls `open_session` first
+(media policy, asking you about security settings), then gets a private browser per conversation (`browser_*` tools), `browser_request_human_help` gives a link
 for the user to solve a CAPTCHA/login (they sign in with the same Keycloak account),
 `browser_save_page` parses and stores the current page, `ingest_page` fetches a URL in one shot,
 and `browser_end_session` frees the browser. Use `tor` for sensitive research, `clear` when a site
-blocks Tor.
+blocks Tor, `i2p` for eepsites.
 
 ## Tests
 
