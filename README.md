@@ -26,7 +26,7 @@ Documentation (architecture, API, design decisions): [docs/index.md](docs/index.
   * Archives (zip, tar, tgz, 7z, rar, gz/bz2/xz) are unpacked
   * Binary structured formats such as msgpack, CBOR, BSON, plist and protobuf are turned into JSON
 * Network inspection: list and inspect HTTP requests and responses
-* Sessions live in isolated docker containers and all storage is cleared after use
+* Every session is a separate Unix uid with its own process group, profile and egress firewall rules in a shared container; its files are wiped when it ends
 * [TOR](https://www.torproject.org/) support for anonymous browsing and accessing .onion sites
 * [i2p](https://i2p.net/) support: `*.i2p` eepsites only, no outproxy
 * No-media sessions: images, video and audio are never requested or stored (default on Tor and i2p), chosen once via `open_session`
@@ -109,6 +109,8 @@ blocks Tor, `i2p` for eepsites.
 ```bash
 cd mcp-research
 python test_pool.py && python test_security.py && python test_gateway.py   # host
+pytest test_replicas.py test_i2p.py test_mediapolicy.py                     # host
+pytest test_toolserver.py                                                  # needs Playwright + Chromium
 # needs root + the image's tools; run with the deployed capability set, plain root hides permission bugs:
 docker run --rm --cap-drop ALL --cap-add NET_ADMIN --cap-add SETUID --cap-add SETGID --cap-add CHOWN --cap-add KILL \
   --cap-add DAC_OVERRIDE --cap-add FOWNER -v $PWD:/app -w /app --entrypoint python mcp-research:local test_sessiond.py

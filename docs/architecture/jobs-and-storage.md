@@ -33,7 +33,8 @@ original/<path>      the bytes as received (for HTML: the converted HTML, i.e. t
 parsed/<path>.md     markitdown output (<path> may be nested, e.g. response/body.html)
 simplified/<name>.md trafilatura main-content guess (HTML only, may silently omit text; never returned inline)
 terse/<name>.md      outline: headings, links, images of parsed/ (or of a Markdown original)
-index.json           {files: [...], url?, target?, text_cap?, depth?, query?, method?, status?}
+index.json           {files: [...], url?, target?, text_cap?, depth?, query?, method?, status?, and for
+                     browser_network_request_make: type, origin?, body?, redirects?, blocked?}
 ```
 `text` is inline if the parsed/original text is under `INLINE_LIMIT` (50,000 chars); else the terse outline if that fits (with
 `text_path` naming it); else omitted, and the agent pages with `get_file_text` or searches with `grep_file`.

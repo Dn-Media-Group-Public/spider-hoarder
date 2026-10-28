@@ -1,7 +1,7 @@
 # Architecture overview
 
 spider-hoarder is an MCP server (`mcp-research`) that gives Claude per-user, isolated, real (headed) Chromium sessions, with a
-human handoff for CAPTCHAs/logins, optional Tor egress, and fetch/parse/store tools that return Markdown. It knows nothing about
+human handoff for CAPTCHAs/logins, Tor or I2P egress, and fetch/parse/store tools that return Markdown. It knows nothing about
 any downstream graph or database: the agent is the orchestrator and carries text from here to wherever it belongs
 (see the original framing in [Plan: Agentic research MCP](../plans/agentic-research-mcp.md), whose "independent MCP servers,
 no proxying" shape still holds; its layer-access-control / `ingest_text` parts live in another project).

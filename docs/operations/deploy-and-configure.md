@@ -25,6 +25,10 @@ picked up. Swarm constraints: no `security_opt` (entrypoint sets `no_new_privs`)
 | `I2P_SNAPSHOT_INTERVAL` (1800 s), `I2P_PROBE_HOST` (`stats.i2p`) | seed snapshot period; eepsite probed for readiness |
 | `KC_*` | dev Keycloak and `keycloak/setup.sh` only |
 
+The size/time limits `MAX_PARSE_BYTES`, `MAX_ARCHIVE_BYTES`, `MAX_ARCHIVE_MEMBERS`, `MAX_REQUEST_BODY`, `MAX_UPLOAD_BYTES`,
+`MAX_REQUEST_TIMEOUT_MS` (and `OIDC_JWKS_URL`) are read from the container environment but `docker-compose.yml` does not pass them
+through; add them to the `research-env` block to change the defaults.
+
 ## Dev mode
 `./deploy.sh --dev` adds `docker-compose.dev.yml`: a throwaway Keycloak (`start-dev`), a `keycloak-init` job running
 `keycloak/setup.sh`, and `extra_hosts: localhost:host-gateway` so containers reach it at the same `localhost` URL as the browser. Forces
@@ -36,6 +40,6 @@ See [Authentication](../architecture/auth.md). For an external Keycloak run `key
 the README). The user's password is reset to `KC_USER_PASSWORD` on every run: change it outside dev.
 
 ## Tests (`mcp-research/`)
-Host: `test_pool.py`, `test_security.py`, `test_gateway.py`, `test_replicas.py`; `pytest test_toolserver.py` (needs Playwright + Chromium).
+Host: `test_pool.py`, `test_security.py`, `test_gateway.py`, `test_replicas.py`, `test_i2p.py`, `test_mediapolicy.py`; `pytest test_toolserver.py` (needs Playwright + Chromium).
 In-container with the deployed capability set (plain root hides permission bugs): `test_sessiond.py`; end to end: `e2e_auth.py` against a
 stub Keycloak, `smoke_e2e.py` for real sessions. Exact commands are in the README.

@@ -55,7 +55,8 @@ Firewall rules are installed per session uid by `entrypoint.sh` (`iptables -m ow
 | `research-i2p` | ACCEPT only the session's own SOCKS port on `i2pd-<slot>`; REJECT everything else. |
 
 The gateway's own `requests` downloads (non-HTML) use `netguard.py` on clear (resolve, reject non-public, pin the IP, re-check every
-redirect) and `socks5h://tor:<port>` on Tor.
+redirect) and `socks5h://<router>:<port>` on Tor and I2P (`tor` / `i2pd-<slot>`; the session's own port when `ingest_page` runs inside a
+live session, so cookies and circuit match its browser, else the gateway's own port).
 
 ## I2P
 
@@ -108,4 +109,4 @@ cross-origin iframes can bypass D; the policy is only as good as the question th
 
 `consent.js` (init script in every page) auto-clicks consent buttons. Known consent-vendor hosts (Fanboy Cookiemonster list, ~670, fetched
 at image build) are blocked: on clear egress with Chromium `--host-rules`; under Tor `--host-rules` do not apply (the proxy resolves
-names), so each Tor session runs a small SOCKS5 filtering relay (`filter_proxy.py`) between Chromium and its SocksPort.
+names), so each Tor and I2P session runs a small SOCKS5 filtering relay (`filter_proxy.py`) between Chromium and its SocksPort.

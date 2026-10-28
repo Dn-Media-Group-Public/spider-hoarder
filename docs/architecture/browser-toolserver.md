@@ -19,13 +19,14 @@ pages, shared cookies/localStorage), so the wrapper was replaced.
 - **No locking**: two callers on one id clobber each other. Isolation is by convention, carried in tool descriptions ("subagents:
   start your own browser, never use `main`").
 - `browser_end_session(browser)` closes one window; without an id it closes everything and ends the session; closing the last browser
-  ends the session. `browser_close` on the last tab navigates to `about:blank` (headed Chromium exits with its last window).
+  ends the session. `browser_close` on the last tab of the last browser navigates to `about:blank` (headed Chromium exits with its last window).
 - Logins are shared because it is one context.
 
 ## Tools
 Schemas for the 25 kept `@playwright/mcp` 0.0.83 tools come from `tools.json` (our descriptions; `tools.json.upstream` is the captured
 original, checked by `test_toolserver.py`) plus a `browser` property. Added: 15 cookie / localStorage / sessionStorage tools,
-`browser_storage_state`, `browser_set_storage_state` (state passed inline), `browser_start_session`. Dropped: `browser_run_code_unsafe`
+`browser_storage_state`, `browser_set_storage_state` (state passed inline), `browser_start_session`, `browser_end_session`,
+`browser_network_request_make`; hidden from the gateway's tool list: `browser_bring_to_front`, `browser_set_policy`. Dropped: `browser_run_code_unsafe`
 (use `browser_evaluate`). Full list: [Tool reference](../api/tools.md).
 
 - Element refs come from `page.aria_snapshot(mode="ai")` and resolve with `aria-ref=`; a stale ref gives "Ref … not found in the
@@ -34,7 +35,7 @@ original, checked by `test_toolserver.py`) plus a `browser` property. Added: 15 
 - `text_cap` (default 128, `null` = none) shortens pure text nodes in snapshots/finds; `find` matches the full text and centres the
   window on the match. `browser_find` shows each match with its ancestor chain (refs), the way to locate a content container.
 - Network log: `PageState.network` is append-only; `PageState.net_mark` is the position `browser_network_requests(new=true)` reads
-  from and then advances (per tab; calls without `new` leave it). `browser_network_request` writes a directory (`request/`,
+  from and then advances (per tab; calls without `new` leave it). `browser_network_request_get` writes a directory (`request/`,
   `response/`, each `headers.json` and `body.<ext>`, extension from the content-type via `mimetypes`) instead of one text file.
   See also: [Plan: network request jobs](../implemented-plans/network-request-jobs.md)
 - `browser_network_request_make`: opens a hidden tab (`Registry.hidden_page`: created with `_ignore`, so it belongs to no browser id and is

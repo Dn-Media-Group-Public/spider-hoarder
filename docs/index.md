@@ -26,4 +26,10 @@ Start with the [README](../README.md) (what it is, quick start, how to use it).
   [Jobs for all tools](implemented-plans/jobs-for-all-tools.md),
   [Terse view](implemented-plans/terse-view.md),
   [oauth2-proxy DCR](implemented-plans/oauth2-proxy-dcr.md),
-  [Sticky replicas](implemented-plans/research-replicas.md)
+  [Sticky replicas](implemented-plans/research-replicas.md),
+  [Network request jobs](implemented-plans/network-request-jobs.md),
+  [I2P egress](implemented-plans/i2p-egress.md),
+  [More file formats](implemented-plans/more-file-formats.md),
+  [No-media sessions](implemented-plans/no-media-sessions.md),
+  [network request make](implemented-plans/network-request-make.md),
+  [network request make types](implemented-plans/network-request-make-types.md)

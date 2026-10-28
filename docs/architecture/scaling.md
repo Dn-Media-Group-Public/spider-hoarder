@@ -12,7 +12,7 @@ files and jobs stay per replica; Swarm only (`tasks.<service>` DNS, `{{.Task.Slo
   `/blob/<rid>/…`, `/upload/<rid>/…`, `/view/<rid>/…`. nginx extracts it and proxies straight to that IP on `GATEWAY_PORT`.
 - **`initialize`** has no session id → round-robin over `tasks.research-<egress>`; a replica reserves a uid at `initialize` and returns
   503 when full; nginx tries the next one; all full → 503 to Claude. The browser itself still starts lazily on the first tool call.
-- **SSRF guard** (the `rid` in a URL is attacker-controlled): nginx is only on `sessions_tor`, `sessions_clear` and `auth`, never on
+- **SSRF guard** (the `rid` in a URL is attacker-controlled): nginx is only on `sessions_tor`, `sessions_clear`, `sessions_i2p` and `auth`, never on
   `public`, and connects only to the dedicated `GATEWAY_PORT`, where the gateway enforces its own auth. Residual: blind probing.
 - **Tor**: one shared `tor`; replica slot `k` uses SocksPorts `9050 + (k-1)*SOCKS_STRIDE + index`; the per-uid firewall allows only
   that range. `MAX_REPLICAS` (default 4) sizes the range; scaling past it needs a larger value and a `tor` redeploy.

@@ -5,7 +5,7 @@ Keycloak (any OIDC) JWT on `/<egress>/mcp` (`auth.py`): issuer, signature, `exp`
 `MCP_SCOPE` is set the token's `scope` must contain it (the audience is deliberately **not** checked: Claude's dynamically
 registered clients carry arbitrary audiences). RFC 9728 protected-resource metadata advertises the scope so Claude requests it.
 Claude registers itself through anonymous Dynamic Client Registration, so there is no client id/secret to configure.
-`keycloak/setup.sh` (idempotent) creates: the realm-default scope, DCR limited by the Trusted Hosts policy to `claude.ai`,
+`keycloak/setup.sh` (idempotent) creates: the realm if missing, the realm-default scope, DCR limited by the Trusted Hosts policy to `claude.ai`,
 `claude.com` and `localhost`, and one user. See also: [Plan: Browser sessions](../implemented-plans/browser-sessions-plan.md)
 (implementation notes) and the `mcp-development:mcp-fastapi-oauth-dcr` pattern it follows.
 
