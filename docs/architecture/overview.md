@@ -52,7 +52,7 @@ session's tool server) and proxies browser tool calls over loopback HTTP to that
 
 Session lifecycle: `initialize` reserves a uid, the browser starts lazily on the first tool call, and every ending path
 (`browser_end_session`, idle timeout `IDLE_TIMEOUT`, MCP session close, MCP client silent for `DISCONNECT_TIMEOUT_MINUTES`,
-crash) goes through one `close()` → `sessiond stop`. Limits: `MAX_SESSIONS_PER_USER`, `MAX_SESSIONS_TOTAL` (per container).
+crash) goes through one `close()` → `sessiond stop`, which also drops the session's media policy (the next `open_session` asks the user again). Limits: `MAX_SESSIONS_PER_USER`, `MAX_SESSIONS_TOTAL` (per container).
 See [Session isolation](session-isolation.md).
 
 ## Request routing and replicas

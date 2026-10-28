@@ -148,14 +148,15 @@ EXTRA_TOOLS = [
                              "Default: false on Tor and I2P, true on clear."},
                    "allow": {**_MIME_LIST, "description": "Extra content types allowed for direct navigation/downloads, e.g. ['image/svg+xml']"},
                    "deny": {**_MIME_LIST, "description": "Content types always blocked for direct navigation/downloads, e.g. ['text/geojson']"}}},
-               description="Set this session's media policy. Must be the FIRST tool call and can be called ONCE; the policy cannot be "
-               "changed afterwards, and every other tool fails until it has been called. Browsing the dark web can expose the user to legal "
+               description="Set this session's media policy. Must be the FIRST tool call of a conversation; every other tool fails until it has been called. "
+               "Calling it again ENDS the existing session (all browsers, cookies, tabs) and starts a new one with the new policy, so call it only once, "
+               "at the start, never in the middle of a task. Browsing the dark web can expose the user to legal "
                "risk if images, video or audio are even loaded, so BEFORE calling this, explicitly ask the user about their security "
                "settings. Call it before any browser call. Pass `allow` / `deny` only if the user asked for a specific security setup; "
                "otherwise call it with no arguments for the defaults. Returns the effective policy (same as get_session)."),
     types.Tool(name="get_session", inputSchema={"type": "object", "properties": {}},
                description="Read-only: the session's effective media policy (`opened` is false until open_session has been called, "
-               "and the rest are then the defaults open_session() would apply). Subagents: call this to see what was decided; do not call open_session."),
+               "and the rest are then the defaults open_session() would apply). Subagents: call this to see what was decided; do not call open_session (it would end the session)."),
     types.Tool(name="browser_request_human_help", inputSchema=_schema(BROWSER_ARG, reason="What the user needs to do, e.g. 'solve the CAPTCHA'"),
                description="Get a link that lets the user see and control THIS conversation's browser in a new tab. "
                "Use it for a CAPTCHA, bot challenge, login, 2FA or anything else a human should do. Give the link to "
@@ -668,9 +669,13 @@ async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
         return _text(f"{name} is disabled", True)
     try:
         if name == "open_session":
-            if not sid or sid in sessions.policies:
-                return _text("open_session was already called: the media policy of a session cannot change", True)
-            sessions.policies[sid] = Policy.make(EGRESS, args.get("media"), args.get("allow"), args.get("deny"))
+            if not sid:
+                return _text("no MCP session", True)
+            policy = Policy.make(EGRESS, args.get("media"), args.get("allow"), args.get("deny"))  # validate before ending anything
+            if sid in sessions.policies:  # a client may reuse one MCP session across conversations: a repeat call starts over
+                if bs := await sessions.get_session(mcp_session, owner, create=False):
+                    await sessions.close(bs)
+            sessions.policies[sid] = policy
             log.info("session %s opened: %s", sid[:8], sessions.policies[sid].summary(EGRESS, True))
             return _text(json.dumps(sessions.policies[sid].summary(EGRESS, True)))
         if name == "get_session":

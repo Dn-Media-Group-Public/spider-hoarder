@@ -646,9 +646,18 @@ def test_open_session_gate_and_get_session():
     after = json.loads(text(r))
     assert after == {**before, "opened": True} and not r.isError
     assert json.loads(text(run("get_session"))) == after
-    r = run("open_session", media=True)  # the policy cannot change
-    assert r.isError and json.loads(text(run("get_session"))) == after
-    assert run("open_session", allow=["nonsense"]).isError
+    assert run("open_session", allow=["nonsense"]).isError and json.loads(text(run("get_session"))) == after  # invalid: nothing ends
+    closed = []
+
+    async def get_session(*a, **k):
+        return types.SimpleNamespace()
+
+    async def close(b):
+        closed.append(b)
+
+    sessions.get_session, sessions.close = get_session, close
+    r = run("open_session", media=True)  # a repeat call ends the old session and starts over
+    assert not r.isError and len(closed) == 1 and json.loads(text(run("get_session")))["media"] is True
     # allow / deny land in the effective lists
     app._caller = lambda: (None, "a@b.c", "sid-2")
     s = json.loads(text(run("open_session", media=False, allow=["image/svg+xml"], deny=["text/csv"])))

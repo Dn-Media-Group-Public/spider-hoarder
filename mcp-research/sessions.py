@@ -147,6 +147,7 @@ async def close(bs: BrowserSession) -> None:
     if by_mcp.get(id(bs.mcp_session)) is bs:
         del by_mcp[id(bs.mcp_session)]
     by_view.pop(bs.id, None)
+    policies.pop(bs.sid, None)  # every way a session ends (idle reaper included) makes the next open_session ask the user again
     bs.closing.set()
     if bs.task:
         with contextlib.suppress(Exception):

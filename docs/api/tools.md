@@ -9,12 +9,12 @@ See also: [Plan: Browser sessions](../implemented-plans/browser-sessions-plan.md
 ## Gateway tools
 | Tool | Behaviour |
 |---|---|
-| `open_session(media?, allow?, deny?)` | **Must be the first call, once.** Sets the session's immutable no-media policy; every other tool fails until then. Ask the user about security settings first; pass `allow` / `deny` (MIME types or `type/*`) only on request. `media` defaults to false on Tor / I2P, true on clear. Returns the effective policy. See also: [Plan: No-media sessions](../implemented-plans/no-media-sessions.md) |
-| `get_session()` | Read-only: `{egress, opened, media, blocked_resource_types, allowed_content_types, denied_content_types}`. Works before `open_session` (`opened: false`, the defaults). For subagents. |
+| `open_session(media?, allow?, deny?)` | **Must be the first call of a conversation.** Sets the session's no-media policy; calling it again ends the existing session (browsers, cookies, tabs) and starts over, since clients may reuse one MCP session across conversations; every other tool fails until then. Ask the user about security settings first; pass `allow` / `deny` (MIME types or `type/*`) only on request. `media` defaults to false on Tor / I2P, true on clear. Returns the effective policy. See also: [Plan: No-media sessions](../implemented-plans/no-media-sessions.md) |
+| `get_session()` | Read-only: `{egress, opened, media, blocked_resource_types, allowed_content_types, denied_content_types}`. Works before `open_session` (`opened: false`, the defaults). For subagents. `opened: true` may be a leftover from an earlier conversation on the same MCP session; a conversation that has not itself asked the user should call `open_session`. |
 | `browser_request_human_help(reason, browser?)` | Link for the user to solve a CAPTCHA/login in the live view (owner-only, SSO). Wait for the user. |
 | `browser_save_page(target?, browser?)` | Convert the open page (or `target`: an element ref/selector) to Markdown and store it as a job. Prefer over `browser_snapshot` for content. |
 | `ingest_page(url, target?)` | One shot: ephemeral browser, navigate, save, destroy. `target` must be a selector. Non-HTML goes through `requests`. Uses the session's media policy: blocked content types error with `blocked: media disabled for this session (<type>)`. |
-| `browser_end_session(browser?)` | Close one browser, or all and the session; the result counts requests the media policy blocked. |
+| `browser_end_session(browser?)` | Close one browser, or all and the session; the result counts requests the media policy blocked. Ending the session also forgets the media policy: `open_session` must be called again. |
 | `get_upload_link()` | Page where the *user* uploads files into a new job (1 h). Archives are unpacked; binary formats (msgpack, CBOR, BSON, plist, protobuf) also get `parsed/*.json`. See also: [Plan: more file formats](../implemented-plans/more-file-formats.md) |
 | `list_files(job_id)` | Manifest of a job. |
 | `get_file_text(job_id, path, offset?, length?)` | Page through a stored file (20,000-char slices by default). |

@@ -79,9 +79,18 @@ see [Scaling](scaling.md).
 ## No-media sessions
 
 Loading an image, video or audio file can be a legal risk on the dark web, so the user chooses once per gateway session (before anything
-else; fail-closed gate in the gateway and the toolserver) via `open_session(media?, allow?, deny?)`. The policy is immutable, lives in
-`sessions.policies` keyed by MCP session id (outliving individual browsers, but dropped when `browser_end_session` ends the session, so the next `open_session` asks again), is installed in the toolserver at browser start, and applies
-to every window and to `ingest_page`. `media` defaults to false on Tor / I2P. `get_session()` reports it read-only.
+else; fail-closed gate in the gateway and the toolserver) via `open_session(media?, allow?, deny?)`. The policy cannot change within a
+session, is installed in the toolserver at browser start, and applies to every window and to `ingest_page`. `media` defaults to false on
+Tor / I2P. `get_session()` reports it read-only.
+
+**Lifetime.** The policy lives in `sessions.policies`, keyed by MCP session id, and is dropped by `sessions.close()`, so every way a
+session ends (`browser_end_session` of the last browser or with no id, idle reaper, MCP disconnect/close) also forgets the policy: the next
+tool call fails closed until `open_session` is called and the user has been asked again. MCP clients such as Claude Code keep one MCP
+session across `/new` and `/clear`, and the agent cannot tell its conversation is not the first, so without this a new conversation would
+inherit the previous one's policy and browser (cookies, tabs). For the same reason a repeat `open_session` is not an error: it validates the
+new arguments, then **ends the existing session** (all browsers) and starts over with the new policy. Residual gap: `get_session` on a
+leftover session reports `opened: true`, so an agent that trusts it instead of calling `open_session` inherits the old browser until
+`IDLE_TIMEOUT`. See also: [Plan: No-media sessions](../implemented-plans/no-media-sessions.md)
 
 | Layer | Where | Blocks |
 |---|---|---|
