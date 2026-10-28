@@ -13,11 +13,17 @@ cap; parsing does (`MAX_PARSE_BYTES`, default 50 MB: a bigger file is kept under
 `browser_network_request_get`/`_make` output a directory: only `request|response/headers.json` and `body.<ext>` are read, anything else is ignored.
 See also: [Plan: network request jobs](../implemented-plans/network-request-jobs.md)
 
-**`in/`**: for `browser_network_request_make` with `body_job_id`+`body_path` the gateway resolves the file (owner-scoped, `..`/absolute
-paths and missing keys rejected, `MAX_REQUEST_BODY`, env, default 64 MiB, also for an inline `body`: Chromium refuses a CDP message over 100 MiB, i.e. ~75 MiB of body, by killing the whole browser context; measured 74 MiB ok, 76 not), writes it to `<home>/in/<random>.body` (same `O_PATH` home fd, `O_NOFOLLOW`,
-file `O_EXCL`) and passes that name to the toolserver as a hidden `body_file` argument (any agent-supplied `body_file` is discarded). The
-toolserver reads and deletes it; the gateway deletes it again afterwards as a backstop, and the session-end wipe covers the rest.
-See also: [Plan: network request make](../implemented-plans/network-request-make.md)
+**`in/`**: for `browser_network_request_make` the gateway resolves every `{job_id, path}` in `body` (owner-scoped, `..`/absolute paths and
+missing keys rejected) and checks all sizes before copying anything: `navigation` bodies (files, text and encoded fields together) against
+`MAX_REQUEST_BODY` (env, default 64 MiB: Chromium refuses a CDP message over 100 MiB, i.e. ~75 MiB of body, by killing the whole browser
+context; measured 74 MiB ok, 76 not), the file parts of `form`/`xhr` against `MAX_UPLOAD_BYTES` (env, default 500 MiB; 64 MiB in a session
+whose policy blocks media). Each file is streamed (`storage.open_read`) to `<home>/in/<random>/<filename>` (same `O_PATH` home fd,
+`O_NOFOLLOW`, directory `0777` so the session user can read and delete it, file `O_EXCL` `0644`; one directory per file, so equal filenames
+never collide and the name is exactly what the browser uploads). The job references in the arguments are replaced by the staged names
+(`body_file` for a raw file body, `{file, filename, content_type?}` for a file part); any agent-supplied `body_file` is discarded. The
+toolserver deletes the directories when the call ends, success or failure; the gateway removes them again as a backstop (also when staging
+fails midway), and the session-end wipe covers the rest. `index.json` keeps the `body` argument as given, so a big upload is not stored twice.
+See also: [Plan: network request make types](../implemented-plans/network-request-make-types.md)
 
 ## Layout
 fsspec storage (`RESEARCH_BLOB_URL`: `file:///data` or `gs://…`), keyed `<owner>/<uuid>`:

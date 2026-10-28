@@ -216,3 +216,12 @@ upload is not stored twice. Text and encoded-field bodies are stored as today. A
 - `credentials` defaults to `include` (decided); wildcard-CORS targets then need `credentials: "omit"` or `origin` = target.
 - Concurrent `make` calls on one session can each stage up to `MAX_UPLOAD_BYTES` in `in/`; there is no per-session total.
 - Separate plan needed: media policy for `fetch`/XHR in ordinary tabs (see Media policy).
+
+## Decided during implementation
+- **Layer A and big uploads.** In a no-media session layer A is a context-wide `route("**/*")`, which pauses every request at request stage;
+  measured: a 250 MiB `fetch` PUT with a `File` body kills the browser with it (1 s without). Decision (user): in such sessions uploads of
+  `xhr`, and of `form` with a `content_type` override, are capped at `ROUTED_UPLOAD_CAP` (64 MiB) and refused with an error, by the gateway
+  before copying and again by the toolserver; the browser never crashes.
+- **Local Network Access.** The generated origin page has no address space, so Chromium blocks its cross-origin requests to loopback/private
+  targets; same-origin (the default `origin` for a target on such an address) works.
+- Service-worker bypass (`Network.setBypassServiceWorker`) is set on the CDP session `hidden_page` returns; no test registers a service worker.

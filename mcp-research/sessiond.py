@@ -156,7 +156,7 @@ def start(uid: int, env: dict, files: dict) -> None:
         os.mkdir(out)
         os.chmod(out, 0o2750)  # setgid: files created inside inherit gw-collect. Before the chown: while out/ is still in
         os.chown(out, uid, GW_COLLECT_GID)  # our own group the bit sticks (no CAP_FSETID needed); chown keeps it on directories
-        inn = os.path.join(home, "in")  # request bodies the gateway leaves for the session (browser_network_request_make)
+        inn = os.path.join(home, "in")  # files the gateway stages for the session (browser_network_request_make)
         os.mkdir(inn)
         os.chmod(inn, 0o2770)  # the gateway (gw-collect) adds files; the session owns the dir, so it can read and delete them
         os.chown(inn, uid, GW_COLLECT_GID)

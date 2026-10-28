@@ -326,41 +326,88 @@ def test_request_make_body_and_job():
     app.ports.home = lambda uid: home
     jid = f"{app.RID}.123e4567-e89b-12d3-a456-426614174000"
     storage.write_bytes(app._key("a@b.c", jid), "original/d.json", b'{"k":1}', "application/json")
-    rb = lambda owner="a@b.c", **a: app._request_body(owner, 1, a)
+    ref = {"job_id": jid, "path": "original/d.json"}
+    rb = lambda owner="a@b.c", routed=False, **a: app._request_body(owner, 1, a, routed)
+    staged = lambda: sorted(os.listdir(home + "/in"))
 
-    assert rb(url="u", body="x") == ({"url": "u", "body": "x"}, None)
-    for bad in ({"body_job_id": jid}, {"body_path": "original/d.json"}, {"body": "x", "body_job_id": jid, "body_path": "original/d.json"},
-                {"body_job_id": jid, "body_path": "../x"}, {"body_job_id": jid, "body_path": "/etc/passwd"},
-                {"body_job_id": jid, "body_path": "original/missing"}, {"body_job_id": "junk", "body_path": "original/d.json"}):
+    assert rb(url="u", body="x") == ({"url": "u", "body": "x"}, [])
+    assert rb(url="u", body={"a": 1, "b": ["x", 2.5, True]})[0]["body"] == {"a": 1, "b": ["x", 2.5, True]} and staged() == []
+    for bad in ({"body": {"job_id": jid}}, {"body": {"path": "original/d.json"}}, {"body": {**ref, "x": 1}},
+                {"body": {"job_id": jid, "path": "../x"}}, {"body": {"job_id": jid, "path": "/etc/passwd"}},
+                {"body": {"job_id": jid, "path": "original/missing"}}, {"body": {"job_id": "junk", "path": "original/d.json"}},
+                {"body": {"f": {"path": "original/d.json"}}}, {"body": {"f": {**ref, "x": 1}}}, {"body": {"f": None}}, {"body": {"f": [["nested"]]}},
+                {"body": {"f": {**ref, "filename": 1}}}, {"body": 5}, {"body": ["a"]}, {"type": "nope"},
+                {"body_job_id": jid, "body_path": "original/d.json"}, {"type": "form", "body": "text"}, {"type": "form", "body": ref},
+                {"type": "xhr", "body": ref}, {"type": "xhr", "body": "x", "method": "head"}):
         try:
             rb(**bad); assert False, bad
         except ValueError:
             pass
     try:
-        rb("other@b.c", body_job_id=jid, body_path="original/d.json"); assert False  # another owner's job
+        rb("other@b.c", body=ref); assert False  # another owner's job
     except ValueError as e:
         assert str(e) == "file not found"
-    assert os.listdir(home + "/in") == []
-    app.MAX_REQUEST_BODY = 6  # the file is 7 bytes; inline bodies count too
-    for bad in ({"body_job_id": jid, "body_path": "original/d.json"}, {"body": "1234567"}):
+    assert staged() == []  # nothing is copied for a refused call
+
+    app.MAX_REQUEST_BODY = 6  # the file is 7 bytes; text counts too
+    for bad in ({"body": ref}, {"body": "1234567"}, {"body": {"a": "1234567"}}, {"type": "xhr", "body": "1234567", "method": "POST"}):
         try:
             rb(**bad); assert False, bad
         except ValueError as e:
-            assert "too large" in str(e)
-    assert rb(body="123456")[1] is None and os.listdir(home + "/in") == []
+            assert "too large" in str(e), e
+    assert staged() == []
     app.MAX_REQUEST_BODY = 64 * 1024 * 1024
-    a, name = rb(url="u", body_file="agent-chosen", body_job_id=jid, body_path="original/d.json")
-    assert a == {"url": "u", "body_file": name} and open(f"{home}/in/{name}", "rb").read() == b'{"k":1}'
-    assert oct(os.stat(f"{home}/in/{name}").st_mode & 0o777) == "0o644"
-    app._drop_in(1, name); app._drop_in(1, name)  # idempotent
-    assert os.listdir(home + "/in") == []
+    app.MAX_UPLOAD_BYTES = 6
+    try:
+        rb(type="xhr", method="PUT", body=ref); assert False
+    except ValueError as e:
+        assert "file parts too large" in str(e)
+    app.MAX_UPLOAD_BYTES = 500 * 1024 * 1024
+    assert rb(type="xhr", method="PUT", body=ref)[0]["body_file"] and len(staged()) == 1  # raw job file: hidden body_file
+    app._drop_in(1, staged()[0])
+    app.ROUTED_UPLOAD_CAP = 6  # a session whose media policy routes every request
+    try:
+        rb(routed=True, type="xhr", method="PUT", body=ref); assert False
+    except ValueError as e:
+        assert "media policy" in str(e)
+    assert rb(routed=True, type="navigation", method="POST", body=ref)[0]["body_file"]  # navigation is not affected
+    app._drop_in(1, staged()[0])
+    app.ROUTED_UPLOAD_CAP = 64 * 1024 * 1024
+
+    a, names = rb(type="form", method="POST", body_file="agent-chosen",
+                  body={"k": "v", "f": {**ref, "filename": "../up.json", "content_type": "text/x"}, "l": [ref, "t"]})
+    assert "body_file" not in a and len(names) == 2 and a["body"]["k"] == "v" and a["body"]["l"][1] == "t"
+    f, l0 = a["body"]["f"], a["body"]["l"][0]
+    assert f["filename"] == "up.json" and f["content_type"] == "text/x" and l0["filename"] == "d.json" and "content_type" not in l0  # basename, default from path
+    for part, n in ((f, "up.json"), (l0, "d.json")):
+        d = part["file"].split("/")[0]
+        assert part["file"] == f"{d}/{n}" and open(f"{home}/in/{d}/{n}", "rb").read() == b'{"k":1}'
+        assert oct(os.stat(f"{home}/in/{d}/{n}").st_mode & 0o777) == "0o644" and oct(os.stat(f"{home}/in/{d}").st_mode & 0o777) == "0o777"
+    for n in names:
+        app._drop_in(1, n); app._drop_in(1, n)  # idempotent
+    assert staged() == []
     os.symlink("/etc/passwd", home + "/in/trap")  # a session-planted name is never written through
     shutil.move(home + "/in", home + "/real"); os.symlink(home + "/real", home + "/in")  # swapped in/ dir
     try:
-        app._write_in(1, b"x"); assert False
+        app._stage(1, app._key("a@b.c", jid), "original/d.json", "x"); assert False
     except OSError:
         pass
     os.unlink(home + "/in"); shutil.move(home + "/real", home + "/in"); os.unlink(home + "/in/trap")
+    orig = app._stage  # a failure while staging the second file removes the first
+    calls = []
+    def flaky(uid, key, path, name):
+        calls.append(1)
+        if len(calls) == 2:
+            raise OSError("disk full")
+        return orig(uid, key, path, name)
+    app._stage = flaky
+    try:
+        rb(type="xhr", method="POST", body={"a": ref, "b": ref}); assert False
+    except OSError:
+        pass
+    finally:
+        app._stage = orig
+    assert staged() == []
 
     seen = []
 
@@ -373,19 +420,23 @@ def test_request_make_body_and_job():
             open(d + "/response/headers.json", "w").write("{}")
             return mt.CallToolResult(content=[mt.TextContent(type="text", text=(
                 "### Result\n- [Network request](out/x)\n1. [POST] http://n.test/b => [BLOCKED] blocked: media policy\n"
+                "Origin: http://o.test/page\n"
                 'Redirects: [{"url": "http://n.test/a", "status": 307}]'))])
 
     bs = types.SimpleNamespace(client=Client(), owner="a@b.c", id="v", uid=1, last_used=0)
-    r = asyncio.run(app._file_tool(bs, "browser_network_request_make", {"url": "http://n.test/a", "body_job_id": jid, "body_path": "original/d.json", "body_file": "x"}))
+    given = {"url": "http://n.test/a", "type": "form", "method": "POST", "cookies": {"a": "b"}, "body": {"f": ref}, "body_file": "x", "timeout_ms": 10**9}
+    r = asyncio.run(app._file_tool(bs, "browser_network_request_make", given))
     out = json.loads(r.content[0].text)
-    assert seen[0]["body_file"] != "x" and "body_job_id" not in seen[0] and os.listdir(home + "/in") == [], seen  # gateway-set name; leftovers dropped
+    assert "body_file" not in seen[0] and seen[0]["body"]["f"]["file"].endswith("/d.json") and staged() == [], seen  # leftovers dropped
+    assert seen[0]["timeout_ms"] == app.MAX_REQUEST_TIMEOUT_MS
     m = storage.get_manifest(app._key("a@b.c", out["job_id"]))
     assert (m["url"], m["method"], m.get("status"), m["blocked"], m["redirects"][0]["status"]) == ("http://n.test/b", "POST", None, "media policy", 307), m
-    assert "media policy" in out["notes"][0]
+    assert (m["type"], m["origin"], m["body"]) == ("form", "http://o.test/page", {"f": ref}), m  # the argument as given, not the staged names
+    assert any("media policy" in n for n in out["notes"]) and any("SameSite" in n for n in out["notes"]), out
     try:  # call_tool turns this into an error result; nothing reaches the toolserver
-        asyncio.run(app._file_tool(bs, "browser_network_request_make", {"url": "u", "body": "x", "body_job_id": jid, "body_path": "original/d.json"})); assert False
+        asyncio.run(app._file_tool(bs, "browser_network_request_make", {"url": "u", "type": "form", "body": "x"})); assert False
     except ValueError:
-        assert len(seen) == 1 and os.listdir(home + "/in") == []
+        assert len(seen) == 1 and staged() == []
     assert "filename" not in app._without_filename(mt.Tool(name="browser_network_request_make", inputSchema={"type": "object", "properties": {"url": {}, "filename": {}}})).inputSchema["properties"]
 
 

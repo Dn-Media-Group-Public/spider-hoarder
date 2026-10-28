@@ -24,10 +24,10 @@ verbs over a gateway-only socket, no parsing, no network) is the authority:
 Anything that must outlive a session is copied by the gateway into blob storage before `stop`
 ([Jobs and storage](jobs-and-storage.md)); the homedir is disposable. Each session has a private gid, so group-readable `out/` files
 only ever mean "the gateway" (member of `gw-collect`).
-`in/` is the opposite channel, gateway to sandbox, used only for request bodies of `browser_network_request_make`: the gateway creates a
-`0644` file with a random name through `O_PATH`/`O_NOFOLLOW`/`O_EXCL` (the session owns `in/` and could plant a symlink or swap the dir); the
-home is not traversable by other sessions, and the file is deleted after use.
-See also: [Plan: network request make](../implemented-plans/network-request-make.md)
+`in/` is the opposite channel, gateway to sandbox, used only for the files of `browser_network_request_make`: per file the gateway creates
+a random directory (`0777`) and a `0644` file in it through `O_PATH`/`O_NOFOLLOW`/`O_EXCL` (the session owns `in/` and could plant a symlink
+or swap the dir); the home is not traversable by other sessions, and the directory is deleted after use.
+See also: [Plan: network request make](../implemented-plans/network-request-make.md), [Plan: network request make types](../implemented-plans/network-request-make-types.md)
 See also: [Plan: Tool file outputs become jobs](../implemented-plans/file-outputs-as-jobs.md)
 
 ## What isolation does and does not give

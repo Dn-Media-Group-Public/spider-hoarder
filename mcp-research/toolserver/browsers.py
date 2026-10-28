@@ -8,7 +8,7 @@ import asyncio
 import re
 import secrets
 
-from playwright.async_api import BrowserContext, Page, async_playwright
+from playwright.async_api import BrowserContext, CDPSession, Page, async_playwright
 
 from .mediapolicy import Policy
 
@@ -142,15 +142,19 @@ class Registry:
         except Exception:  # noqa: BLE001  the page closed or navigated away
             pass
 
-    async def hidden_page(self) -> Page:
-        """A tab for internal use: it belongs to no browser and is nobody's current tab (the media policy still hooks it)."""
+    async def hidden_page(self) -> tuple[Page, CDPSession]:
+        """A tab for internal use: it belongs to no browser and is nobody's current tab (the media policy still hooks it).
+        Returns it with a CDP session (keep it for the tab's lifetime) that bypasses service workers: one registered for the
+        target origin would intercept the generated page's fetch and empty the body of a rewritten form post."""
         self._ignore = True
         try:
             page = await self.ctx.new_page()
             await self.settle()  # _attach must see _ignore
         finally:
             self._ignore = False
-        return page
+        cdp = await self.ctx.new_cdp_session(page)
+        await cdp.send("Network.setBypassServiceWorker", {"bypass": True})
+        return page, cdp
 
     async def settle(self) -> None:
         """Wait for popups opened by the last action to be attributed."""

@@ -28,7 +28,9 @@ def env(tmp_path):
     tools.OUT = str(tmp_path)
 
     async def mk():
-        return await launch({"userDataDir": str(tmp_path / "p"), "args": ["--no-sandbox"], "headless": True})
+        # the generated origin page has no address space of its own, so Local Network Access would block cross-origin xhr to the
+        # loopback test server (a public target is unaffected)
+        return await launch({"userDataDir": str(tmp_path / "p"), "args": ["--no-sandbox", "--disable-features=LocalNetworkAccessChecks"], "headless": True})
     pw, R = run_loop.run_until_complete(mk())
     run_loop.run_until_complete(R.set_policy(Policy.make("clear")))
     yield R
@@ -367,6 +369,7 @@ def test_deny_with_media_true(nomedia, media_site):
 # ------------------------------------------------- browser_network_request_make
 @pytest.fixture
 def echo():
+    import hashlib
     import threading
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -374,8 +377,27 @@ def echo():
         def log_message(self, *a):
             pass
 
+        def cors(self):
+            if o := self.headers.get("Origin"):
+                if not self.path.startswith("/nocors"):
+                    self.send_header("Access-Control-Allow-Origin", o)
+                    self.send_header("Access-Control-Allow-Credentials", "true")
+
+        def do_OPTIONS(self):
+            self.send_response(204); self.cors()
+            self.send_header("Access-Control-Allow-Methods", self.headers.get("Access-Control-Request-Method", "*"))
+            self.send_header("Access-Control-Allow-Headers", self.headers.get("Access-Control-Request-Headers", "*")); self.end_headers()
+
         def do(self):
-            body = self.rfile.read(int(self.headers.get("content-length") or 0))
+            n = int(self.headers.get("content-length") or 0)
+            if self.path == "/hash":  # big bodies are only measured
+                h, left = hashlib.sha256(), n
+                while left:
+                    c = self.rfile.read(min(left, 1 << 20)); h.update(c); left -= len(c)
+                body = json.dumps({"len": n, "sha": h.hexdigest(), "ct": self.headers.get("content-type")}).encode()
+                self.send_response(200); self.cors(); self.send_header("Content-Type", "application/json"); self.send_header("Content-Length", str(len(body)))
+                self.end_headers(); self.wfile.write(body); return
+            body = self.rfile.read(n)
             if self.path == "/redir":
                 self.send_response(302); self.send_header("Location", "/echo"); self.end_headers(); return
             if self.path == "/redir307":
@@ -383,21 +405,40 @@ def echo():
             if self.path == "/slow":
                 time.sleep(3)
             ct, extra, data = "application/json", {}, json.dumps(
-                {"method": self.command, "headers": {k.lower(): v for k, v in self.headers.items()}, "body": body.decode("latin1")}).encode()
+                {"method": self.command, "path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()}, "body": body.decode("latin1")}).encode()
             if self.path == "/att":
                 ct, extra, data = "text/csv", {"Content-Disposition": "attachment; filename=a.csv"}, b"a,b\n1,2\n"
             if self.path == "/img":
                 ct, data = "image/png", b"\x89PNG" + bytes(50)
-            self.send_response(200); self.send_header("Content-Type", ct)
+            if self.path == "/big":  # 3 MiB of response, to cross the chunk size of the xhr transport
+                ct, data = "application/octet-stream", bytes(range(256)) * 12288
+            self.send_response(200); self.cors(); self.send_header("Content-Type", ct)
             for k, v in extra.items():
                 self.send_header(k, v)
-            self.end_headers(); self.wfile.write(data)
-        do_GET = do_POST = do_PUT = do
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(data)
+        do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = do
 
     srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{srv.server_port}"
     srv.shutdown()
+
+
+@pytest.fixture
+def stage(tmp_path):
+    """stage(name, data) leaves a file as the gateway would: in/<random>/<name>; returns the {file, filename} part."""
+    tools.IN = str(tmp_path / "in"); os.mkdir(tools.IN)
+    n = [0]
+
+    def f(name, data, **kw):
+        n[0] += 1
+        os.mkdir(f"{tools.IN}/d{n[0]}")
+        with open(f"{tools.IN}/d{n[0]}/{name}", "wb") as fh:
+            fh.write(data)
+        return {"file": f"d{n[0]}/{name}", "filename": name, **kw}
+    return f
 
 
 def make(R, **a):
@@ -436,22 +477,162 @@ def test_make_redirects_attachment_blocked_errors(env, echo):
     with pytest.raises(tools.ToolError, match="Timeout"):
         make(R, url=echo + "/slow", timeout_ms=500)
     for bad in ({"url": "file:///etc/passwd"}, {"url": echo, "method": "G E T"}, {"url": echo, "headers": {"a": 1}},
-                {"url": echo, "body": "x", "body_file": "y"}):
+                {"url": echo, "body": "x", "body_file": "y"}, {"url": echo, "type": "nope"}, {"url": echo, "origin": echo},
+                {"url": echo, "credentials": "omit"}, {"url": echo, "headers": {"Host": "x"}}, {"url": echo, "cookies": {"a": "b"}, "headers": {"Cookie": "x"}}):
         with pytest.raises(tools.ToolError):
             make(R, **bad)
 
 
-def test_make_body_file_is_read_and_deleted(env, echo, tmp_path):
+def test_make_staged_files_are_read_and_deleted(env, echo, stage):
     R = env
-    tools.IN = str(tmp_path / "in"); os.mkdir(tools.IN)
-    open(tools.IN + "/b1", "wb").write(b"\x00\x01bytes")
-    _, tree = make(R, url=echo + "/echo", method="PUT", body_file="../b1")  # only the basename counts
+    f = stage("b.bin", b"\x00\x01bytes")
+    _, tree = make(R, url=echo + "/echo", method="PUT", body_file=f["file"])
     assert json.loads(tree["response/body.json"])["body"] == "\x00\x01bytes" and not os.listdir(tools.IN)
-    with pytest.raises(tools.ToolError, match="not found"):
-        make(R, url=echo + "/echo", body_file="nope")
+    assert "request/body.bin" not in tree  # a job-sourced body is not stored a second time
+    for bad in ("nope", "../x", "a/../b", "/etc/passwd", "d1/missing"):
+        with pytest.raises(tools.ToolError, match="not found"):
+            make(R, url=echo + "/echo", body_file=bad)
+    g = stage("g.txt", b"x")
+    with pytest.raises(tools.ToolError, match="fields only"):  # staged files are removed even when validation fails
+        make(R, type="form", url=echo + "/echo", method="POST", body_file=g["file"])
+    assert not os.listdir(tools.IN)
 
 
-def test_make_under_media_policy(nomedia, echo):
+def test_make_navigation_fields_and_cookies(env, echo, stage):
+    R = env
+    run_loop.run_until_complete(R.ctx.add_cookies([{"name": "sid", "value": "1", "url": echo}, {"name": "x", "value": "jar", "url": echo}]))
+    _, tree = make(R, url=echo + "/echo", method="POST", body={"a": "1 2", "n": 3, "t": True, "l": ["x", "y"]}, cookies={"x": "own", "k": 2.0})
+    got = json.loads(tree["response/body.json"])
+    assert got["body"] == "a=1+2&n=3&t=true&l=x&l=y" and tree["request/body.bin"] == b"a=1+2&n=3&t=true&l=x&l=y"  # JS String() of values
+    assert got["headers"]["content-type"] == "application/x-www-form-urlencoded"
+    assert got["headers"]["cookie"] == "sid=1; x=own; k=2", got["headers"]  # jar plus cookies, winning by name, never stored
+    assert not [c for c in run_loop.run_until_complete(R.ctx.cookies(echo)) if c["name"] == "k"]
+    _, tree = make(R, url=echo + "/echo?q=1", body={"a": "b"})  # GET: query string
+    assert json.loads(tree["response/body.json"])["path"] == "/echo?q=1&a=b"
+    up = stage("up.txt", b"hello")
+    _, tree = make(R, url=echo + "/echo", method="POST", body={"f": {**up, "content_type": "text/x-foo"}, "k": "v"})
+    got = json.loads(tree["response/body.json"])
+    assert got["headers"]["content-type"].startswith("multipart/form-data; boundary=")
+    assert 'name="f"; filename="up.txt"\r\nContent-Type: text/x-foo\r\n\r\nhello' in got["body"] and 'name="k"\r\n\r\nv' in got["body"]
+    _, tree = make(R, url=echo + "/echo", method="POST", headers={"Content-Type": "text/plain"}, body={"a": "b", "c": 1})
+    assert json.loads(tree["response/body.json"])["body"] == "a=b\r\nc=1\r\n"
+    for bad in ({"body": {"a": None}}, {"body": {"f": stage("z", b"")}, "headers": {"Content-Type": "text/plain"}, "method": "POST"},
+                {"body": {"a": "b"}, "headers": {"Content-Type": "application/json"}, "method": "POST"}):
+        with pytest.raises(tools.ToolError):
+            make(R, url=echo + "/echo", **bad)
+
+
+def test_make_form(env, echo, stage):
+    R = env
+    run_loop.run_until_complete(R.ctx.add_cookies([{"name": "sid", "value": "1", "url": echo}]))
+    out, tree = make(R, type="form", origin=echo + "/page#frag", url=echo + "/echo", method="POST", body={"a": "1", "l": ["x", "y"]})
+    got = json.loads(tree["response/body.json"])
+    assert got["body"] == "a=1&l=x&l=y" and got["headers"]["origin"] == echo and got["headers"]["referer"] == echo + "/page"
+    assert got["headers"]["cookie"] == "sid=1" and f"Origin: {echo}/page" in out and "[POST]" in out, (out, got)
+    _, tree = make(R, type="form", url=echo + "/echo?old=1", body={"a": "b"})  # GET: replaces the query string, like a browser
+    assert json.loads(tree["response/body.json"])["path"] == "/echo?a=b"
+    up = stage("up.txt", b"hello")
+    _, tree = make(R, type="form", url=echo + "/echo", method="POST", body={"f": {**up, "filename": up["filename"], "content_type": "text/x-foo"}})
+    assert 'filename="up.txt"\r\nContent-Type: text/x-foo\r\n\r\nhello' in json.loads(tree["response/body.json"])["body"]
+    up = stage("up2.txt", b"hello2")  # rewritten request: method, header and cookie; the browser's multipart Content-Type survives
+    out, tree = make(R, type="form", url=echo + "/echo", method="PUT", headers={"X-Foo": "bar"}, cookies={"c": "2"}, body={"f": up, "k": "v"})
+    got = json.loads(tree["response/body.json"])
+    assert (got["method"], got["headers"]["x-foo"], got["headers"]["cookie"]) == ("PUT", "bar", "sid=1; c=2"), got
+    assert got["headers"]["content-type"].startswith("multipart/form-data; boundary=")
+    assert 'filename="up2.txt"' in got["body"] and "hello2" in got["body"] and 'name="k"\r\n\r\nv' in got["body"] and "[PUT]" in out, got
+    _, tree = make(R, type="form", url=echo + "/redir", method="POST", body={"a": "b"})
+    assert json.loads(tree["response/body.json"])["method"] == "GET"
+    with pytest.raises(tools.ToolError, match="content_type"):
+        make(R, type="form", url=echo + "/echo", method="PUT", body={"f": {**stage("c.txt", b"c"), "content_type": "text/x-foo"}})
+    with pytest.raises(tools.ToolError, match="sends only the filename"):
+        make(R, type="form", url=echo + "/echo", body={"f": stage("d.txt", b"d")})
+    assert not os.listdir(tools.IN)
+
+
+def test_make_xhr(env, echo, stage):
+    R = env
+    run_loop.run_until_complete(R.ctx.add_cookies([{"name": "sid", "value": "1", "url": echo}]))
+    out, tree = make(R, type="xhr", url=echo + "/echo", method="POST", body="hi")  # raw text: no Content-Type inferred
+    got = json.loads(tree["response/body.json"])
+    assert got["body"] == "hi" and "content-type" not in got["headers"] and got["headers"]["cookie"] == "sid=1", got
+    assert got["headers"]["origin"] == echo and "[POST]" in out and tree["request/body.bin"] == b"hi"
+    _, tree = make(R, type="xhr", url=echo + "/echo", method="PUT", headers={"Content-Type": "application/json", "X-Foo": "bar"}, body='{"x":1}')
+    got = json.loads(tree["response/body.json"])
+    assert (got["method"], got["headers"]["content-type"], got["headers"]["x-foo"], got["body"]) == ("PUT", "application/json", "bar", '{"x":1}')
+    f = stage("raw.bin", b"\x00\xffraw")
+    _, tree = make(R, type="xhr", url=echo + "/echo", method="PUT", body_file=f["file"])
+    got = json.loads(tree["response/body.json"])
+    assert got["body"] == "\x00\xffraw" and "content-type" not in got["headers"]
+    up = stage("up.txt", b"hello")
+    _, tree = make(R, type="xhr", url=echo + "/echo", method="POST", body={"f": {**up, "filename": "n.txt", "content_type": "text/x-foo"}, "k": "v", "l": ["1", "2"]})
+    got = json.loads(tree["response/body.json"])
+    assert 'name="f"; filename="n.txt"\r\nContent-Type: text/x-foo\r\n\r\nhello' in got["body"] and 'name="l"\r\n\r\n2' in got["body"], got
+    _, tree = make(R, type="xhr", url=echo + "/echo", method="POST", body={"f": stage("e.txt", b"e")})  # type from the extension
+    assert "filename=\"e.txt\"\r\nContent-Type: text/plain" in json.loads(tree["response/body.json"])["body"]
+    _, tree = make(R, type="xhr", url=echo + "/echo", method="POST", body={"a": "b c"})
+    got = json.loads(tree["response/body.json"])
+    assert got["body"] == "a=b+c" and got["headers"]["content-type"] == "application/x-www-form-urlencoded;charset=UTF-8"
+    _, tree = make(R, type="xhr", url=echo + "/echo", method="POST", headers={"Content-Type": "text/plain"}, body={"a": "b"})
+    assert json.loads(tree["response/body.json"])["body"] == "a=b\r\n"
+    _, tree = make(R, type="xhr", url=echo + "/echo?q=1", body={"a": "b"})
+    assert json.loads(tree["response/body.json"])["path"] == "/echo?q=1&a=b"
+    out, tree = make(R, type="xhr", url=echo + "/big")  # more than one transport chunk, byte exact
+    assert tree["response/body.bin"] == bytes(range(256)) * 12288 and "[200]" in out
+    out, tree = make(R, type="xhr", url=echo + "/redir", method="POST", body="hi")
+    assert f"{echo}/echo => [200]" in out and "Redirects:" in out and json.loads(tree["response/body.json"])["method"] == "GET"
+    # cross origin: localhost vs 127.0.0.1
+    other = echo.replace("127.0.0.1", "localhost")
+    _, tree = make(R, type="xhr", url=other + "/echo", origin=echo + "/", method="PUT", headers={"X-A": "1"}, body="z")
+    got = json.loads(tree["response/body.json"])
+    assert got["headers"]["origin"] == echo and got["headers"]["x-a"] == "1" and got["method"] == "PUT"
+    with pytest.raises(tools.ToolError, match="not readable"):
+        make(R, type="xhr", url=other + "/nocors", origin=echo + "/")
+    with pytest.raises(tools.ToolError, match="ERR_"):
+        make(R, type="xhr", url="http://127.0.0.1:1/", origin=echo + "/")
+    with pytest.raises(tools.ToolError, match="Timeout"):
+        make(R, type="xhr", url=echo + "/slow", timeout_ms=500)
+    for bad in ({"headers": {"Cookie": "a=b"}}, {"headers": {"User-Agent": "x"}}, {"headers": {"Sec-Foo": "x"}}, {"cookies": {"a": "b"}},
+                {"method": "TRACE"}, {"body": "x"}, {"credentials": "sometimes"}):
+        with pytest.raises(tools.ToolError):
+            make(R, type="xhr", url=echo + "/echo", **bad)
+    assert not os.listdir(tools.IN) and len(R.ctx.pages) == len(R.tabs.get("main", []))
+
+
+def test_make_large_files(env, echo, stage):
+    R = env
+    n = 150 << 20
+    f = stage("big.bin", b"")
+    with open(f"{tools.IN}/{f['file']}", "wb") as fh:
+        fh.truncate(n)  # zeros: the sha is that of n zero bytes
+    import hashlib
+    h = hashlib.sha256()
+    for _ in range(n >> 20):
+        h.update(bytes(1 << 20))
+    _, tree = make(R, type="xhr", url=echo + "/hash", method="PUT", body_file=f["file"], timeout_ms=120_000)
+    assert json.loads(tree["response/body.json"]) == {"len": n, "sha": h.hexdigest(), "ct": None}
+    g = stage("big2.bin", b"")
+    with open(f"{tools.IN}/{g['file']}", "wb") as fh:
+        fh.truncate(n)
+    _, tree = make(R, type="form", url=echo + "/hash", method="POST", body={"f": g}, timeout_ms=120_000)
+    got = json.loads(tree["response/body.json"])
+    assert n < got["len"] < n + 1000 and got["ct"].startswith("multipart/form-data")
+    h2 = stage("big3.bin", b"")
+    with open(f"{tools.IN}/{h2['file']}", "wb") as fh:
+        fh.truncate(n)
+    _, tree = make(R, type="form", url=echo + "/hash", method="PUT", headers={"X-A": "1"}, body={"f": h2}, timeout_ms=120_000)  # rewritten under the pause
+    assert n < json.loads(tree["response/body.json"])["len"] < n + 1000
+
+
+def test_make_navigation_body_cap(env, echo, stage):
+    f = stage("big.bin", b"")
+    with open(f"{tools.IN}/{f['file']}", "wb") as fh:
+        fh.truncate(tools.CDP_BODY_MAX + 1)
+    with pytest.raises(tools.ToolError, match="too large"):
+        make(env, url=echo + "/echo", method="POST", body_file=f["file"])
+    assert not os.listdir(tools.IN)
+
+
+def test_make_under_media_policy(nomedia, echo, stage):
     R = nomedia
     set_policy(R)  # layer A (route) and D (Fetch on the response) are both on the hidden tab
     _, tree = make(R, url=echo + "/echo", method="POST", headers={"Content-Type": "text/plain"}, body="hi")
@@ -460,3 +641,15 @@ def test_make_under_media_policy(nomedia, echo):
     assert "[BLOCKED] blocked: media policy" in out and not any(p.startswith("response/body") for p in tree), (out, list(tree))
     assert json.loads(tree["response/headers.json"])["content-type"] == "image/png" and "request/headers.json" in tree
     assert R.blocked[-1]["layer"] == "D" and R.blocked[-1]["url"].endswith("/img")
+    for kw in ({"type": "form", "method": "POST", "body": {"a": "b"}}, {"type": "xhr"}):  # layer D for every type
+        out, tree = make(R, url=echo + "/img", **kw)
+        assert "[BLOCKED] blocked: media policy" in out and not any(p.startswith("response/body") for p in tree), (kw, out, list(tree))
+        assert json.loads(tree["response/headers.json"])["content-type"] == "image/png" and "request/headers.json" in tree
+    assert [b["layer"] for b in R.blocked].count("D") >= 3
+    _, tree = make(R, type="xhr", url=echo + "/echo", method="POST", body="hi")  # allowed ones still work
+    assert json.loads(tree["response/body.json"])["body"] == "hi"
+    big = stage("big.bin", b"")  # layer A pauses every request: a big upload would kill the browser, so it is an error
+    with open(f"{tools.IN}/{big['file']}", "wb") as fh:
+        fh.truncate(tools.ROUTED_UPLOAD_CAP + 1)
+    with pytest.raises(tools.ToolError, match="limited to"):
+        make(R, type="xhr", url=echo + "/hash", method="PUT", body_file=big["file"])

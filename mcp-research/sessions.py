@@ -24,6 +24,8 @@ import ports
 from pool import Pool, Sessiond
 from toolserver.mediapolicy import Policy
 
+MAX_REQUEST_TIMEOUT_MS = int(os.environ.get("MAX_REQUEST_TIMEOUT_MS", 300_000))  # browser_network_request_make
+
 log = logging.getLogger("sessions")
 
 EGRESS = os.environ.get("EGRESS", "clear")  # "tor" | "clear" | "i2p"
@@ -110,7 +112,8 @@ async def _run_client(bs: BrowserSession) -> None:
         bs.running = True
         url = f"http://127.0.0.1:{ports.mcp_port(bs.uid)}/mcp"
         await _wait_http(url)
-        async with streamablehttp_client(url, headers={"Host": UPSTREAM_HOST}) as (r, w, _):
+        async with streamablehttp_client(
+                url, headers={"Host": UPSTREAM_HOST}, sse_read_timeout=MAX_REQUEST_TIMEOUT_MS / 1000 + 60) as (r, w, _):
             async with ClientSession(r, w) as cs:
                 await cs.initialize()
                 if bs.policy:

@@ -9,16 +9,19 @@ import json
 import mimetypes
 import os
 import re
+import secrets
+import shutil
 import time
+import urllib.parse
 
 from playwright.async_api import Error as PWError
 
 from .browsers import MAIN, Registry, ToolError, locator
-from .mediapolicy import Policy, blocked_message
+from .mediapolicy import ROUTED_UPLOAD_CAP, Policy, blocked_message
 from .textcap import DEFAULT_TEXT_CAP, cap_found_line, cap_snapshot
 
 OUT = os.environ.get("TOOLSERVER_OUT", "out")
-IN = os.environ.get("TOOLSERVER_IN", "in")  # bodies the gateway leaves for browser_network_request_make
+IN = os.environ.get("TOOLSERVER_IN", "in")  # files the gateway stages (in/<random>/<filename>) for browser_network_request_make
 ACT_TIMEOUT = 10_000  # ms; a stale ref or hidden element fails fast
 HANDLERS: dict = {}
 
@@ -464,112 +467,482 @@ async def network_request_get(R, bid, a):
     return file_result("Network request", name) + "\n" + net_line(a["index"], e, R.blocked_urls)
 
 
-MAX_TIMEOUT = 120_000  # ms
+# ------------------------------------------------------- browser_network_request_make
+CDP_BODY_MAX = 72 * 1024 * 1024  # a navigation body is one base64 CDP message; Chromium kills the context above ~75 MiB raw
+NO_FRAMING = {"host", "content-length", "transfer-encoding", "connection"}  # they break the framing (a Host rewrite hung a fetch)
+XHR_FORBIDDEN = {"accept-charset", "accept-encoding", "access-control-request-headers", "access-control-request-method", "cookie",
+                 "cookie2", "date", "dnt", "expect", "keep-alive", "origin", "referer", "set-cookie", "te", "trailer", "upgrade",
+                 "user-agent", "via"}  # fetch silently drops these (plus Sec-* and Proxy-*)
+ENCODINGS = ("application/x-www-form-urlencoded", "multipart/form-data", "text/plain")
+ORIGIN_PAGE = "<!doctype html><meta charset=utf-8><link rel=icon href='data:,'><title>request</title><body>"
 
 
-def read_in(name: str) -> bytes:
-    """The body the gateway left in the in dir; deleted once read. Never a path the agent chose."""
-    path = os.path.join(IN, os.path.basename(str(name)))
-    try:  # no cap here: only the gateway (MAX_REQUEST_BODY) and the session itself ever write in/
-        with open(path, "rb") as f:
-            return f.read()
-    except OSError:
+def js_str(v) -> str:
+    """A field or cookie value as JS String() would show it."""
+    if isinstance(v, bool):
+        return "true" if v else "false"
+    if isinstance(v, float) and v.is_integer():
+        return str(int(v))
+    if isinstance(v, (int, float, str)):
+        return str(v)
+    raise ToolError("values are text, numbers or booleans")
+
+
+def staged_path(name) -> str:
+    """The file the gateway staged as in/<random>/<filename>; never a path the agent chose (the gateway discards its own hidden
+    arguments and only ever writes these two components)."""
+    parts = str(name).split("/")
+    if len(parts) != 2 or any(p in ("", ".", "..") for p in parts):
         raise ToolError("request body file not found")
-    finally:
-        with contextlib.suppress(OSError):
-            os.unlink(path)
+    path = os.path.join(IN, *parts)
+    if not os.path.isfile(path):
+        raise ToolError("request body file not found")
+    return path
+
+
+def staged_names(a: dict):
+    body = a.get("body")
+    yield a.get("body_file")
+    if isinstance(body, dict):
+        for v in body.values():
+            for i in v if isinstance(v, list) else [v]:
+                if isinstance(i, dict):
+                    yield i.get("file")
+
+
+def drop_staged(a: dict) -> None:
+    for n in staged_names(a):
+        if isinstance(n, str) and n.split("/")[0] not in ("", ".", ".."):
+            shutil.rmtree(os.path.join(IN, n.split("/")[0]), ignore_errors=True)
+
+
+def merge_headers(base: dict, over: dict) -> list[dict]:
+    low = {k.lower() for k in over}
+    return [{"name": k, "value": v} for k, v in {**base, **over}.items() if k in over or k.lower() not in low]
+
+
+def add_query(url: str, pairs: list) -> str:
+    u = urllib.parse.urlsplit(url)
+    return urllib.parse.urlunsplit(u._replace(query="&".join(filter(None, [u.query, urllib.parse.urlencode(pairs)]))))
+
+
+class Req:
+    """One validated browser_network_request_make call."""
+
+    def __init__(self, R, bid, a):
+        self.url, self.filename = a["url"], a.get("filename")
+        if not re.match(r"https?://", self.url):
+            raise ToolError("url must be http(s)")
+        self.method = str(a.get("method") or "GET").upper()
+        if not re.fullmatch(r"[A-Z]+", self.method):
+            raise ToolError("invalid method")
+        self.type = a.get("type") or "navigation"
+        if self.type not in ("navigation", "form", "xhr"):
+            raise ToolError("type must be navigation, form or xhr")
+        self.timeout = int(a.get("timeout_ms") or 30_000)
+        hs = a.get("headers") or {}
+        if not isinstance(hs, dict) or not all(isinstance(v, str) for v in hs.values()):
+            raise ToolError("headers must be an object of strings")
+        self.headers = dict(hs)
+        for k in self.headers:
+            lk = k.lower()
+            if lk in NO_FRAMING:
+                raise ToolError(f"header {k} breaks the request framing and cannot be set")
+            if self.type == "xhr" and (lk in XHR_FORBIDDEN or lk.startswith(("sec-", "proxy-"))):
+                raise ToolError(f"header {k} cannot be set by a page script: fetch would silently drop it (use type=navigation or form)")
+        if self.type == "xhr" and self.method in ("CONNECT", "TRACE", "TRACK"):
+            raise ToolError(f"fetch cannot send {self.method}")
+        cs = a.get("cookies")
+        if cs is not None and not isinstance(cs, dict):
+            raise ToolError("cookies must be an object {name: value}")
+        self.cookies = {k: js_str(v) for k, v in (cs or {}).items()}
+        if self.cookies and any(k.lower() == "cookie" for k in self.headers):
+            raise ToolError("headers.Cookie and cookies are mutually exclusive")
+        if self.cookies and self.type == "xhr":
+            raise ToolError("cookies cannot be set per request by a page script: set them with browser_cookie_set beforehand, or use type=form or navigation")
+        self.credentials = a.get("credentials")
+        if self.credentials is not None and (self.type != "xhr" or self.credentials not in ("include", "omit")):
+            raise ToolError("credentials is include or omit, and for type=xhr only")
+        self.credentials = self.credentials or "include"
+        self.origin = None
+        if a.get("origin") is not None and self.type == "navigation":
+            raise ToolError("origin is for type=form and xhr")
+        if self.type != "navigation":
+            cur = urllib.parse.urldefrag(R.page(bid).url).url if bid else ""
+            self.origin = str(a["origin"]) if a.get("origin") else cur if re.match(r"https?://", cur) else self.url
+            if not re.match(r"https?://", self.origin):
+                raise ToolError("origin must be http(s)")
+        # ---- body
+        body, self.kind, self.text, self.fields, self.file = a.get("body"), "none", None, [], None
+        if a.get("body_file") and body is not None:
+            raise ToolError("body and a job file body are mutually exclusive")
+        if a.get("body_file"):
+            self.kind, self.file = "file", staged_path(a["body_file"])
+        elif isinstance(body, str):
+            self.kind, self.text = "text", body
+        elif isinstance(body, dict):
+            self.kind = "fields"
+            for n, v in body.items():
+                for i in v if isinstance(v, list) else [v]:
+                    if isinstance(i, dict):
+                        self.fields.append((n, {**i, "path": staged_path(i.get("file"))}))
+                    elif i is None:
+                        raise ToolError(f"field {n!r}: null is not a value")
+                    else:
+                        self.fields.append((n, js_str(i)))
+        elif body is not None:
+            raise ToolError("body must be text, a job file or a fields object")
+        self.has_file = any(isinstance(v, dict) for _, v in self.fields)
+        bodyless = self.method in ("GET", "HEAD")
+        if self.type == "form" and self.kind in ("text", "file"):
+            raise ToolError("type=form sends fields only")
+        if self.type == "xhr" and bodyless and self.kind in ("text", "file"):
+            raise ToolError("fetch cannot send a body with GET/HEAD")
+        if bodyless and self.has_file:
+            raise ToolError("a GET/HEAD form sends only the filename: use another method for a file part")
+        self.enc = self.encoding() if self.kind == "fields" and not bodyless else None
+        ct_parts = [v for _, v in self.fields if isinstance(v, dict) and v.get("content_type")]
+        self.rewrites = self.method not in ("GET", "POST") or bool(self.cookies) or any(k.lower() != "content-type" for k in self.headers)
+        if self.type == "form" and ct_parts and self.rewrites:
+            raise ToolError("content_type of a file part needs a plain GET/POST with no headers and no cookies (use type=xhr)")
+        self.files = [v["path"] for _, v in self.fields if isinstance(v, dict)] + ([self.file] if self.file else [])
+        routed = R.policy is not None and R.policy.active and not R.policy.media  # layer A pauses every request
+        if routed and (self.type == "xhr" or ct_parts) and sum(map(os.path.getsize, self.files)) > ROUTED_UPLOAD_CAP:
+            raise ToolError(f"this session's media policy filters every request, so uploads are limited to {ROUTED_UPLOAD_CAP} bytes here")
+
+    def encoding(self) -> str:
+        ct = next((v for k, v in self.headers.items() if k.lower() == "content-type"), None)
+        if ct is None:
+            return "multipart/form-data" if self.has_file else "application/x-www-form-urlencoded"
+        mt = ct.split(";")[0].strip().lower()
+        if mt not in ENCODINGS:
+            raise ToolError(f"with fields, Content-Type is one of {', '.join(ENCODINGS)}")
+        if self.has_file and mt != "multipart/form-data":
+            raise ToolError("a file part needs multipart/form-data")
+        return mt
+
+    def text_plain(self) -> str:
+        return "".join(f"{n}={v}\r\n" for n, v in self.fields)
+
+    def encoded(self) -> tuple[bytes, str]:
+        """type=navigation: the fields as a body we build, and its Content-Type."""
+        if self.enc == "text/plain":
+            return self.text_plain().encode(), "text/plain"
+        if self.enc == "application/x-www-form-urlencoded":
+            return urllib.parse.urlencode(self.fields).encode(), self.enc
+        if sum(map(os.path.getsize, self.files)) > CDP_BODY_MAX:
+            raise ToolError(f"request body too large for type=navigation (max {CDP_BODY_MAX} bytes): use type=form or xhr")
+        b, esc, out = "----spiderhoarder" + secrets.token_hex(16), lambda s: s.replace('"', "%22").replace("\r", "%0D").replace("\n", "%0A"), []
+        for n, v in self.fields:
+            if isinstance(v, str):
+                out += [f'--{b}\r\nContent-Disposition: form-data; name="{esc(n)}"\r\n\r\n'.encode(), v.encode(), b"\r\n"]
+            else:
+                ct = v.get("content_type") or mimetypes.guess_type(v["filename"])[0] or "application/octet-stream"
+                out += [f'--{b}\r\nContent-Disposition: form-data; name="{esc(n)}"; filename="{esc(v["filename"])}"\r\nContent-Type: {ct}\r\n\r\n'.encode(),
+                        open(v["path"], "rb").read(), b"\r\n"]
+        return b"".join(out + [f"--{b}--\r\n".encode()]), f"multipart/form-data; boundary={b}"
+
+
+async def cookie_header(R, url: str, extra: dict) -> str:
+    jar = {c["name"]: c["value"] for c in await R.ctx.cookies(url)} | extra
+    return "; ".join(f"{k}={v}" for k, v in jar.items())
 
 
 @tool("browser_network_request_make")
 async def network_request_make(R, bid, a):
-    """Sends one request as the first request of a navigation in a hidden tab (CDP Fetch rewrites its method, headers and
-    body), so cookies, TLS fingerprint, proxy and the media policy are the real browser's. Writes the same directory as
-    network_request_get for the final request/response, then a `Redirects:` line if there were hops."""
-    url, method = a["url"], str(a.get("method") or "GET").upper()
-    if not re.match(r"https?://", url):
-        raise ToolError("url must be http(s)")
-    if not re.fullmatch(r"[A-Z]+", method):
-        raise ToolError("invalid method")
-    headers = a.get("headers") or {}
-    if not isinstance(headers, dict) or not all(isinstance(v, str) for v in headers.values()):
-        raise ToolError("headers must be an object of strings")
-    headers = dict(headers)
-    if a.get("body") is not None and a.get("body_file"):
-        raise ToolError("body and body_job_id/body_path are mutually exclusive")
-    body = read_in(a["body_file"]) if a.get("body_file") else None  # read first: it is deleted even if we fail later
-    if a.get("body") is not None:
-        body = str(a["body"]).encode()
-    timeout = min(int(a.get("timeout_ms") or 30_000), MAX_TIMEOUT)
-    if not any(k.lower() == "cookie" for k in headers):  # a POST from about:blank is cross-site: Lax/Strict cookies would be dropped
-        if cookies := await R.ctx.cookies(url):
-            headers["Cookie"] = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
+    """Sends one request from a hidden tab, as a navigation (CDP Fetch rewrites its method, headers and body), a form submit or
+    a page script's fetch, so cookies, TLS fingerprint, proxy and the media policy are the real browser's. Writes the same
+    directory as network_request_get for the final request/response, then `Origin:` (form, xhr) and `Redirects:` lines."""
+    try:
+        q = Req(R, bid, a)
+        page, cdp = await R.hidden_page()
+        try:
+            return await (_xhr if q.type == "xhr" else _document)(R, q, page, cdp)
+        finally:
+            await page.close()
+    finally:
+        drop_staged(a)  # also when validation failed
 
-    page = await R.hidden_page()
-    cdp = await R.ctx.new_cdp_session(page)
-    net, downloads, failed, first = [], [], [], [True]
-    blocked0 = len(R.blocked)
+
+def tail(q, line: str, redirects: list) -> str:
+    return (f"\n{line}" + (f"\nOrigin: {q.origin}" if q.origin else "")) + (f"\nRedirects: {json.dumps(redirects)}" if redirects else "")
+
+
+def hops_of(net: list, method: str, kept: bool):
+    redirects = []
+    for r in net:
+        redirects.append({"url": r.url, "status": r.status})
+        if r.status == 303 and method != "HEAD" or r.status in (301, 302) and method == "POST":
+            method, kept = "GET", False
+    return redirects, method, kept
+
+
+async def _document(R, q, page, cdp):
+    """type=navigation and form: the request is a main-frame document request, rewritten while paused."""
+    timeout = q.timeout
+    net, downloads, failed = [], [], []
+    blocked0, outcome = len(R.blocked), asyncio.Event()
+    st = {"phase": "origin" if q.type == "form" else "go"}  # which Document request is next: origin page -> submit -> the rest untouched
+    headers, record, post = dict(q.headers), None, None
+    if q.type == "navigation":
+        if q.kind == "fields" and q.enc is None:
+            q.url = add_query(q.url, [(n, v) for n, v in q.fields])
+        elif q.kind == "fields":
+            post, ct = q.encoded()
+            headers = {k: v for k, v in headers.items() if k.lower() != "content-type"} | {"Content-Type": ct}
+            record = post
+        elif q.kind == "text":
+            post = record = q.text.encode()
+        elif q.kind == "file":
+            post = open(q.file, "rb").read()
+        if post is not None and len(post) > CDP_BODY_MAX:
+            raise ToolError(f"request body too large for type=navigation (max {CDP_BODY_MAX} bytes): use type=form or xhr")
+        if not any(k.lower() == "cookie" for k in headers) and (c := await cookie_header(R, q.url, q.cookies)):
+            headers["Cookie"] = c
+    else:
+        headers = {k: v for k, v in headers.items() if k.lower() != "content-type"}  # the browser owns it: the form's enctype
+        if q.cookies:
+            headers["Cookie"] = await cookie_header(R, q.url, q.cookies)
     # Playwright's own Request objects do not know about the override (method GET, no post data): ours comes from the arguments
-    page.on("response", lambda r: r.frame == page.main_frame and r.request.resource_type == "document" and net.append(r))
-    page.on("requestfailed", lambda r: failed.append(r))
-    got_download = asyncio.Event()
-    page.on("download", lambda d: (downloads.append(d), got_download.set()))
+    def on_response(r):
+        if r.frame == page.main_frame and r.request.resource_type == "document" and st["phase"] in ("go", "passed"):
+            net.append(r)
+            if not (300 <= r.status < 400 and r.headers.get("location")) and "attachment" not in r.headers.get("content-disposition", "").lower():
+                outcome.set()  # (an attachment ends with its download event)
+    page.on("response", on_response)
+    page.on("requestfailed", lambda r: (failed.append(r), r.resource_type == "document" and r.failure != "net::ERR_ABORTED" and st["phase"] in ("go", "passed") and outcome.set()))  # a download aborts its navigation: its event ends the wait
+    page.on("download", lambda d: (downloads.append(d), outcome.set()))
 
     async def paused(ev):
         args = {"requestId": ev["requestId"]}
-        if first[0]:  # the navigation itself; later requests (redirect hops, subresources) pass untouched
-            first[0] = False
-            args |= {"method": method, "headers": [{"name": k, "value": v} for k, v in headers.items()]}
-            if body is not None:
-                args["postData"] = base64.b64encode(body).decode()
+        if ev.get("resourceType") == "Document":
+            if st["phase"] == "origin":
+                st["phase"] = "wait"
+                with contextlib.suppress(PWError):
+                    await cdp.send("Fetch.fulfillRequest", {"requestId": ev["requestId"], "responseCode": 200, "body": base64.b64encode(ORIGIN_PAGE.encode()).decode(),
+                                                            "responseHeaders": [{"name": "Content-Type", "value": "text/html; charset=utf-8"}]})
+                return
+            if st["phase"] in ("go", "submit"):  # the request itself; later ones (redirect hops, subresources) pass untouched
+                st["phase"] = "passed"
+                if q.type == "navigation":
+                    args |= {"method": q.method, "headers": [{"name": k, "value": v} for k, v in headers.items()]}
+                    if post is not None:
+                        args["postData"] = base64.b64encode(post).decode()
+                else:  # a form: keep the browser's own headers (multipart boundary, Origin, Referer) and add ours
+                    if q.method not in ("GET", "POST"):
+                        args["method"] = q.method
+                    args["headers"] = merge_headers(ev["request"]["headers"], headers)
         with contextlib.suppress(PWError):
             await cdp.send("Fetch.continueRequest", args)
 
     cdp.on("Fetch.requestPaused", lambda ev: R._spawn(paused(ev)))
-    try:
+    err = None
+    if q.type == "navigation":
         await cdp.send("Fetch.enable", {"patterns": [{"urlPattern": "*", "requestStage": "Request"}]})
-        err = None
         try:
-            await page.goto(url, wait_until="commit", timeout=timeout)  # redirects are followed before the commit
+            await page.goto(q.url, wait_until="commit", timeout=timeout)  # redirects are followed before the commit
         except PWError as e:
             err = e
             if "Download is starting" in str(e):  # the event may trail the error
                 with contextlib.suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(got_download.wait(), timeout / 1000)
-        parts, redirects = {}, []
-        blocked = [b for b in R.blocked[blocked0:] if any(f.url == b["url"] for f in failed)]
-        hops = net if blocked else net[:-1]  # a blocked response never becomes a Response: every one in `net` was a redirect
-        m, kept = method, body is not None  # the final request's method/body: browsers turn POST into GET on 301/302/303
-        for r in hops:
-            redirects.append({"url": r.url, "status": r.status})
-            if r.status == 303 and m != "HEAD" or r.status in (301, 302) and m == "POST":
-                m, kept = "GET", False
-        if downloads:  # Content-Disposition: attachment; the navigation "fails" with "Download is starting"
-            path = await asyncio.wait_for(downloads[0].path(), timeout / 1000)
-            body_bytes = await asyncio.to_thread(lambda: open(path, "rb").read())
-        elif not blocked and (err or not net):
-            raise ToolError(str(err or "no response").split("\n")[0])
-        if blocked:  # Playwright reports no response for it: the headers are the registry's record of what was blocked
-            req = next(f for f in failed if f.url == blocked[0]["url"])
-            hdrs = await req.all_headers()
-            parts["response/headers.json"] = json.dumps({"content-type": blocked[0]["kind"]}, indent=1).encode()
-            line = f"1. [{m}] {req.url} => [BLOCKED] blocked: media policy"
+                    await asyncio.wait_for(outcome.wait(), timeout / 1000)
+    else:
+        await cdp.send("Fetch.enable", {"patterns": [{"urlPattern": "*", "requestStage": "Request"}]})
+        await page.goto(q.origin, wait_until="load", timeout=timeout)
+        st["phase"] = "submit" if q.rewrites else "wait"
+        if not q.rewrites:  # a file swapped in with DataTransfer is unusable under a request-stage pause
+            await cdp.send("Fetch.disable")
+            st["phase"] = "passed"
+        await page.evaluate(FORM_JS, {"action": q.url, "method": "get" if q.method in ("GET", "HEAD") else "post", "enc": q.enc or "application/x-www-form-urlencoded",
+                                      "fields": [[n, None if isinstance(v, dict) else v] for n, v in q.fields]})
+        files = [v for _, v in q.fields if isinstance(v, dict)]
+        for i, f in enumerate(files):
+            await page.locator("input[type=file]").nth(i).set_input_files(f["path"])
+        if swaps := [[i, f["filename"], f["content_type"]] for i, f in enumerate(files) if f.get("content_type")]:
+            await page.evaluate(SWAP_JS, swaps)
+        net.clear()
+        await page.evaluate("setTimeout(() => document.getElementById('f').submit())")
+        try:
+            await asyncio.wait_for(outcome.wait(), timeout / 1000)
+        except asyncio.TimeoutError:
+            err = ToolError(f"Timeout {timeout}ms exceeded")
+    parts = {}
+    blocked = [b for b in R.blocked[blocked0:] if any(f.url == b["url"] for f in failed)]
+    hops = net if blocked else net[:-1]  # a blocked response never becomes a Response: every one in `net` was a redirect
+    redirects, m, kept = hops_of(hops, q.method, record is not None)
+    if downloads:  # Content-Disposition: attachment; the navigation "fails" with "Download is starting"
+        path = await asyncio.wait_for(downloads[0].path(), timeout / 1000)
+        body_bytes = await asyncio.to_thread(lambda: open(path, "rb").read())
+    elif not blocked and (err or not net):
+        raise ToolError(str(err or "no response").split("\n")[0])
+    if blocked:  # Playwright reports no response for it: the headers are the registry's record of what was blocked
+        req = next(f for f in failed if f.url == blocked[0]["url"])
+        hdrs = await req.all_headers()
+        parts["response/headers.json"] = json.dumps({"content-type": blocked[0]["kind"]}, indent=1).encode()
+        line = f"1. [{m}] {req.url} => [BLOCKED] blocked: media policy"
+    else:
+        final = net[-1] if net else None
+        hdrs = await final.request.all_headers()
+        if downloads:
+            fh = await final.all_headers()
+            parts["response/headers.json"] = json.dumps(fh, indent=1).encode()
+            parts[f"response/body{body_ext(fh)}"] = body_bytes
         else:
-            final = net[-1] if net else None
-            hdrs = await final.request.all_headers()
-            if downloads:
-                fh = await final.all_headers()
-                parts["response/headers.json"] = json.dumps(fh, indent=1).encode()
-                parts[f"response/body{body_ext(fh)}"] = body_bytes
-            else:
-                await response_parts(final, parts)
-            line = f"1. [{m}] {final.url} => [{final.status}] {final.status_text}"
-        parts["request/headers.json"] = json.dumps(hdrs, indent=1).encode()
-        if kept:
-            parts[f"request/body{body_ext(hdrs)}"] = body
+            await response_parts(final, parts)
+        line = f"1. [{m}] {final.url} => [{final.status}] {final.status_text}"
+    parts["request/headers.json"] = json.dumps(hdrs, indent=1).encode()
+    if kept:
+        parts[f"request/body{body_ext(hdrs)}"] = record
+    return file_result("Network request", write_tree(q.filename, parts)) + tail(q, line, redirects)
+
+
+FORM_JS = """({action, method, enc, fields}) => {
+  const f = document.createElement('form'); f.id = 'f'; f.action = action; f.method = method; f.enctype = enc;
+  for (const [name, v] of fields) {
+    const i = document.createElement('input'); i.name = name;
+    if (v === null) i.type = 'file'; else { i.type = 'hidden'; i.value = v; }
+    f.append(i);
+  }
+  document.body.append(f);
+}"""
+SWAP_JS = """swaps => swaps.forEach(([i, name, type]) => {
+  const inp = document.querySelectorAll('input[type=file]')[i], dt = new DataTransfer();
+  dt.items.add(new File([inp.files[0]], name, {type})); inp.files = dt.files;
+})"""
+# One fetch in the generated page. Raw bodies are typeless Blobs so fetch infers no Content-Type; the response body goes to
+# Python in ~1 MiB base64 chunks (getResponseBody is unusable for fetch with a File body), after the media policy saw its headers.
+XHR_JS = """async ({url, method, headers, credentials, kind, text, enc, fields}) => {
+  const files = [...document.querySelectorAll('input[type=file]')].map(i => i.files[0]);
+  const init = {method, headers, credentials};
+  if (kind === 'text') init.body = new Blob([text]);
+  else if (kind === 'file') init.body = files[0].slice();
+  else if (kind === 'fields' && enc === 'text/plain') init.body = text;
+  else if (kind === 'fields') {
+    const d = enc === 'multipart/form-data' ? new FormData() : new URLSearchParams();
+    for (const [n, v] of fields) {
+      if (typeof v === 'string') d.append(n, v);
+      else { const f = files[v.i]; d.append(n, v.type != null || v.filename !== f.name ? new File([f], v.filename, {type: v.type ?? f.type}) : f, v.filename); }
+    }
+    init.body = d;
+  }
+  let resp;
+  try { resp = await fetch(url, init); } catch (e) { return {error: String(e)}; }
+  const out = {status: resp.status, statusText: resp.statusText, url: resp.url};
+  if (await window.__blocked(resp.headers.get('content-type'), resp.status, resp.url)) {
+    try { await resp.body?.cancel(); } catch (e) {}
+    return {...out, blocked: true};
+  }
+  if (!resp.body) return out;
+  const reader = resp.body.getReader();
+  let buf = [], n = 0;
+  const flush = async () => {
+    if (!n) return;
+    const b64 = await new Promise(r => { const fr = new FileReader(); fr.onload = () => r(fr.result.slice(fr.result.indexOf(',') + 1)); fr.readAsDataURL(new Blob(buf)); });
+    buf = []; n = 0; await window.__chunk(b64);
+  };
+  try {
+    for (;;) { const {done, value} = await reader.read(); if (done) break; buf.push(value); n += value.length; if (n >= (1 << 20)) await flush(); }
+    await flush();
+  } catch (e) { return {...out, error: String(e)}; }
+  return out;
+}"""
+
+
+async def _xhr(R, q, page, cdp):
+    """type=xhr: a fetch run by the generated page at q.origin, so CORS, cookies and Origin are a page script's. Request-stage
+    Fetch is only on while the origin page loads: a pause makes big File bodies hang."""
+    timeout, net, failed = q.timeout, [], []
+    root = out_path(q.filename)
+    os.makedirs(os.path.join(root, "response"), exist_ok=True)
+    body_path, fh, blocked = os.path.join(root, "response", "body.part"), [None], []
+
+    def chunk(b64):
+        if fh[0] is None:
+            fh[0] = open(body_path, "wb")
+        fh[0].write(base64.b64decode(b64))
+
+    def policy(ctype, status, url):
+        if status in (204, 205) or not R.policy.content_type_blocked(ctype):
+            return False
+        R._block(url, ctype or "", "D")
+        blocked.append(ctype or "")
+        return True
+
+    first = [True]
+
+    async def paused(ev):
+        args = {"requestId": ev["requestId"]}
+        if first[0] and ev.get("resourceType") == "Document":
+            first[0] = False
+            with contextlib.suppress(PWError):
+                await cdp.send("Fetch.fulfillRequest", {"requestId": ev["requestId"], "responseCode": 200, "body": base64.b64encode(ORIGIN_PAGE.encode()).decode(),
+                                                        "responseHeaders": [{"name": "Content-Type", "value": "text/html; charset=utf-8"}]})
+            return
+        with contextlib.suppress(PWError):
+            await cdp.send("Fetch.continueRequest", args)
+
+    try:
+        page.on("response", lambda r: r.request.resource_type == "fetch" and net.append(r))
+        page.on("requestfailed", lambda r: r.resource_type == "fetch" and failed.append(r))
+        await page.expose_function("__chunk", chunk)
+        await page.expose_function("__blocked", policy)
+        cdp.on("Fetch.requestPaused", lambda ev: R._spawn(paused(ev)))
+        await cdp.send("Fetch.enable", {"patterns": [{"urlPattern": "*", "requestStage": "Request"}]})
+        await page.goto(q.origin, wait_until="load", timeout=timeout)
+        await cdp.send("Fetch.disable")
+        await page.evaluate("n => { for (let i = 0; i < n; i++) { const e = document.createElement('input'); e.type = 'file'; document.body.append(e); } }", len(q.files))
+        for i, path in enumerate(q.files):
+            await page.locator("input[type=file]").nth(i).set_input_files(path)
+        spec = {"url": q.url, "method": q.method, "credentials": q.credentials, "kind": q.kind, "text": None, "enc": q.enc, "fields": [],
+                "headers": {k: v for k, v in q.headers.items() if not (q.kind == "fields" and k.lower() == "content-type")}}
+        if q.kind == "text":
+            spec["text"] = q.text
+        elif q.kind == "fields" and q.method in ("GET", "HEAD"):
+            spec["kind"], spec["url"] = "none", add_query(q.url, [(n, v) for n, v in q.fields])
+        elif q.kind == "fields" and q.enc == "text/plain":
+            spec["text"] = q.text_plain()
+        elif q.kind == "fields":
+            i = 0
+            for n, v in q.fields:
+                if isinstance(v, dict):
+                    spec["fields"].append([n, {"i": i, "filename": v["filename"], "type": v.get("content_type")}])
+                    i += 1
+                else:
+                    spec["fields"].append([n, v])
+        try:
+            res = await asyncio.wait_for(page.evaluate(XHR_JS, spec), timeout / 1000)
+        except asyncio.TimeoutError:
+            raise ToolError(f"Timeout {timeout}ms exceeded") from None
     finally:
-        await page.close()
-    out = file_result("Network request", write_tree(a["filename"], parts)) + "\n" + line
-    return out + (f"\nRedirects: {json.dumps(redirects)}" if redirects else "")
+        if fh[0]:
+            fh[0].close()
+    if "status" not in res:
+        reasons = [f.failure for f in failed if f.failure and f.failure != "net::ERR_FAILED"]
+        if reasons:
+            raise ToolError(reasons[0])
+        if res["error"] == "TypeError: Failed to fetch":
+            raise ToolError("the response is not readable by type=xhr (blocked by CORS, a cross-origin redirect or mixed content; the request "
+                            f"itself may have been sent): try origin={q.url.split('?')[0]!r} (same origin), credentials=\"omit\", or type=navigation/form")
+        raise ToolError(res["error"])
+    if res.get("error"):
+        raise ToolError("the response body could not be read: " + res["error"])
+    final = net[-1]
+    hdrs = await final.request.all_headers()
+    parts = {"request/headers.json": json.dumps(hdrs, indent=1).encode()}
+    kept = q.kind == "text"
+    redirects, m, kept = hops_of(net[:-1], q.method, kept)
+    if blocked:
+        parts["response/headers.json"] = json.dumps({"content-type": blocked[0]}, indent=1).encode()
+        line = f"1. [{m}] {res['url']} => [BLOCKED] blocked: media policy"
+    else:
+        fhdrs = await final.all_headers()
+        parts["response/headers.json"] = json.dumps(fhdrs, indent=1).encode()
+        if os.path.exists(body_path):
+            os.rename(body_path, os.path.join(root, "response", f"body{body_ext(fhdrs)}"))
+        line = f"1. [{m}] {res['url']} => [{res['status']}] {res['statusText']}"
+    if kept:
+        parts[f"request/body{body_ext(hdrs)}"] = q.text.encode()
+    return file_result("Network request", write_tree(q.filename, parts)) + tail(q, line, redirects)
 
 
 # --------------------------------------------------------------------- tabs

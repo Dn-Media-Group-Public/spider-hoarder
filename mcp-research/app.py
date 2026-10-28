@@ -14,6 +14,7 @@ import logging
 import mimetypes
 import os
 import re
+import shutil
 import stat
 import time
 import uuid
@@ -37,7 +38,7 @@ import fetch
 import ports
 import sessions
 import storage
-from toolserver.mediapolicy import Policy
+from toolserver.mediapolicy import ROUTED_UPLOAD_CAP, Policy
 from toolserver.textcap import DEFAULT_TEXT_CAP
 
 EGRESS = sessions.EGRESS
@@ -66,6 +67,10 @@ TREE_TOOLS = ("browser_network_request_get", "browser_network_request_make")  # 
 # Request bodies go to Chromium as one base64 CDP message, which it refuses above 100 MiB (= 75 MiB raw) by killing the whole browser
 # context; measured: 74 MiB works, 76 does not. The default leaves room for the headers. Raising it past ~72 MiB is unsafe.
 MAX_REQUEST_BODY = int(os.environ.get("MAX_REQUEST_BODY", 64 * 1024 * 1024))
+# browser_network_request_make type=form|xhr: the file parts of one call (streamed by the browser from disk, never through CDP)
+MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", 500 * 1024 * 1024))
+MAX_REQUEST_TIMEOUT_MS = sessions.MAX_REQUEST_TIMEOUT_MS
+REQUEST_TYPES = ("navigation", "form", "xhr")
 CAPPED_TOOLS = ("browser_snapshot", "browser_find")  # take `text_cap`
 FILE_TOOLS_NOTE = ("\n\nThe result is {job_id, files, text?}: `text` is the content if small, else page through it "
                    "with get_file_text or search it with grep_file; get_file_url for a link. `filename` only names "
@@ -378,31 +383,39 @@ def _out_files(uid: int, name: str, tree: bool = False):
             os.close(fd)
 
 
-def _write_in(uid: int, data: bytes) -> str:
-    """Leave `data` for the session as <home>/in/<random name> (the mirror image of reading out/: every component
-    O_NOFOLLOW from the home fd, the file O_EXCL so a planted name or symlink is never written through). Returns the name."""
-    name = f"{uuid.uuid4()}.body"
+def _stage(uid: int, key: str, path: str, filename: str) -> str:
+    """Leave a job file for the session as <home>/in/<random>/<filename> (the mirror image of reading out/: every component
+    O_NOFOLLOW from the home fd, the file O_EXCL so a planted name or symlink is never written through). One directory per file,
+    so equal filenames never collide and the name stays exactly the one the browser will upload. Returns "<random>/<filename>"."""
+    d = uuid.uuid4().hex
     fds = [os.open(ports.home(uid), os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW)]
     try:
         fds.append(os.open("in", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fds[0]))
-        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=fds[1])
-        with os.fdopen(fd, "wb") as f:
-            os.fchmod(f.fileno(), 0o644)  # the session user is neither owner nor in our group; its home is not traversable by others
-            f.write(data)
-        return name
+        os.mkdir(d, 0o700, dir_fd=fds[1])
+        try:
+            fds.append(os.open(d, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fds[1]))
+            os.fchmod(fds[2], 0o777)  # the session user is neither owner nor in our group: it must read and delete; in/ keeps others out
+            fd = os.open(filename, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=fds[2])
+            with os.fdopen(fd, "wb") as f, storage.open_read(key, path) as src:
+                os.fchmod(f.fileno(), 0o644)
+                shutil.copyfileobj(src, f, 1 << 20)
+        except BaseException:
+            _drop_in(uid, d)
+            raise
+        return f"{d}/{filename}"
     finally:
         for fd in fds:
             os.close(fd)
 
 
 def _drop_in(uid: int, name: str) -> None:
-    """Backstop for a body the toolserver never got to delete."""
+    """Backstop for staged files the toolserver never got to delete; name is "<random>" or "<random>/<filename>"."""
     try:
         fd = os.open(ports.home(uid), os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
             d = os.open("in", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
             try:
-                os.unlink(name, dir_fd=d)
+                shutil.rmtree(name.split("/")[0], dir_fd=d)
             finally:
                 os.close(d)
         finally:
@@ -411,28 +424,89 @@ def _drop_in(uid: int, name: str) -> None:
         pass
 
 
-def _request_body(owner: str, uid: int, arguments: dict) -> tuple[dict, str | None]:
-    """browser_network_request_make: validate the body arguments, resolve body_job_id/body_path (owner-scoped) to a file in
-    the session's in/. Returns the arguments for the toolserver (hidden `body_file` set by us only) and that file's name."""
-    a = {k: v for k, v in arguments.items() if k not in ("body_job_id", "body_path", "body_file")}
-    job, path = arguments.get("body_job_id"), arguments.get("body_path")
-    if (job is None) != (path is None):
-        raise ValueError("body_job_id and body_path go together")
-    too_big = ValueError(f"request body too large (max {MAX_REQUEST_BODY} bytes)")
-    if job is None:
-        if len(str(arguments.get("body") or "").encode()) > MAX_REQUEST_BODY:
-            raise too_big
-        return a, None
-    if arguments.get("body") is not None:
-        raise ValueError("body and body_job_id/body_path are mutually exclusive")
-    key, path = _key(owner, job), _check_rel_path(path)
-    if not storage.exists(key, path):
-        raise ValueError("file not found")
-    if next(f["size"] for f in storage.get_manifest(key)["files"] if f["path"] == path) > MAX_REQUEST_BODY:  # before reading it
-        raise too_big
-    data = storage.read_bytes(key, path)
-    name = _write_in(uid, data)
-    return {**a, "body_file": name}, name
+_REF_KEYS = {"job_id", "path", "filename", "content_type"}
+
+
+def _request_body(owner: str, uid: int, arguments: dict, routed: bool = False) -> tuple[dict, list[str]]:
+    """browser_network_request_make: validate type/body, resolve every {job_id, path} (owner-scoped) and stage it in the session's
+    in/. Returns the arguments for the toolserver (job references replaced by staged names; the hidden `body_file` is ours alone)
+    and the staged names. Everything is checked, sizes included, before the first byte is copied. `routed`: the session's
+    layer A pauses every request, which kills Chromium on big uploads."""
+    for k in ("body_job_id", "body_path"):
+        if k in arguments:
+            raise ValueError("body_job_id/body_path are gone: use body={job_id, path}")
+    a = {k: v for k, v in arguments.items() if k != "body_file"}
+    typ, body = a.get("type") or "navigation", a.get("body")
+    if typ not in REQUEST_TYPES:
+        raise ValueError(f"type must be one of {', '.join(REQUEST_TYPES)}")
+    if a.get("timeout_ms") is not None:
+        a["timeout_ms"] = min(int(a["timeout_ms"]), MAX_REQUEST_TIMEOUT_MS)
+    refs: list[dict] = []  # every file reference, in order
+    text = 0  # bytes of text (raw body and field values)
+    if isinstance(body, str):
+        text, kind = len(body.encode()), "text"
+    elif isinstance(body, dict) and body.keys() & {"job_id", "path"}:
+        if body.keys() != {"job_id", "path"}:
+            raise ValueError("a job file body is exactly {job_id, path}; file parts go in a fields object")
+        kind, refs = "file", [body]
+    elif isinstance(body, dict):
+        kind = "fields"
+        for name, v in body.items():
+            for item in v if isinstance(v, list) else [v]:
+                if isinstance(item, dict):
+                    if not {"job_id", "path"} <= item.keys() <= _REF_KEYS or not all(isinstance(x, str) for x in item.values()):
+                        raise ValueError(f"field {name!r}: a file part is {{job_id, path, filename?, content_type?}}")
+                    refs.append(item)
+                elif isinstance(item, (str, int, float)):  # bool is an int
+                    text += len(str(item).encode())
+                else:
+                    raise ValueError(f"field {name!r}: a value is text, a number, a boolean, a file part or a list of those")
+    elif body is None:
+        kind = "none"
+    else:
+        raise ValueError("body must be text, {job_id, path} or a fields object")
+    method = str(a.get("method") or "GET").upper()
+    if typ == "form" and kind in ("text", "file"):
+        raise ValueError("type=form sends fields only: use a fields object, or type=xhr/navigation for a raw body")
+    if typ == "xhr" and method in ("GET", "HEAD") and kind in ("text", "file"):
+        raise ValueError("fetch cannot send a body with GET/HEAD")
+    sizes = {}
+    for r in refs:
+        key, path = _key(owner, r["job_id"]), _check_rel_path(r["path"])
+        if not storage.exists(key, path):
+            raise ValueError("file not found")
+        sizes[id(r)] = next(f["size"] for f in storage.get_manifest(key)["files"] if f["path"] == path)
+    files = sum(sizes.values())
+    if typ == "navigation":  # one CDP message: everything counts
+        if files + text > MAX_REQUEST_BODY:
+            raise ValueError(f"request body too large (max {MAX_REQUEST_BODY} bytes for type=navigation)")
+    else:
+        cap = ROUTED_UPLOAD_CAP if routed else MAX_UPLOAD_BYTES
+        if text > MAX_REQUEST_BODY:
+            raise ValueError(f"request body too large (max {MAX_REQUEST_BODY} bytes of text)")
+        if files > cap:
+            raise ValueError(f"file parts too large: {files} bytes > {cap}" + (
+                " (this session's media policy filters every request, which the browser cannot do for larger uploads)" if routed else ""))
+    staged: list[str] = []
+    try:
+        def stage(r: dict) -> str:
+            name = _job_name(r.get("filename"), os.path.basename(r["path"]))
+            staged.append(_stage(uid, _key(owner, r["job_id"]), _check_rel_path(r["path"]), name))
+            return staged[-1]
+        if kind == "file":
+            del a["body"]
+            a["body_file"] = stage(body)
+        elif kind == "fields":
+            def part(v):
+                return {"file": stage(v), "filename": _job_name(v.get("filename"), os.path.basename(v["path"])),
+                        **({"content_type": v["content_type"]} if "content_type" in v else {})}
+            a["body"] = {n: [part(i) if isinstance(i, dict) else i for i in v] if isinstance(v, list) else part(v) if isinstance(v, dict) else v
+                         for n, v in body.items()}
+    except BaseException:
+        for s_ in staged:
+            _drop_in(uid, s_)
+        raise
+    return a, staged
 
 
 def _job_name(filename: Any, default: str) -> str:
@@ -485,14 +559,15 @@ async def _file_tool(bs: sessions.BrowserSession, name: str, arguments: dict) ->
     jname = FILE_TOOLS[name] if tree else _job_name(arguments.get("filename"), FILE_TOOLS[name])
     job_id = _new_job_id()
     private = f"{uuid.uuid4()}-{jname}"  # gateway-chosen, relative: lands in out/, never an agent-chosen path
-    in_name = None
+    staged, given = [], arguments
     if name == "browser_network_request_make":
-        arguments, in_name = await asyncio.to_thread(_request_body, bs.owner, bs.uid, arguments)
+        pol = getattr(bs, "policy", None)
+        arguments, staged = await asyncio.to_thread(_request_body, bs.owner, bs.uid, arguments, bool(pol and pol.active and not pol.media))
     try:
         res = await bs.client.call_tool(name, {**arguments, "filename": private})
     finally:
-        if in_name:
-            await asyncio.to_thread(_drop_in, bs.uid, in_name)
+        for s_ in staged:
+            await asyncio.to_thread(_drop_in, bs.uid, s_)
     up = sessions.result_text(res)
     if res.isError or "](out/" not in up:  # an error, or a plain text answer such as "No new requests."
         return res
@@ -505,6 +580,12 @@ async def _file_tool(bs: sessions.BrowserSession, name: str, arguments: dict) ->
             meta["blocked"] = "media policy"
         if r := re.search(r"^Redirects: (.+)$", up, re.M):
             meta["redirects"] = json.loads(r.group(1))
+        if name == "browser_network_request_make":
+            meta["type"] = arguments.get("type") or "navigation"
+            if r := re.search(r"^Origin: (.+)$", up, re.M):
+                meta["origin"] = r.group(1)
+            if isinstance(given.get("body"), dict):  # the argument as given, with job references: never a second copy of a big upload
+                meta["body"] = given["body"]
     key = _key(bs.owner, job_id)
     try:
         result = await asyncio.to_thread(_ingest_out, bs.uid, private, key, jname, tree, meta.get("url", ""))
@@ -517,6 +598,8 @@ async def _file_tool(bs: sessions.BrowserSession, name: str, arguments: dict) ->
         if name == "browser_find":
             meta["query"] = {k: arguments[k] for k in ("text", "regex") if arguments.get(k)}
     storage.set_meta(key, keep_none=("text_cap",), **meta)
+    if meta.get("type") == "form" and arguments.get("cookies"):
+        result["notes"] = [*result.get("notes", []), "cookies were set as a Cookie header, which bypasses SameSite filtering of the session's own cookies"]
     if meta.get("blocked"):
         result["notes"] = [*result.get("notes", []), "blocked by the media policy: the response body was never read"]
     return _text(json.dumps({"job_id": job_id, **result}))

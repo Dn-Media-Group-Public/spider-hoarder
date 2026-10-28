@@ -46,6 +46,24 @@ original, checked by `test_toolserver.py`) plus a `browser` property. Added: 15 
   from `all_headers()`. A blocked response yields no Playwright `Response`: the job gets the `content-type` from `Registry.blocked`.
   Limits: our headers are not re-applied on redirect hops; the hidden tab has no `PageState`.
   See also: [Plan: network request make](../implemented-plans/network-request-make.md)
+  Request types (`Req` validates a call; `hidden_page` also sets `Network.setBypassServiceWorker`, since a service worker of the target
+  origin would intercept the generated page's `fetch` and empty a redirected form post):
+  - `navigation`: as above, plus fields encoded by us and per-request `cookies` merged over the jar's.
+  - `form` / `xhr` run in a generated page placed at `origin`: the tab's first `Document` request is answered with `Fetch.fulfillRequest`, so no
+    network request is made for it. `form`: `<form>` with hidden inputs and one file input per file part (`set_input_files` from the staged
+    files), submitted; the request-stage pause stays on to rewrite method, headers (merged onto the browser's own, which keeps the multipart
+    boundary) and cookies. A `content_type` override swaps the file via `DataTransfer`, which only works without the pause (size-dependent and
+    fatal at 500 MiB with it), so it is allowed only when nothing needs rewriting, and then `Fetch` is disabled after the page loads.
+  - `xhr`: `Fetch` is disabled after the page loads (a request-stage pause on a `fetch` with a `File` body hangs at 200 MiB and kills the
+    browser at 500 MiB), then the page runs `fetch` with the body as a typeless `Blob` (so no `Content-Type` is inferred), `File`, `URLSearchParams`
+    or `FormData`. `getResponseBody` cannot read such a response, so the page streams it to Python in ~1 MiB base64 chunks through an
+    exposed function, straight into `response/body.part` (renamed by content-type), never whole in memory.
+  - Media policy layer D for `xhr`: once `fetch` resolved (headers in, body untouched) the page asks Python (`__blocked`, `Policy.content_type_blocked`);
+    if blocked the body stream is cancelled and `Registry.blocked` gets a layer-`D` record. For `navigation`/`form` the existing `Document` hook applies.
+  - Layer A (`ctx.route("**/*")`, no-media sessions) pauses every request and kills Chromium on big `fetch` uploads: `Req` refuses uploads over
+    `ROUTED_UPLOAD_CAP` (64 MiB) there, as does the gateway before copying.
+  Files come from `in/<random>/<filename>` and are deleted when the call ends.
+  See also: [Plan: network request make types](../implemented-plans/network-request-make-types.md)
 - `browser_pdf_save` uses CDP `Page.printToPDF` (Playwright's `page.pdf` is headless-only).
 - Files (screenshots, PDFs, `filename=` outputs) go to `$HOME/out`; the gateway copies them into jobs ([Jobs](jobs-and-storage.md)).
 

@@ -12,6 +12,10 @@ TEXT_ALLOWED = ["text/*", "application/json", "application/xml", "application/*+
 _TYPE = re.compile(r"^[a-z0-9][a-z0-9.+-]*/(\*|[a-z0-9][a-z0-9.+-]*)$")
 
 
+# Largest upload Chromium streams while a context-wide route (layer A) pauses every request: measured 90 MiB ok, 200 MiB hangs.
+ROUTED_UPLOAD_CAP = 64 * 1024 * 1024
+
+
 def _norm(header: str | None) -> str:
     return (header or "").split(";")[0].strip().lower()
 
