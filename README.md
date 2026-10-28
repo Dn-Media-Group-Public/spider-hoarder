@@ -26,6 +26,7 @@ Documentation (architecture, API, design decisions): [docs/index.md](docs/index.
   * Archives (zip, tar, tgz, 7z, rar, gz/bz2/xz) are unpacked
   * Binary structured formats such as msgpack, CBOR, BSON, plist and protobuf are turned into JSON
 * Network inspection: list and inspect HTTP requests and responses
+* Network request synthesizing: Make arbitrary HTTP requests in the browser context
 * Sessions live in isolated docker containers and all storage is cleared after use
 * [TOR](https://www.torproject.org/) support for anonymous browsing and accessing .onion sites
 * [i2p](https://i2p.net/) support: `*.i2p` eepsites only, no outproxy
