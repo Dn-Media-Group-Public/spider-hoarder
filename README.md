@@ -27,6 +27,7 @@ Documentation (architecture, API, design decisions): [docs/index.md](docs/index.
   * Binary structured formats such as msgpack, CBOR, BSON, plist and protobuf are turned into JSON
 * Network inspection: list and inspect HTTP requests and responses
 * Every session is a separate Unix uid with its own process group, profile and egress firewall rules in a shared container; its files are wiped when it ends
+* Network request synthesizing: Make arbitrary HTTP requests in the browser context
 * [TOR](https://www.torproject.org/) support for anonymous browsing and accessing .onion sites
 * [i2p](https://i2p.net/) support: `*.i2p` eepsites only, no outproxy
 * No-media sessions: images, video and audio are never requested or stored (default on Tor and i2p), chosen once via `open_session`
