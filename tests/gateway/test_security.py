@@ -8,8 +8,8 @@ import zipfile
 
 os.environ.setdefault("BLOB_TOKEN_SECRET", "test-secret")
 
-import blobtoken
-import extract
+from mcp_research.gateway import blobtoken
+from mcp_research.gateway.content import extract
 
 
 def test_blobtoken_roundtrip():

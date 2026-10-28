@@ -2,6 +2,7 @@
 # One browser session, run as the session's own uid by sessiond.
 # In: HOME DISPLAY_NUM VNC_PORT WS_PORT MCP_PORT [PROXY_SERVER]; $HOME/vncpass, $HOME/hostrules
 set -eu
+HERE=$(dirname "$(readlink -f "$0")")
 export DISPLAY=":$DISPLAY_NUM"
 mkdir -p "$HOME/profile"  # $HOME/out is created by sessiond (group gw-collect)
 
@@ -15,7 +16,7 @@ websockify --web /usr/share/novnc "0.0.0.0:$WS_PORT" "127.0.0.1:$VNC_PORT" &
 
 # Tor/I2P: Chromium talks to a local filtering SOCKS relay (blocklist), which forwards to the router
 if [ -n "${UPSTREAM_SOCKS:-}" ]; then
-  /venv/bin/python /app/filter_proxy.py "$FILTER_PORT" "${UPSTREAM_SOCKS%:*}" "${UPSTREAM_SOCKS#*:}" &
+  /venv/bin/python -m mcp_research.session_server.session.filter_proxy "$FILTER_PORT" "${UPSTREAM_SOCKS%:*}" "${UPSTREAM_SOCKS#*:}" &
   PROXY_SERVER="socks5://127.0.0.1:$FILTER_PORT"
 fi
 
@@ -32,11 +33,11 @@ cat > "$HOME/toolserver.json" <<JSON
 {
   "userDataDir": "$HOME/profile",
   "args": [$ARGS],
-  "initScript": "/app/consent.js",
+  "initScript": "$HERE/../toolserver/consent.js",
   "outDir": "$HOME/out",
   "inDir": "$HOME/in",
   "navTimeout": $NAV_TIMEOUT,
   "port": $MCP_PORT
 }
 JSON
-cd /app && exec /venv/bin/python -m toolserver "$HOME/toolserver.json"
+exec /venv/bin/python -m mcp_research.session_server.toolserver "$HOME/toolserver.json"

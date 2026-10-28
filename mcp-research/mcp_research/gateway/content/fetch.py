@@ -8,9 +8,9 @@ from urllib.parse import urlsplit
 
 import requests
 
-import netguard
-import ports
-from toolserver.mediapolicy import Policy, blocked_message
+from mcp_research.gateway.content import netguard
+from mcp_research.common import ports
+from mcp_research.common.mediapolicy import Policy, blocked_message
 
 CHROME_UA = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "

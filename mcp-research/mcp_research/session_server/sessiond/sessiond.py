@@ -23,14 +23,14 @@ import sys
 import threading
 import time
 
-import ports
+from mcp_research.common import ports
 
 log = logging.getLogger("sessiond")
 
 SOCKET = os.environ.get("SESSIOND_SOCKET", "/run/sessiond.sock")
 GW_UID = int(os.environ.get("GW_UID", "1000"))
 GW_COLLECT_GID = int(os.environ.get("GW_COLLECT_GID", "1500"))  # gateway is a member; sessions are not
-SESSION_GROUP = os.environ.get("SESSION_GROUP", "/app/session-group.sh")
+SESSION_GROUP = os.environ.get("SESSION_GROUP", os.path.join(os.path.dirname(__file__), "..", "session", "session-group.sh"))
 WIPE_ROOTS = ["/home", "/tmp", "/var/tmp", "/dev/shm", "/run"]
 NPROC = os.environ.get("SESSION_NPROC", "1024")  # Chromium's process tree is hundreds
 NOFILE = os.environ.get("SESSION_NOFILE", "8192")

@@ -4,7 +4,7 @@ put two live sessions on one uid, and a failed stop quarantines instead of freei
 import asyncio
 import random
 
-from pool import Pool
+from mcp_research.gateway.pool import Pool
 
 
 class Fake:

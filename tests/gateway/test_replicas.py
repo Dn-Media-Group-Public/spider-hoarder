@@ -12,16 +12,16 @@ for k, v in dict(BLOB_TOKEN_SECRET="test-secret", PUBLIC_HOST="h.example", OIDC_
                  REPLICA_RID="10-0-0-5").items():
     os.environ.setdefault(k, v)
 
-import app
-import sessions
+from mcp_research.gateway import app
+from mcp_research.gateway import sessions
 
 UUID = "123e4567-e89b-12d3-a456-426614174000"
 
 
 def _ports(slot, max_replicas=4, total=18):
-    code = "import ports; print(ports.socks_port(ports.UIDS[0]), ports.socks_port(ports.UIDS[-1]), ports.GATEWAY_SOCKS_PORT)"
+    code = "from mcp_research.common import ports; print(ports.socks_port(ports.UIDS[0]), ports.socks_port(ports.UIDS[-1]), ports.GATEWAY_SOCKS_PORT)"
     env = {**os.environ, "REPLICA_SLOT": str(slot), "MAX_REPLICAS": str(max_replicas), "MAX_SESSIONS_TOTAL": str(total)}
-    r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, cwd=os.path.dirname(__file__) or ".")
+    r = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True)
     return r.returncode, [int(x) for x in r.stdout.split()]
 
 

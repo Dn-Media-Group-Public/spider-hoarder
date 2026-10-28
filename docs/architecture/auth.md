@@ -1,7 +1,7 @@
 # Authentication and live view
 
 ## MCP (Claude)
-Keycloak (any OIDC) JWT on `/<egress>/mcp` (`auth.py`): issuer, signature, `exp`; the `email` claim identifies the owner; if
+Keycloak (any OIDC) JWT on `/<egress>/mcp` (`gateway/auth.py`): issuer, signature, `exp`; the `email` claim identifies the owner; if
 `MCP_SCOPE` is set the token's `scope` must contain it (the audience is deliberately **not** checked: Claude's dynamically
 registered clients carry arbitrary audiences). RFC 9728 protected-resource metadata advertises the scope so Claude requests it.
 Claude registers itself through anonymous Dynamic Client Registration, so there is no client id/secret to configure.

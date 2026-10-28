@@ -10,10 +10,10 @@ import time
 
 import pytest
 
-from toolserver import tools
-from toolserver.browsers import launch
-from toolserver.mediapolicy import Policy
-from toolserver.server import GOLDEN, TOOLS
+from mcp_research.session_server.toolserver import tools
+from mcp_research.session_server.toolserver.browsers import launch
+from mcp_research.common.mediapolicy import Policy
+from mcp_research.session_server.toolserver.server import GOLDEN, TOOLS
 
 PAGE = ("data:text/html,<title>T</title><input id=i><button onclick=\"document.title='clicked'\">Go</button>"
         "<a href='data:text/html,two'>link</a>")

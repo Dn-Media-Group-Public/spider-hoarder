@@ -9,7 +9,7 @@ MAX_SESSIONS_TOTAL=${MAX_SESSIONS_TOTAL:-18}
 POOL=$((MAX_SESSIONS_TOTAL + 2))
 export UID_BASE MAX_SESSIONS_TOTAL
 : "${GATEWAY_PORT:?}"
-# this replica's slice of tor's SocksPorts (same formula as ports.py)
+# this replica's slice of tor's SocksPorts (same formula as common/ports.py)
 SLOT=${REPLICA_SLOT:-1}
 [ "$SLOT" -ge 1 ] || { echo "REPLICA_SLOT $SLOT < 1" >&2; exit 1; }
 # the egress router (tor: one shared service; i2p: this slot's own i2pd) and its first SocksPort
@@ -71,13 +71,13 @@ fi
 # --- no-new-privileges is set here (setpriv), since Swarm services cannot set security_opt.
 # --- sessiond: root, but only the caps it needs; NET_ADMIN is gone from here on
 setpriv --no-new-privs --bounding-set=-all,+setuid,+setgid,+chown,+kill,+dac_override,+fowner \
-  python /app/sessiond.py &
+  python -m mcp_research.session_server.sessiond &
 i=0; while [ ! -S /run/sessiond.sock ] && [ "$i" -lt 100 ]; do sleep 0.1; i=$((i+1)); done
 
 # --- gateway: uid 1000, no caps, restarted on exit
 while :; do
   setpriv --no-new-privs --reuid=1000 --regid=1000 --groups="${GW_COLLECT_GID:-1500}" --bounding-set=-all --inh-caps=-all \
-    uvicorn app:app --host 0.0.0.0 --port "$GATEWAY_PORT" || true
+    uvicorn mcp_research.gateway.app:app --host 0.0.0.0 --port "$GATEWAY_PORT" || true
   echo "gateway exited, restarting" >&2
   sleep 1
 done

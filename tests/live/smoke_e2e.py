@@ -4,7 +4,7 @@ sessions, tool list, HTML round trip, consent blocklist, isolation from inside a
 import asyncio
 import sys
 
-import sessions
+from mcp_research.gateway import sessions
 
 URL = sys.argv[1] if len(sys.argv) > 1 else "https://example.com"
 

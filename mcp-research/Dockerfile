@@ -20,12 +20,14 @@ RUN playwright install --with-deps chromium \
 
 # Cookie-consent network blocklist, fetched once at build time (no runtime
 # network dependency): Fanboy's Cookiemonster list.
-RUN python -c "import requests; open('cmp_blocklist.txt', 'wb').write(requests.get('https://secure.fanboy.co.nz/fanboy-cookiemonster.txt', headers={'User-Agent': 'Mozilla/5.0'}).content)"
+RUN python -c "import requests; open('/opt/cmp_blocklist.txt', 'wb').write(requests.get('https://secure.fanboy.co.nz/fanboy-cookiemonster.txt', headers={'User-Agent': 'Mozilla/5.0'}).content)"
+ENV CMP_BLOCKLIST_PATH=/opt/cmp_blocklist.txt
 
 COPY . .
+RUN pip install --no-cache-dir . && rm -rf mcp_research build *.egg-info && chmod -R a+rX /venv/lib
 # gw-collect (gid 1500): the gateway is added at start (entrypoint setpriv); session out/ dirs belong to it.
 # /data: blob storage (gateway uid 1000). /home, /run: sessiond's per-session homes and socket.
-RUN groupadd -g 1500 gw-collect && chmod +x session-group.sh entrypoint.sh && mkdir -p /data && chown 1000:1000 /data
+RUN groupadd -g 1500 gw-collect && chmod +x entrypoint.sh && chmod +x /venv/lib/python*/site-packages/mcp_research/session_server/session/session-group.sh && mkdir -p /data && chown 1000:1000 /data
 
 EXPOSE 8000
 ENTRYPOINT ["tini", "--", "/app/entrypoint.sh"]

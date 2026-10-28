@@ -10,7 +10,7 @@ import secrets
 
 from playwright.async_api import BrowserContext, CDPSession, Page, async_playwright
 
-from .mediapolicy import Policy
+from mcp_research.common.mediapolicy import Policy
 
 MAIN = "main"
 WINDOW = {"left": 0, "top": 0, "width": 1440, "height": 900}

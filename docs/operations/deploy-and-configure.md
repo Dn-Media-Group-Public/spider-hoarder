@@ -39,7 +39,8 @@ dev DCR for oauth2-proxy depends on it.
 See [Authentication](../architecture/auth.md). For an external Keycloak run `keycloak/setup.sh` once from the Keycloak image (command in
 the README). The user's password is reset to `KC_USER_PASSWORD` on every run: change it outside dev.
 
-## Tests (`mcp-research/`)
-Host: `test_pool.py`, `test_security.py`, `test_gateway.py`, `test_replicas.py`, `test_i2p.py`, `test_mediapolicy.py`; `pytest test_toolserver.py` (needs Playwright + Chromium).
-In-container with the deployed capability set (plain root hides permission bugs): `test_sessiond.py`; end to end: `e2e_auth.py` against a
+## Tests (`tests/`)
+Host (`pip install -e mcp-research`, then `pytest tests`): `tests/common`, `tests/gateway`, `tests/egress`, and `tests/session_server/test_toolserver.py` (needs Playwright + Chromium).
+`tests/live/` is not run by plain `pytest`: in-container with the deployed capability set (plain root hides permission bugs): `test_sessiond.py`; end to end: `e2e_auth.py` against a
 stub Keycloak, `smoke_e2e.py` for real sessions. Exact commands are in the README.
+See also: [Plan: Restructure directories](../implemented-plans/restructure-directories.md)

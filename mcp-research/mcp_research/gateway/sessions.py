@@ -18,11 +18,11 @@ import httpx
 from mcp import ClientSession, types
 from mcp.client.streamable_http import streamablehttp_client
 
-import cmp_rules
-import fetch
-import ports
-from pool import Pool, Sessiond
-from toolserver.mediapolicy import Policy
+from mcp_research.common import cmp_rules
+from mcp_research.gateway.content import fetch
+from mcp_research.common import ports
+from mcp_research.gateway.pool import Pool, Sessiond
+from mcp_research.common.mediapolicy import Policy
 
 MAX_REQUEST_TIMEOUT_MS = int(os.environ.get("MAX_REQUEST_TIMEOUT_MS", 300_000))  # browser_network_request_make
 

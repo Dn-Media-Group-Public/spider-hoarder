@@ -16,10 +16,10 @@ os.environ.setdefault("PUBLIC_HOST", "h.example")
 os.environ.setdefault("OIDC_ISSUER", "https://kc.example/realms/r")
 os.environ.setdefault("REPLICA_RID", "10-0-0-5")
 
-import auth
-import cmp_rules
-import netguard
-import sessions
+from mcp_research.gateway import auth
+from mcp_research.common import cmp_rules
+from mcp_research.gateway.content import netguard
+from mcp_research.gateway import sessions
 
 ISS = "https://kc.example/realms/r"
 KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
@@ -68,14 +68,14 @@ def test_host_rules(tmp_path="/tmp/cmp_test.txt"):
 
 
 def test_filter_proxy():
-    import filter_proxy as f
+    from mcp_research.session_server.session import filter_proxy as f
     B = frozenset({"cookielaw.org"})
     assert f.is_blocked("cdn.cookielaw.org", B) and f.is_blocked("cookielaw.org", B)
     assert not f.is_blocked("notcookielaw.org", B) and not f.is_blocked("example.org", B)
 
 
 def test_owner_scoping():
-    import app
+    from mcp_research.gateway import app
     j = f"{app.RID}.123e4567-e89b-12d3-a456-426614174000"
     assert app._key("A@x.y", j) != app._key("b@x.y", j)
     for bad in ("..", "x", ""):
@@ -87,7 +87,9 @@ def test_owner_scoping():
 
 
 def test_file_outputs():
-    import app, storage, tempfile
+    from mcp_research.gateway import app
+    from mcp_research.gateway.content import storage
+    import tempfile
     storage.BLOB_URL = "file://" + tempfile.mkdtemp()
     home = tempfile.mkdtemp()
     app.ports.home = lambda uid: home
@@ -131,7 +133,8 @@ def test_file_outputs():
 
 
 def test_tree_reader():
-    import app, tempfile
+    from mcp_research.gateway import app
+    import tempfile
     home = tempfile.mkdtemp()
     app.ports.home = lambda uid: home
     d = home + "/out/net"
@@ -157,7 +160,9 @@ def test_tree_reader():
 
 
 def test_tree_store_and_zip_limits():
-    import app, extract, storage, tempfile, io, zipfile
+    from mcp_research.gateway import app
+    from mcp_research.gateway.content import extract, storage
+    import tempfile, io, zipfile
     storage.BLOB_URL = "file://" + tempfile.mkdtemp()
     app.INLINE_LIMIT = 50_000
     key = app._key("a@x.y", f"{app.RID}.123e4567-e89b-12d3-a456-426614174010")
@@ -204,7 +209,8 @@ def test_tree_store_and_zip_limits():
 
 
 def test_write_stream():
-    import storage, tempfile, io
+    from mcp_research.gateway.content import storage
+    import io, tempfile
     storage.BLOB_URL = "file://" + tempfile.mkdtemp()
     data = b"abc" * (1 << 20)  # 3 MiB: several chunks
     assert storage.write_stream("j", "original/big.bin", io.BytesIO(data), "x/y") == len(data)
@@ -213,7 +219,7 @@ def test_write_stream():
 
 
 def test_text_cap_and_grep():
-    from toolserver.textcap import cap_snapshot as cs, cap_found_line as cf
+    from mcp_research.common.textcap import cap_snapshot as cs, cap_found_line as cf
     long = "x" * 200
     assert cs(f"- text: {long}", 10) == "- text: " + "x" * 10 + "..."
     assert cs(f"- paragraph [ref=e2]: {long}", 10).endswith("x" * 10 + "...")
@@ -229,7 +235,7 @@ def test_text_cap_and_grep():
     assert cf(line, (s, s + 6), 300) == line and cf("- text: hi", None, 5) == "- text: hi"
     assert cf(line, (len(line) - 3, len(line)), 20).startswith("- paragraph [ref=e1]: ...") and cf(line, (len(line) - 3, len(line)), 20).endswith("b" * 17 + "")
 
-    import extract
+    from mcp_research.gateway.content import extract
     text = "\n".join(f"line {i}" for i in range(100)) + "\nTAIL " + "z" * 500
     g = extract.grep_text(text, "line 5$", context=1)
     assert g.startswith("-- line 5, offset ") and "5- line 4" in g and "6: line 5" in g and "7- line 6" in g and "line 7" not in g
@@ -246,7 +252,9 @@ def test_text_cap_and_grep():
 
 
 def test_file_tools_are_jobs():
-    import app, storage, tempfile, json
+    from mcp_research.gateway import app
+    from mcp_research.gateway.content import storage
+    import tempfile, json
     from mcp import types as mt
     storage.BLOB_URL = "file://" + tempfile.mkdtemp()
     home = tempfile.mkdtemp()
@@ -318,7 +326,9 @@ def test_file_tools_are_jobs():
 
 
 def test_request_make_body_and_job():
-    import app, storage, tempfile, json
+    from mcp_research.gateway import app
+    from mcp_research.gateway.content import storage
+    import tempfile, json
     from mcp import types as mt
     storage.BLOB_URL = "file://" + tempfile.mkdtemp()
     home = tempfile.mkdtemp()
@@ -374,7 +384,7 @@ def test_request_make_body_and_job():
     app._drop_in(1, staged()[0])
     app.ROUTED_UPLOAD_CAP = 64 * 1024 * 1024
 
-    a, names = rb(type="form", method="POST", body_file="agent-chosen",
+    a, names = rb(type="form", method="POST", body_file="client-chosen",
                   body={"k": "v", "f": {**ref, "filename": "../up.json", "content_type": "text/x"}, "l": [ref, "t"]})
     assert "body_file" not in a and len(names) == 2 and a["body"]["k"] == "v" and a["body"]["l"][1] == "t"
     f, l0 = a["body"]["f"], a["body"]["l"][0]
@@ -441,7 +451,7 @@ def test_request_make_body_and_job():
 
 
 def test_terse():
-    import extract
+    from mcp_research.gateway.content import extract
     t = extract.terse
     md = """Intro [a](http://a "title") text ![i](http://i.png)
 
@@ -483,7 +493,9 @@ Setext
 
 
 def test_store_terse():
-    import app, storage, tempfile
+    from mcp_research.gateway import app
+    from mcp_research.gateway.content import storage
+    import tempfile
     storage.BLOB_URL = "file://" + tempfile.mkdtemp()
     app.INLINE_LIMIT = 50_000
     key = app._key("a@x.y", f"{app.RID}.123e4567-e89b-12d3-a456-426614174001")
@@ -517,7 +529,7 @@ def test_store_terse():
 
 
 def test_multi_browser_routing():
-    import app
+    from mcp_research.gateway import app
     from mcp import types as mt
     sessions._tools_cache = [mt.Tool(name=n, inputSchema={"type": "object"}) for n in
                              ("browser_navigate", "browser_end_session", "browser_bring_to_front", "browser_start_session")]
@@ -560,7 +572,9 @@ def test_multi_browser_routing():
 
 
 def test_archives_and_binary_formats():
-    import app, extract, storage, tempfile, io, tarfile, gzip, bz2, lzma, json, msgpack, cbor2, bson, plistlib, base64, py7zr
+    from mcp_research.gateway import app
+    from mcp_research.gateway.content import extract, storage
+    import tempfile, io, tarfile, gzip, bz2, lzma, json, msgpack, cbor2, bson, plistlib, base64, py7zr
     storage.BLOB_URL = "file://" + tempfile.mkdtemp()
     key = app._key("a@x.y", f"{app.RID}.123e4567-e89b-12d3-a456-426614174011")
 
@@ -629,7 +643,7 @@ if __name__ == "__main__":
 
 def test_open_session_gate_and_get_session():
     import json
-    import app
+    from mcp_research.gateway import app
     from mcp import types as mt
     app._caller = lambda: (None, "a@b.c", "sid-gate")
     sessions.policies.clear()
@@ -671,9 +685,9 @@ def test_open_session_gate_and_get_session():
 
 
 def test_ingest_page_blocks_media_on_nomedia_session(monkeypatch):
-    import app
-    import fetch
-    from toolserver.mediapolicy import Policy
+    from mcp_research.gateway import app
+    from mcp_research.gateway.content import fetch
+    from mcp_research.common.mediapolicy import Policy
 
     class Resp:
         headers = {"Content-Type": "image/png"}

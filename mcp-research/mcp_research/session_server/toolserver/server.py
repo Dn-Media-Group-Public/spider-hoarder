@@ -11,16 +11,16 @@ from mcp.server.transport_security import TransportSecuritySettings
 from playwright.async_api import Error as PWError
 
 from . import tools
-from .textcap import DEFAULT_TEXT_CAP
+from mcp_research.common.textcap import DEFAULT_TEXT_CAP
 from .browsers import launch
 
-GOLDEN = os.path.join(os.path.dirname(__file__), "..", "tools.json.upstream")  # playwright-mcp 0.0.83, as captured
-TOOLS_FILE = os.path.join(os.path.dirname(__file__), "..", "tools.json")  # copy of it with our descriptions
+GOLDEN = os.path.join(os.path.dirname(__file__), "tools.json.upstream")  # playwright-mcp 0.0.83, as captured
+TOOLS_FILE = os.path.join(os.path.dirname(__file__), "tools.json")  # copy of it with our descriptions
 DROPPED = {"browser_run_code_unsafe"}  # JS snippets cannot run in a Python server; browser_evaluate stays
 
 BROWSER = {"type": "string", "description": (
     "Browser id returned by browser_start_session. Omit to use the shared 'main' browser, which belongs to the "
-    "main agent and the human: if you are a subagent, never use 'main'; call browser_start_session first and "
+    "main MCP client and the human: if you are a subagent, never use 'main'; call browser_start_session first and "
     "pass the id it returns on every call.")}
 TEXT_CAP = {"type": ["integer", "null"], "minimum": 1, "default": DEFAULT_TEXT_CAP, "description": (
     f"Cut every pure text node (`- text: …`, `paragraph [ref=…]: …`) to this many characters, adding `...` "
@@ -35,7 +35,7 @@ def schema(required=(), **props) -> dict:
 
 NEW = {
     "browser_start_session": ("Open a new, separate browser window (same logins as 'main') and return its id. Subagents: call this "
-        "first and use ONLY the id it returns on every browser_* call (never 'main', never another agent's id); "
+        "first and use ONLY the id it returns on every browser_* call (never 'main', never another client's id); "
         "call browser_end_session with that id when done.", schema(), False),
     "browser_end_session": ("Close one browser (its window and tabs) when given `browser`; with no `browser`, close all browsers "
         "and end the session.", schema(), True),

@@ -8,8 +8,8 @@ import time
 
 os.environ.setdefault("MAX_SESSIONS_TOTAL", "3")
 os.environ["SESSION_GROUP"] = "/tmp/fake-group.sh"
-import ports
-import sessiond
+from mcp_research.common import ports
+from mcp_research.session_server.sessiond import sessiond
 
 assert os.geteuid() == 0, "run as root"
 A, B = ports.UIDS[0], ports.UIDS[1]

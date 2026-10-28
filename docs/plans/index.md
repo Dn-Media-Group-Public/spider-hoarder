@@ -6,7 +6,5 @@ Plans awaiting implementation or kept as background. Implemented plans move to [
   The `mcp-research` half is built (see [Architecture overview](../architecture/overview.md)); the `article-graph` / layer-access-control
   parts belong to another project.
   Builds on [Network request jobs](../implemented-plans/network-request-jobs.md).
-- [Restructure directories](restructure-directories.md) — split `mcp-research/` into `common/`, `gateway/` (+`content/`) and
-  `session_server/` (sessiond, session, toolserver) packages installed via one `setup.py`; tests move to `tests/`.
 - [Newsroom browsers](newsroom-browsers-plan.md) — the earlier container-per-session design. Superseded by
   [Browser sessions](../implemented-plans/browser-sessions-plan.md); kept for its Keycloak/Tor background.

@@ -31,15 +31,15 @@ from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 
-import auth
-import blobtoken
-import extract
-import fetch
-import ports
-import sessions
-import storage
-from toolserver.mediapolicy import ROUTED_UPLOAD_CAP, Policy
-from toolserver.textcap import DEFAULT_TEXT_CAP
+from mcp_research.gateway import auth
+from mcp_research.gateway import blobtoken
+from mcp_research.gateway.content import extract
+from mcp_research.gateway.content import fetch
+from mcp_research.common import ports
+from mcp_research.gateway import sessions
+from mcp_research.gateway.content import storage
+from mcp_research.common.mediapolicy import ROUTED_UPLOAD_CAP, Policy
+from mcp_research.common.textcap import DEFAULT_TEXT_CAP
 
 EGRESS = sessions.EGRESS
 log = logging.getLogger("app")
@@ -54,7 +54,7 @@ INLINE_LIMIT = 50_000
 MAX_PARSE_BYTES = int(os.environ.get("MAX_PARSE_BYTES", 50 * 1024 * 1024))  # stored files have no cap; parsing does
 MAX_ARCHIVE_BYTES = int(os.environ.get("MAX_ARCHIVE_BYTES") or os.environ.get("MAX_ZIP_BYTES") or 4 * 1024**3)  # uncompressed, per archive
 MAX_ARCHIVE_MEMBERS = int(os.environ.get("MAX_ARCHIVE_MEMBERS") or os.environ.get("MAX_ZIP_MEMBERS") or 50_000)
-# Proxied tools whose output is a file in a job: name -> default job-internal file name when the agent gives
+# Proxied tools whose output is a file in a job: name -> default job-internal file name when the MCP client gives
 # no `filename`.
 FILE_TOOLS = {
     "browser_take_screenshot": "screenshot.png", "browser_pdf_save": "page.pdf",
@@ -559,7 +559,7 @@ async def _file_tool(bs: sessions.BrowserSession, name: str, arguments: dict) ->
     tree = name in TREE_TOOLS
     jname = FILE_TOOLS[name] if tree else _job_name(arguments.get("filename"), FILE_TOOLS[name])
     job_id = _new_job_id()
-    private = f"{uuid.uuid4()}-{jname}"  # gateway-chosen, relative: lands in out/, never an agent-chosen path
+    private = f"{uuid.uuid4()}-{jname}"  # gateway-chosen, relative: lands in out/, never a client-chosen path
     staged, given = [], arguments
     if name == "browser_network_request_make":
         pol = getattr(bs, "policy", None)
@@ -643,7 +643,7 @@ def _text(msg: str, error: bool = False) -> types.CallToolResult:
 
 
 def _without_filename(t: types.Tool) -> types.Tool:
-    """browser_network_request_get/_make fill a whole job: the agent has no filename to choose."""
+    """browser_network_request_get/_make fill a whole job: the MCP client has no filename to choose."""
     sch = {**t.inputSchema, "properties": {k: v for k, v in t.inputSchema.get("properties", {}).items() if k != "filename"}}
     desc = (t.description or "").replace(" `filename` only names the file inside the job.", "")
     return t.model_copy(update={"inputSchema": sch, "description": desc})
@@ -680,7 +680,7 @@ async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
             return _text(json.dumps(sessions.policies[sid].summary(EGRESS, True)))
         if name == "get_session":
             return _text(json.dumps((sessions.policies.get(sid or "") or Policy.make(EGRESS)).summary(EGRESS, sid in sessions.policies)))
-        if sid not in sessions.policies:  # fail closed: the agent cannot skip the question
+        if sid not in sessions.policies:  # fail closed: the MCP client cannot skip the question
             return _text("session not opened: ask the user about security settings, then call open_session first", True)
         if name == "browser_end_session":
             bs = await sessions.get_session(mcp_session, owner, create=False)

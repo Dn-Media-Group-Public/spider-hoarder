@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 
-import ports
+from mcp_research.common import ports
 
 log = logging.getLogger("pool")
 

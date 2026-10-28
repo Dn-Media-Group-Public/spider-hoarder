@@ -17,8 +17,8 @@ import urllib.parse
 from playwright.async_api import Error as PWError
 
 from .browsers import MAIN, Registry, ToolError, locator
-from .mediapolicy import ROUTED_UPLOAD_CAP, Policy, blocked_message
-from .textcap import DEFAULT_TEXT_CAP, cap_found_line, cap_snapshot
+from mcp_research.common.mediapolicy import ROUTED_UPLOAD_CAP, Policy, blocked_message
+from mcp_research.common.textcap import DEFAULT_TEXT_CAP, cap_found_line, cap_snapshot
 
 OUT = os.environ.get("TOOLSERVER_OUT", "out")
 IN = os.environ.get("TOOLSERVER_IN", "in")  # files the gateway stages (in/<random>/<filename>) for browser_network_request_make
@@ -34,7 +34,7 @@ def tool(name):
 
 
 def out_path(name: str) -> str:
-    """Files only ever land directly in the out dir, whatever the agent asks for."""
+    """Files only ever land directly in the out dir, whatever the MCP client asks for."""
     base = os.path.basename(str(name).replace("\\", "/"))
     if base in ("", ".", ".."):
         raise ToolError("invalid filename")
@@ -489,7 +489,7 @@ def js_str(v) -> str:
 
 
 def staged_path(name) -> str:
-    """The file the gateway staged as in/<random>/<filename>; never a path the agent chose (the gateway discards its own hidden
+    """The file the gateway staged as in/<random>/<filename>; never a path the MCP client chose (the gateway discards its own hidden
     arguments and only ever writes these two components)."""
     parts = str(name).split("/")
     if len(parts) != 2 or any(p in ("", ".", "..") for p in parts):

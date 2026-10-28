@@ -6,7 +6,7 @@ See also: [Plan: Browser sessions](../implemented-plans/browser-sessions-plan.md
 ## The uid lifecycle
 
 The pool is `UID_BASE .. UID_BASE+N-1` (default 20000; N = `MAX_SESSIONS_TOTAL` + 2 spare for `ingest_page` and the tool-list
-probe). Display number, VNC/websockify port and tool-server port are all derived from `uid - UID_BASE` (`ports.py`), so nothing else
+probe). Display number, VNC/websockify port and tool-server port are all derived from `uid - UID_BASE` (`common/ports.py`), so nothing else
 is allocated or leaked.
 
 **Invariant: a uid is in exactly one state: `free`, `busy(session)` or `quarantined`.** `sessiond` (the only root process: fixed
@@ -87,26 +87,26 @@ Tor / I2P. `get_session()` reports it read-only.
 **Lifetime.** The policy lives in `sessions.policies`, keyed by MCP session id, and is dropped by `sessions.close()`, so every way a
 session ends (`browser_end_session` of the last browser or with no id, idle reaper, MCP disconnect/close) also forgets the policy: the next
 tool call fails closed until `open_session` is called and the user has been asked again. MCP clients such as Claude Code keep one MCP
-session across `/new` and `/clear`, and the agent cannot tell its conversation is not the first, so without this a new conversation would
+session across `/new` and `/clear`, and the MCP client cannot tell its conversation is not the first, so without this a new conversation would
 inherit the previous one's policy and browser (cookies, tabs). For the same reason a repeat `open_session` is not an error: it validates the
 new arguments, then **ends the existing session** (all browsers) and starts over with the new policy. Residual gap: `get_session` on a
-leftover session reports `opened: true`, so an agent that trusts it instead of calling `open_session` inherits the old browser until
+leftover session reports `opened: true`, so an MCP client that trusts it instead of calling `open_session` inherits the old browser until
 `IDLE_TIMEOUT`. See also: [Plan: No-media sessions](../implemented-plans/no-media-sessions.md)
 
 | Layer | Where | Blocks |
 |---|---|---|
 | A | `context.route`, by resource type | `<img>`, `srcset`, favicons, CSS backgrounds, `<video>`, `<audio>`, `<object>`, web fonts: never requested |
 | D | CDP `Fetch` at response headers, documents only | navigations and iframes whose `Content-Type` is not allowed: text allowlist + `allow`, minus `deny` (deny, then allow, then default) |
-| fetch.py | `requests` streaming | same Content-Type rule; connection closed before the body is read |
+| gateway/content/fetch.py | `requests` streaming | same Content-Type rule; connection closed before the body is read |
 
-`allow` / `deny` only affect layer D and fetch.py: `allow=["image/svg+xml"]` lets you navigate to an SVG, `<img src=svg>` still does not
+`allow` / `deny` only affect layer D and `fetch.py`: `allow=["image/svg+xml"]` lets you navigate to an SVG, `<img src=svg>` still does not
 load. Not done: disk-cache flags, placeholders, extension denylists, relay-level filtering. **Residual risks:** a server lying about
 `Content-Type`; headers of blocked responses (and for D, the request itself) reach the browser; the first request of a popup and
-cross-origin iframes can bypass D; the policy is only as good as the question the agent asked the user. The effective policy is logged
+cross-origin iframes can bypass D; the policy is only as good as the question the MCP client asked the user. The effective policy is logged
 (`app` logger) and returned by `open_session`. See also: [Plan: No-media sessions](../implemented-plans/no-media-sessions.md)
 
 ## Consent banners
 
 `consent.js` (init script in every page) auto-clicks consent buttons. Known consent-vendor hosts (Fanboy Cookiemonster list, ~670, fetched
 at image build) are blocked: on clear egress with Chromium `--host-rules`; under Tor `--host-rules` do not apply (the proxy resolves
-names), so each Tor and I2P session runs a small SOCKS5 filtering relay (`filter_proxy.py`) between Chromium and its SocksPort.
+names), so each Tor and I2P session runs a small SOCKS5 filtering relay (`session_server/session/filter_proxy.py`) between Chromium and its SocksPort.

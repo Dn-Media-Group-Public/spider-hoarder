@@ -1,6 +1,6 @@
 # spider-hoarder
 
-Ever tried to **scrape a web site** using your LLM agent, only for it to get stuck on **CAPTCHAs**, **logins** or your model considering
+Ever tried to **scrape a web site** using your LLM, only for it to get stuck on **CAPTCHAs**, **logins** or your model considering
 **robots.txt** over your direct request to read a specific page? Or hitting docx or pdf files?
 
 Spider-hoarder is an MCP server that hands every user and conversation a private, isolated,
@@ -19,7 +19,7 @@ Documentation (architecture, API, design decisions): [docs/index.md](docs/index.
 (features marked ^ exist in plain playwright-mcp)
 
 * Uses a real headed chromium browser - javascript rendered pages work fine ^
-* Browser-in-browser view (using [noVNC](https://novnc.com/)) whenever the agent gets stuck on a captcha
+* Browser-in-browser view (using [noVNC](https://novnc.com/)) whenever the MCP client gets stuck on a captcha
 * Content conversion
   * Converts everything to markdown using [markitdown](https://github.com/microsoft/markitdown)
   * Terse outline view of every parsed document (headings, links, images) for cheap skimming
@@ -107,16 +107,14 @@ blocks Tor, `i2p` for eepsites.
 ## Tests
 
 ```bash
-cd mcp-research
-python test_pool.py && python test_security.py && python test_gateway.py   # host
-pytest test_replicas.py test_i2p.py test_mediapolicy.py                     # host
-pytest test_toolserver.py                                                  # needs Playwright + Chromium
+pip install -e mcp-research
+pytest tests                                                   # host (test_toolserver.py needs Playwright + Chromium)
 # needs root + the image's tools; run with the deployed capability set, plain root hides permission bugs:
 docker run --rm --cap-drop ALL --cap-add NET_ADMIN --cap-add SETUID --cap-add SETGID --cap-add CHOWN --cap-add KILL \
-  --cap-add DAC_OVERRIDE --cap-add FOWNER -v $PWD:/app -w /app --entrypoint python mcp-research:local test_sessiond.py
+  --cap-add DAC_OVERRIDE --cap-add FOWNER -v $PWD/tests:/tests -w /tests --entrypoint python mcp-research:local live/test_sessiond.py
 # end to end (stub Keycloak inside one container; restart it per run, the gateway caches the signing key):
 docker run -d --name e2e --add-host nginx:172.17.0.1 <same caps> -e EGRESS=clear -e GATEWAY_PORT=8000 \
   -e PUBLIC_HOST=localhost:8000 -e PUBLIC_SCHEME=https -e OIDC_ISSUER=http://127.0.0.1:9999/realms/r \
-  -e BLOB_TOKEN_SECRET=x mcp-research:local
-docker exec -u 1000 -w /app e2e python e2e_auth.py
+  -e BLOB_TOKEN_SECRET=x -v $PWD/tests:/tests mcp-research:local
+docker exec -u 1000 -w /tests e2e python live/e2e_auth.py
 ```

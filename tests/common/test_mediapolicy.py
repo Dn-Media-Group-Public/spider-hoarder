@@ -2,7 +2,7 @@
 
 import pytest
 
-from toolserver.mediapolicy import Policy, TEXT_ALLOWED, blocked_message
+from mcp_research.common.mediapolicy import Policy, TEXT_ALLOWED, blocked_message
 
 
 def test_defaults_per_egress():

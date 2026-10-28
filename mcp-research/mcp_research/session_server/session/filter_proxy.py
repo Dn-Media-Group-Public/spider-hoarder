@@ -7,7 +7,7 @@ import asyncio
 import os
 import sys
 
-import cmp_rules
+from mcp_research.common import cmp_rules
 
 BLOCKED = frozenset(cmp_rules.hosts())
 ALLOW_SUFFIX = os.environ.get("ALLOW_SUFFIX", "")  # i2p: ".i2p" = refuse every other name and all raw IPs

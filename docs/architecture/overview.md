@@ -2,7 +2,7 @@
 
 spider-hoarder is an MCP server (`mcp-research`) that gives Claude per-user, isolated, real (headed) Chromium sessions, with a
 human handoff for CAPTCHAs/logins, Tor or I2P egress, and fetch/parse/store tools that return Markdown. It knows nothing about
-any downstream graph or database: the agent is the orchestrator and carries text from here to wherever it belongs
+any downstream graph or database: the MCP client is the orchestrator and carries text from here to wherever it belongs
 (see the original framing in [Plan: Agentic research MCP](../plans/agentic-research-mcp.md), whose "independent MCP servers,
 no proxying" shape still holds; its layer-access-control / `ingest_text` parts live in another project).
 
@@ -44,7 +44,7 @@ See also: [Plan: Browser sessions](../implemented-plans/browser-sessions-plan.md
 
 ## Gateway and the tool server
 
-The gateway (`app.py`, `sessions.py`) speaks MCP to Claude (low-level `mcp` SDK, because the tool list is dynamic: proxied from the
+The gateway (`gateway/app.py`, `gateway/sessions.py`) speaks MCP to Claude (low-level `mcp` SDK, because the tool list is dynamic: proxied from the
 session's tool server) and proxies browser tool calls over loopback HTTP to that session's tool server on port `9000+n`
 (`Host: mcp-upstream` is required). It adds its own tools (`browser_request_human_help`, `browser_save_page`,
 `browser_end_session`, `ingest_page`, file tools) and turns every bulk output into a *job*
@@ -58,15 +58,34 @@ See [Session isolation](session-isolation.md).
 ## Request routing and replicas
 See [Scaling and routing](scaling.md). Authentication: [Authentication and live view](auth.md).
 
+## Naming
+
+| Name | Meaning |
+|---|---|
+| **Gateway** | The shared MCP server in each `research-<egress>` container (uid 1000). |
+| **Content pipeline** | extract / store / fetch of bytes -> Markdown; part of the gateway. |
+| **Sessiond** | The only root process; owns the uid pool; starts/stops sessions. |
+| **Session** | One uid + process group (Xvfb, x11vnc, websockify, toolserver, Chromium, egress filter). Not a Docker container. |
+| **Toolserver** | The Python MCP browser server inside a session. |
+| **Session server** | Umbrella for everything that makes sessions happen on a container: sessiond, session, toolserver. |
+| **Common** | Code imported by both the gateway and session server. |
+
+The MCP client is whatever drives the tools over MCP (Claude); the user is the human using the live view.
+
 ## Code map (`mcp-research/`)
 
-| File | Responsibility |
+One Python distribution (`setup.py`, installed into `/venv` with `pip install .`), top-level package `mcp_research`; tests live in `tests/`.
+
+| Path (under `mcp_research/`) | Responsibility |
 |---|---|
-| `app.py` | MCP server, tool schemas/descriptions, job results, blob/upload/live-view routes, `/authz`, replica session-id middleware |
-| `sessions.py` | Session registry, reservations, reaper, page HTML capture, `fetch_html` |
-| `pool.py`, `sessiond.py`, `ports.py` | uid pool (gateway side / root side) and the port/uid layout derived from pool size and replica slot |
-| `session-group.sh`, `entrypoint.sh` | per-session process group; container start (firewall, sessiond, gateway) |
-| `toolserver/` | Python MCP server driving Chromium ([details](browser-toolserver.md)) |
-| `extract.py`, `storage.py`, `blobtoken.py` | Markdown conversion + terse outline + grep, fsspec storage, HMAC links |
-| `fetch.py`, `netguard.py`, `filter_proxy.py`, `cmp_rules.py`, `consent.js` | non-HTML downloads, SSRF guard, Tor SOCKS filter relay, consent-banner handling |
-| `auth.py` | Keycloak JWT verification |
+| `gateway/app.py` | MCP server, tool schemas/descriptions, job results, blob/upload/live-view routes, `/authz`, replica session-id middleware |
+| `gateway/sessions.py` | Session registry, reservations, reaper, page HTML capture, `fetch_html` |
+| `gateway/pool.py`, `session_server/sessiond/` | uid pool (gateway side / root side) |
+| `gateway/auth.py`, `gateway/blobtoken.py` | Keycloak JWT verification, HMAC links |
+| `gateway/content/` | content pipeline: `extract.py` (Markdown, terse outline, grep), `storage.py` (fsspec), `fetch.py` (non-HTML downloads), `netguard.py` (SSRF guard) |
+| `session_server/session/` | `session-group.sh` (per-session process group), `filter_proxy.py` (SOCKS filter relay) |
+| `session_server/toolserver/` | toolserver driving Chromium, `consent.js`, `tools.json` ([details](browser-toolserver.md)) |
+| `common/` | `ports.py` (uid/port layout from pool size and replica slot), `cmp_rules.py`, `mediapolicy.py`, `textcap.py` |
+| `entrypoint.sh` (next to `setup.py`) | container start: firewall, sessiond, gateway |
+
+See also: [Plan: Restructure directories](../implemented-plans/restructure-directories.md)
