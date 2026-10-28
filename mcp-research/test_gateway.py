@@ -549,9 +549,11 @@ def test_multi_browser_routing():
     assert calls[-1] == ("browser_end_session", {"browser": "x"}) and not closed  # others remain
     remaining[0] = 0
     run("browser_end_session", browser="x")
-    assert closed == [bs]  # last browser closed -> session ends
+    assert closed == [bs] and "sid1" not in sessions.policies  # last browser closed -> session ends, policy must be asked again
+    sessions.policies["sid1"] = app.Policy.make("clear")
     run("browser_end_session")
     assert len(closed) == 2 and calls[-1] == ("browser_end_session", {})  # no id: ends them all (and reports the blocked count)
+    sessions.policies["sid1"] = app.Policy.make("clear")
     run("browser_request_human_help", browser="x", reason="r")
     assert calls[-1] == ("browser_bring_to_front", {"browser": "x"})
     assert app.FILE_TOOLS["browser_storage_state"] and "browser_run_code_unsafe" not in app.FILE_TOOLS

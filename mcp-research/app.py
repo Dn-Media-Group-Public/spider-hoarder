@@ -690,6 +690,7 @@ async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
                         return res
                     blocked = info["blocked"]
                 await sessions.close(bs)  # no id, or the last browser was closed
+            sessions.policies.pop(sid)  # the session is over: the next open_session asks the user again (clients reuse one MCP session across /clear)
             return _text("Browser session closed." + (f" Media policy blocked {blocked} request(s)." if blocked else ""))
         if name == "ingest_page":
             return _text(json.dumps(await _ingest_page(

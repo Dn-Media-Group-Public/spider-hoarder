@@ -80,7 +80,7 @@ see [Scaling](scaling.md).
 
 Loading an image, video or audio file can be a legal risk on the dark web, so the user chooses once per gateway session (before anything
 else; fail-closed gate in the gateway and the toolserver) via `open_session(media?, allow?, deny?)`. The policy is immutable, lives in
-`sessions.policies` keyed by MCP session id (outliving individual browsers), is installed in the toolserver at browser start, and applies
+`sessions.policies` keyed by MCP session id (outliving individual browsers, but dropped when `browser_end_session` ends the session, so the next `open_session` asks again), is installed in the toolserver at browser start, and applies
 to every window and to `ingest_page`. `media` defaults to false on Tor / I2P. `get_session()` reports it read-only.
 
 | Layer | Where | Blocks |

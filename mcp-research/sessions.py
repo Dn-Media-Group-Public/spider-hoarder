@@ -77,7 +77,7 @@ class Reservation:
 
 by_mcp: dict[int, BrowserSession] = {}   # id(ServerSession) -> session
 by_view: dict[str, BrowserSession] = {}  # view id -> session
-policies: dict[str, Policy] = {}         # MCP session id -> policy chosen by open_session (immutable; outlives its browsers)
+policies: dict[str, Policy] = {}         # MCP session id -> policy chosen by open_session (immutable; dropped by browser_end_session)
 reserved: dict[str, Reservation] = {}    # MCP session id -> uid held for its first browser
 conn: dict[str, list] = {}               # MCP session id -> [requests in flight (open SSE stream counts), last activity]
 _lock = asyncio.Lock()
