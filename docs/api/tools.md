@@ -26,12 +26,22 @@ Every one takes optional `browser` (default `main`).
 - Navigation/interaction: `browser_navigate`, `_navigate_back`, `_click`, `_type`, `_fill_form`, `_press_key`, `_select_option`,
   `_hover`, `_drag`, `_drop`, `_file_upload`, `_handle_dialog`, `_wait_for`, `_resize`, `_emulate_media`, `_tabs`, `_close`.
 - Reading (always jobs): `browser_snapshot` and `browser_find` (`text_cap`, default 128), `browser_evaluate`,
-  `browser_console_messages`, `browser_network_requests`, `browser_network_request`, `browser_take_screenshot`, `browser_pdf_save`,
+  `browser_console_messages`, `browser_network_requests`, `browser_network_request_get`, `browser_take_screenshot`, `browser_pdf_save`,
   `browser_storage_state`.
 - `browser_network_requests` takes `new` (only requests since the last `new: true` call on the tab; "No new requests." as plain text
-  if none). `browser_network_request(index)` returns a job: `original/request|response/headers.json` and `body.<ext>` (raw bytes;
+  if none). `browser_network_request_get(index)` (renamed from `browser_network_request`, no alias) returns a job: `original/request|response/headers.json` and `body.<ext>` (raw bytes;
   absent parts have no file), parsed like any file; no `part`/`filename`. `index.json` has `url`, `method`, `status`.
   See also: [Plan: network request jobs](../implemented-plans/network-request-jobs.md)
+- `browser_network_request_make(url, method?, headers?, body?, body_job_id?+body_path?, timeout_ms?)` is not a reader but returns a job
+  in the same layout as `_get` (`index.json`: `url`, `method`, `status` of the final request; `redirects: [{url, status}]` if any).
+  It sends the request through the session's real browser (cookies, TLS fingerprint, proxy, media policy). `method` defaults to `GET`,
+  `Content-Type` is never inferred, the session's cookies are sent unless `headers` has a `Cookie`. `body` and `body_job_id`+`body_path`
+  (any file of one of the caller's own jobs) are mutually exclusive; one of the pair alone is an error. A body over `MAX_REQUEST_BODY` (env, default 64 MiB) is refused. `timeout_ms` defaults to 30000, max 120000.
+  Redirects are followed (a 301/302 on POST becomes GET); our `headers` apply to the first request only. A response blocked by the media
+  policy gives a job with `blocked: "media policy"`, only the request headers and a `content-type`-only `response/headers.json`, no body, and a
+  `notes` entry; `Content-Disposition: attachment` is stored as `response/body.<ext>`; DNS/connection/timeout failures are tool errors.
+  Accept and `Sec-Fetch-*` are navigation values unless overridden. Egress is the session's own, so on Tor/I2P it goes through them.
+  See also: [Plan: network request make](../implemented-plans/network-request-make.md)
   Requests stopped by the media policy show as `[BLOCKED] blocked: media policy`. See also: [Plan: No-media sessions](../implemented-plans/no-media-sessions.md)
 - Windows: `browser_start_session` (returns a new id; subagents must use their own, never `main`).
 - Storage: `browser_cookie_{get,list,set,delete,clear}`, `browser_localstorage_*`, `browser_sessionstorage_*`,

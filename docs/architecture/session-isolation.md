@@ -13,7 +13,7 @@ is allocated or leaked.
 verbs over a gateway-only socket, no parsing, no network) is the authority:
 
 1. `start(uid)` is refused unless the uid is free, no process owns that uid, and its homedir does not exist.
-2. It creates `/home/s<uid>` (`0710`, group `gw-collect`) and `out/` (`2750`), then forks a child that sets `umask 027`, drops
+2. It creates `/home/s<uid>` (`0710`, group `gw-collect`) `out/` (`2750`) and `in/` (`2770`, owned by the session, group `gw-collect`), then forks a child that sets `umask 027`, drops
    groups, `setgid`/`setuid`, applies `RLIMIT_NPROC`/`NOFILE`, a clean environment (no gateway secrets), `setsid`, and execs
    the session group. `no-new-privileges` is set by the entrypoint (`setpriv`) because Swarm cannot set `security_opt`.
 3. `stop(uid)`: SIGKILL the group → sweep with `kill(-1)` as that uid → wait until no process owns the uid → delete everything
@@ -24,6 +24,10 @@ verbs over a gateway-only socket, no parsing, no network) is the authority:
 Anything that must outlive a session is copied by the gateway into blob storage before `stop`
 ([Jobs and storage](jobs-and-storage.md)); the homedir is disposable. Each session has a private gid, so group-readable `out/` files
 only ever mean "the gateway" (member of `gw-collect`).
+`in/` is the opposite channel, gateway to sandbox, used only for request bodies of `browser_network_request_make`: the gateway creates a
+`0644` file with a random name through `O_PATH`/`O_NOFOLLOW`/`O_EXCL` (the session owns `in/` and could plant a symlink or swap the dir); the
+home is not traversable by other sessions, and the file is deleted after use.
+See also: [Plan: network request make](../implemented-plans/network-request-make.md)
 See also: [Plan: Tool file outputs become jobs](../implemented-plans/file-outputs-as-jobs.md)
 
 ## What isolation does and does not give

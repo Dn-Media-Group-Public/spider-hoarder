@@ -507,7 +507,7 @@
  },
  {
   "name": "browser_network_requests",
-  "description": "Returns a numbered list of network requests since loading the page. Use browser_network_request with the number to get full details.",
+  "description": "Returns a numbered list of network requests since loading the page. Use browser_network_request_get with the number to get full details.",
   "inputSchema": {
    "$schema": "https://json-schema.org/draft/2020-12/schema",
    "type": "object",
@@ -523,7 +523,7 @@
     },
     "new": {
      "default": false,
-     "description": "If true, return only requests completed since the last call to this tool with `new: true` on this tab (everything since page load on the first such call), then remember the position. Call it repeatedly with `new: true` between actions, e.g. after each click, to see exactly which requests each action caused. Indexes stay global: they are the same numbers `browser_network_request` takes. The position moves whether or not `filter`/`static` hide some of the new requests. Calls without `new` neither read nor move the position. Requests still in flight when you call appear in the next call. If there are no new requests the result is a short text, not a file.",
+     "description": "If true, return only requests completed since the last call to this tool with `new: true` on this tab (everything since page load on the first such call), then remember the position. Call it repeatedly with `new: true` between actions, e.g. after each click, to see exactly which requests each action caused. Indexes stay global: they are the same numbers `browser_network_request_get` takes. The position moves whether or not `filter`/`static` hide some of the new requests. Calls without `new` neither read nor move the position. Requests still in flight when you call appear in the next call. If there are no new requests the result is a short text, not a file.",
      "type": "boolean"
     },
     "filename": {
@@ -544,7 +544,7 @@
   }
  },
  {
-  "name": "browser_network_request",
+  "name": "browser_network_request_get",
   "description": "Returns the full details of a single network request as a job: request/ and response/ each hold headers.json and the body (raw bytes, extension from its content-type); parts that do not exist are absent, and parseable bodies (HTML, PDF, ...) are parsed like any file. Use the number from browser_network_requests.",
   "inputSchema": {
    "$schema": "https://json-schema.org/draft/2020-12/schema",

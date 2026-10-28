@@ -6,12 +6,18 @@ See also: [Plan: Tool file outputs become jobs](../implemented-plans/file-output
 
 ## Which tools produce jobs
 `FILE_TOOLS` in `app.py`: `browser_take_screenshot`, `browser_pdf_save`, `browser_snapshot`, `browser_find`, `browser_evaluate`,
-`browser_console_messages`, `browser_network_request(s)`, `browser_storage_state`, plus `browser_save_page`, `ingest_page` and uploads.
+`browser_console_messages`, `browser_network_request_get`, `browser_network_request_make` (not a reader, but its output is a job), `browser_network_requests`, `browser_storage_state`, plus `browser_save_page`, `ingest_page` and uploads.
 A client-supplied `filename` only renames the file inside the job; the agent never controls a host path. A file the session wrote is read
 by the gateway from `out/` (opened through an `O_PATH` home fd, then `O_NOFOLLOW`, regular files only) and streamed into storage in 1 MiB chunks, **before** the session's homedir is wiped. Stored files have no size
 cap; parsing does (`MAX_PARSE_BYTES`, default 50 MB: a bigger file is kept under `original/` with a `notes` entry, not parsed).
-`browser_network_request` outputs a directory: only `request|response/headers.json` and `body.<ext>` are read, anything else is ignored.
+`browser_network_request_get`/`_make` output a directory: only `request|response/headers.json` and `body.<ext>` are read, anything else is ignored.
 See also: [Plan: network request jobs](../implemented-plans/network-request-jobs.md)
+
+**`in/`**: for `browser_network_request_make` with `body_job_id`+`body_path` the gateway resolves the file (owner-scoped, `..`/absolute
+paths and missing keys rejected, `MAX_REQUEST_BODY`, env, default 64 MiB, also for an inline `body`: Chromium refuses a CDP message over 100 MiB, i.e. ~75 MiB of body, by killing the whole browser context; measured 74 MiB ok, 76 not), writes it to `<home>/in/<random>.body` (same `O_PATH` home fd, `O_NOFOLLOW`,
+file `O_EXCL`) and passes that name to the toolserver as a hidden `body_file` argument (any agent-supplied `body_file` is discarded). The
+toolserver reads and deletes it; the gateway deletes it again afterwards as a backstop, and the session-end wipe covers the rest.
+See also: [Plan: network request make](../implemented-plans/network-request-make.md)
 
 ## Layout
 fsspec storage (`RESEARCH_BLOB_URL`: `file:///data` or `gs://…`), keyed `<owner>/<uuid>`:

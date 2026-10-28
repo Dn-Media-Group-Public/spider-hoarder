@@ -18,6 +18,7 @@ from .mediapolicy import Policy, blocked_message
 from .textcap import DEFAULT_TEXT_CAP, cap_found_line, cap_snapshot
 
 OUT = os.environ.get("TOOLSERVER_OUT", "out")
+IN = os.environ.get("TOOLSERVER_IN", "in")  # bodies the gateway leaves for browser_network_request_make
 ACT_TIMEOUT = 10_000  # ms; a stale ref or hidden element fails fast
 HANDLERS: dict = {}
 
@@ -421,8 +422,28 @@ def body_ext(headers: dict) -> str:
     return EXT_FIX.get(ct) or mimetypes.guess_extension(ct) or ".bin"
 
 
-@tool("browser_network_request")
-async def network_request(R, bid, a):
+async def response_parts(resp, parts: dict) -> None:
+    """response/headers.json and response/body.<ext> of a Playwright Response, whatever of them exists."""
+    hdrs = await resp.all_headers()
+    parts["response/headers.json"] = json.dumps(hdrs, indent=1).encode()
+    try:
+        parts[f"response/body{body_ext(hdrs)}"] = await resp.body()
+    except PWError:  # e.g. redirects and evicted bodies have none
+        pass
+
+
+def write_tree(filename: str, parts: dict) -> str:
+    """Writes {relative path: bytes} below the out dir, returns the directory's name."""
+    root = out_path(filename)
+    for rel, data in parts.items():
+        os.makedirs(os.path.join(root, os.path.dirname(rel)), exist_ok=True)
+        with open(os.path.join(root, rel), "wb") as f:
+            f.write(data)
+    return os.path.basename(root)
+
+
+@tool("browser_network_request_get")
+async def network_request_get(R, bid, a):
     """Writes a directory (named by `filename`): request/ and response/, each headers.json and body.<ext>,
     only the parts that exist."""
     net = R.state[R.page(bid)].network
@@ -432,24 +453,123 @@ async def network_request(R, bid, a):
         raise ToolError("filename is required")
     e = net[a["index"] - 1]
     req, resp = e["req"], e["resp"]
-    root = out_path(a["filename"])
     parts = {}  # relative path -> bytes
     hdrs = await req.all_headers()
     parts["request/headers.json"] = json.dumps(hdrs, indent=1).encode()
     if (body := req.post_data_buffer) is not None:
         parts[f"request/body{body_ext(hdrs)}"] = body
     if resp:
-        hdrs = await resp.all_headers()
-        parts["response/headers.json"] = json.dumps(hdrs, indent=1).encode()
+        await response_parts(resp, parts)
+    name = write_tree(a["filename"], parts)
+    return file_result("Network request", name) + "\n" + net_line(a["index"], e, R.blocked_urls)
+
+
+MAX_TIMEOUT = 120_000  # ms
+
+
+def read_in(name: str) -> bytes:
+    """The body the gateway left in the in dir; deleted once read. Never a path the agent chose."""
+    path = os.path.join(IN, os.path.basename(str(name)))
+    try:  # no cap here: only the gateway (MAX_REQUEST_BODY) and the session itself ever write in/
+        with open(path, "rb") as f:
+            return f.read()
+    except OSError:
+        raise ToolError("request body file not found")
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(path)
+
+
+@tool("browser_network_request_make")
+async def network_request_make(R, bid, a):
+    """Sends one request as the first request of a navigation in a hidden tab (CDP Fetch rewrites its method, headers and
+    body), so cookies, TLS fingerprint, proxy and the media policy are the real browser's. Writes the same directory as
+    network_request_get for the final request/response, then a `Redirects:` line if there were hops."""
+    url, method = a["url"], str(a.get("method") or "GET").upper()
+    if not re.match(r"https?://", url):
+        raise ToolError("url must be http(s)")
+    if not re.fullmatch(r"[A-Z]+", method):
+        raise ToolError("invalid method")
+    headers = a.get("headers") or {}
+    if not isinstance(headers, dict) or not all(isinstance(v, str) for v in headers.values()):
+        raise ToolError("headers must be an object of strings")
+    headers = dict(headers)
+    if a.get("body") is not None and a.get("body_file"):
+        raise ToolError("body and body_job_id/body_path are mutually exclusive")
+    body = read_in(a["body_file"]) if a.get("body_file") else None  # read first: it is deleted even if we fail later
+    if a.get("body") is not None:
+        body = str(a["body"]).encode()
+    timeout = min(int(a.get("timeout_ms") or 30_000), MAX_TIMEOUT)
+    if not any(k.lower() == "cookie" for k in headers):  # a POST from about:blank is cross-site: Lax/Strict cookies would be dropped
+        if cookies := await R.ctx.cookies(url):
+            headers["Cookie"] = "; ".join(f"{c['name']}={c['value']}" for c in cookies)
+
+    page = await R.hidden_page()
+    cdp = await R.ctx.new_cdp_session(page)
+    net, downloads, failed, first = [], [], [], [True]
+    blocked0 = len(R.blocked)
+    # Playwright's own Request objects do not know about the override (method GET, no post data): ours comes from the arguments
+    page.on("response", lambda r: r.frame == page.main_frame and r.request.resource_type == "document" and net.append(r))
+    page.on("requestfailed", lambda r: failed.append(r))
+    got_download = asyncio.Event()
+    page.on("download", lambda d: (downloads.append(d), got_download.set()))
+
+    async def paused(ev):
+        args = {"requestId": ev["requestId"]}
+        if first[0]:  # the navigation itself; later requests (redirect hops, subresources) pass untouched
+            first[0] = False
+            args |= {"method": method, "headers": [{"name": k, "value": v} for k, v in headers.items()]}
+            if body is not None:
+                args["postData"] = base64.b64encode(body).decode()
+        with contextlib.suppress(PWError):
+            await cdp.send("Fetch.continueRequest", args)
+
+    cdp.on("Fetch.requestPaused", lambda ev: R._spawn(paused(ev)))
+    try:
+        await cdp.send("Fetch.enable", {"patterns": [{"urlPattern": "*", "requestStage": "Request"}]})
+        err = None
         try:
-            parts[f"response/body{body_ext(hdrs)}"] = await resp.body()
-        except PWError:  # e.g. redirects and evicted bodies have none
-            pass
-    for rel, data in parts.items():
-        os.makedirs(os.path.join(root, os.path.dirname(rel)), exist_ok=True)
-        with open(os.path.join(root, rel), "wb") as f:
-            f.write(data)
-    return file_result("Network request", os.path.basename(root)) + "\n" + net_line(a["index"], e, R.blocked_urls)
+            await page.goto(url, wait_until="commit", timeout=timeout)  # redirects are followed before the commit
+        except PWError as e:
+            err = e
+            if "Download is starting" in str(e):  # the event may trail the error
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(got_download.wait(), timeout / 1000)
+        parts, redirects = {}, []
+        blocked = [b for b in R.blocked[blocked0:] if any(f.url == b["url"] for f in failed)]
+        hops = net if blocked else net[:-1]  # a blocked response never becomes a Response: every one in `net` was a redirect
+        m, kept = method, body is not None  # the final request's method/body: browsers turn POST into GET on 301/302/303
+        for r in hops:
+            redirects.append({"url": r.url, "status": r.status})
+            if r.status == 303 and m != "HEAD" or r.status in (301, 302) and m == "POST":
+                m, kept = "GET", False
+        if downloads:  # Content-Disposition: attachment; the navigation "fails" with "Download is starting"
+            path = await asyncio.wait_for(downloads[0].path(), timeout / 1000)
+            body_bytes = await asyncio.to_thread(lambda: open(path, "rb").read())
+        elif not blocked and (err or not net):
+            raise ToolError(str(err or "no response").split("\n")[0])
+        if blocked:  # Playwright reports no response for it: the headers are the registry's record of what was blocked
+            req = next(f for f in failed if f.url == blocked[0]["url"])
+            hdrs = await req.all_headers()
+            parts["response/headers.json"] = json.dumps({"content-type": blocked[0]["kind"]}, indent=1).encode()
+            line = f"1. [{m}] {req.url} => [BLOCKED] blocked: media policy"
+        else:
+            final = net[-1] if net else None
+            hdrs = await final.request.all_headers()
+            if downloads:
+                fh = await final.all_headers()
+                parts["response/headers.json"] = json.dumps(fh, indent=1).encode()
+                parts[f"response/body{body_ext(fh)}"] = body_bytes
+            else:
+                await response_parts(final, parts)
+            line = f"1. [{m}] {final.url} => [{final.status}] {final.status_text}"
+        parts["request/headers.json"] = json.dumps(hdrs, indent=1).encode()
+        if kept:
+            parts[f"request/body{body_ext(hdrs)}"] = body
+    finally:
+        await page.close()
+    out = file_result("Network request", write_tree(a["filename"], parts)) + "\n" + line
+    return out + (f"\nRedirects: {json.dumps(redirects)}" if redirects else "")
 
 
 # --------------------------------------------------------------------- tabs

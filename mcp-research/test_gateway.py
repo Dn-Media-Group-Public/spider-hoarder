@@ -294,14 +294,14 @@ def test_file_tools_are_jobs():
     bs.client = NetClient()
     r = run("browser_network_requests", new=True)
     assert r.content[0].text == "### Result\nNo new requests." and not r.isError  # no file: passed through
-    net = json.loads(run("browser_network_request", index=3, filename="ignored").content[0].text)
+    net = json.loads(run("browser_network_request_get", index=3, filename="ignored").content[0].text)
     paths = {f["path"] for f in net["files"]}
     assert {"original/response/headers.json", "original/response/body.html", "parsed/response/body.html.md",
             "original/response/body.png"} <= paths and not any("ignored" in p for p in paths), paths
     assert "http://n.test/x" in net["text"] and net["text_path"] == "parsed/response/body.html.md", net
     m = storage.get_manifest(app._key("a@b.c", net["job_id"]))
     assert (m["url"], m["method"], m["status"]) == ("http://n.test/p", "GET", 200), m
-    assert "filename" not in app._without_filename(mt.Tool(name="browser_network_request", inputSchema={"type": "object", "properties": {"index": {}, "filename": {}}})).inputSchema["properties"]
+    assert "filename" not in app._without_filename(mt.Tool(name="browser_network_request_get", inputSchema={"type": "object", "properties": {"index": {}, "filename": {}}})).inputSchema["properties"]
     bs.client = Client()
 
     key = app._key("a@b.c", out["job_id"])
@@ -315,6 +315,78 @@ def test_file_tools_are_jobs():
     assert g(path="original/m.txt", pattern="x").isError  # another owner's job is not reachable
     app._caller = lambda: (None, "a@b.c", "sid1")
     sessions.policies["sid1"] = app.Policy.make("clear")
+
+
+def test_request_make_body_and_job():
+    import app, storage, tempfile, json
+    from mcp import types as mt
+    storage.BLOB_URL = "file://" + tempfile.mkdtemp()
+    home = tempfile.mkdtemp()
+    os.mkdir(home + "/out"); os.mkdir(home + "/in")
+    app.ports.home = lambda uid: home
+    jid = f"{app.RID}.123e4567-e89b-12d3-a456-426614174000"
+    storage.write_bytes(app._key("a@b.c", jid), "original/d.json", b'{"k":1}', "application/json")
+    rb = lambda owner="a@b.c", **a: app._request_body(owner, 1, a)
+
+    assert rb(url="u", body="x") == ({"url": "u", "body": "x"}, None)
+    for bad in ({"body_job_id": jid}, {"body_path": "original/d.json"}, {"body": "x", "body_job_id": jid, "body_path": "original/d.json"},
+                {"body_job_id": jid, "body_path": "../x"}, {"body_job_id": jid, "body_path": "/etc/passwd"},
+                {"body_job_id": jid, "body_path": "original/missing"}, {"body_job_id": "junk", "body_path": "original/d.json"}):
+        try:
+            rb(**bad); assert False, bad
+        except ValueError:
+            pass
+    try:
+        rb("other@b.c", body_job_id=jid, body_path="original/d.json"); assert False  # another owner's job
+    except ValueError as e:
+        assert str(e) == "file not found"
+    assert os.listdir(home + "/in") == []
+    app.MAX_REQUEST_BODY = 6  # the file is 7 bytes; inline bodies count too
+    for bad in ({"body_job_id": jid, "body_path": "original/d.json"}, {"body": "1234567"}):
+        try:
+            rb(**bad); assert False, bad
+        except ValueError as e:
+            assert "too large" in str(e)
+    assert rb(body="123456")[1] is None and os.listdir(home + "/in") == []
+    app.MAX_REQUEST_BODY = 64 * 1024 * 1024
+    a, name = rb(url="u", body_file="agent-chosen", body_job_id=jid, body_path="original/d.json")
+    assert a == {"url": "u", "body_file": name} and open(f"{home}/in/{name}", "rb").read() == b'{"k":1}'
+    assert oct(os.stat(f"{home}/in/{name}").st_mode & 0o777) == "0o644"
+    app._drop_in(1, name); app._drop_in(1, name)  # idempotent
+    assert os.listdir(home + "/in") == []
+    os.symlink("/etc/passwd", home + "/in/trap")  # a session-planted name is never written through
+    shutil.move(home + "/in", home + "/real"); os.symlink(home + "/real", home + "/in")  # swapped in/ dir
+    try:
+        app._write_in(1, b"x"); assert False
+    except OSError:
+        pass
+    os.unlink(home + "/in"); shutil.move(home + "/real", home + "/in"); os.unlink(home + "/in/trap")
+
+    seen = []
+
+    class Client:
+        async def call_tool(self, name, args):
+            seen.append(args)
+            d = f"{home}/out/{args['filename']}"
+            os.makedirs(d + "/request"); os.makedirs(d + "/response")
+            open(d + "/request/headers.json", "w").write("{}")
+            open(d + "/response/headers.json", "w").write("{}")
+            return mt.CallToolResult(content=[mt.TextContent(type="text", text=(
+                "### Result\n- [Network request](out/x)\n1. [POST] http://n.test/b => [BLOCKED] blocked: media policy\n"
+                'Redirects: [{"url": "http://n.test/a", "status": 307}]'))])
+
+    bs = types.SimpleNamespace(client=Client(), owner="a@b.c", id="v", uid=1, last_used=0)
+    r = asyncio.run(app._file_tool(bs, "browser_network_request_make", {"url": "http://n.test/a", "body_job_id": jid, "body_path": "original/d.json", "body_file": "x"}))
+    out = json.loads(r.content[0].text)
+    assert seen[0]["body_file"] != "x" and "body_job_id" not in seen[0] and os.listdir(home + "/in") == [], seen  # gateway-set name; leftovers dropped
+    m = storage.get_manifest(app._key("a@b.c", out["job_id"]))
+    assert (m["url"], m["method"], m.get("status"), m["blocked"], m["redirects"][0]["status"]) == ("http://n.test/b", "POST", None, "media policy", 307), m
+    assert "media policy" in out["notes"][0]
+    try:  # call_tool turns this into an error result; nothing reaches the toolserver
+        asyncio.run(app._file_tool(bs, "browser_network_request_make", {"url": "u", "body": "x", "body_job_id": jid, "body_path": "original/d.json"})); assert False
+    except ValueError:
+        assert len(seen) == 1 and os.listdir(home + "/in") == []
+    assert "filename" not in app._without_filename(mt.Tool(name="browser_network_request_make", inputSchema={"type": "object", "properties": {"url": {}, "filename": {}}})).inputSchema["properties"]
 
 
 def test_terse():

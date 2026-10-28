@@ -37,6 +37,15 @@ original, checked by `test_toolserver.py`) plus a `browser` property. Added: 15 
   from and then advances (per tab; calls without `new` leave it). `browser_network_request` writes a directory (`request/`,
   `response/`, each `headers.json` and `body.<ext>`, extension from the content-type via `mimetypes`) instead of one text file.
   See also: [Plan: network request jobs](../implemented-plans/network-request-jobs.md)
+- `browser_network_request_make`: opens a hidden tab (`Registry.hidden_page`: created with `_ignore`, so it belongs to no browser id and is
+  nobody's current tab; one fresh tab per call, closed in `finally`), enables CDP `Fetch` (request stage) and navigates. The first
+  `Fetch.requestPaused` is continued with `method`, `headers` and `postData` from the arguments; later requests pass untouched. `Cookie`
+  is filled from `ctx.cookies(url)` unless given (a POST from `about:blank` is cross-site, so Lax/Strict cookies would be dropped).
+  It is a top-level `Document` request, so layers A and D apply unchanged. Playwright's `Request` does not see the override (reports `GET`
+  and no post data), so the final request's method and body come from the arguments (adjusted for the redirect rules); its headers come
+  from `all_headers()`. A blocked response yields no Playwright `Response`: the job gets the `content-type` from `Registry.blocked`.
+  Limits: our headers are not re-applied on redirect hops; the hidden tab has no `PageState`.
+  See also: [Plan: network request make](../implemented-plans/network-request-make.md)
 - `browser_pdf_save` uses CDP `Page.printToPDF` (Playwright's `page.pdf` is headless-only).
 - Files (screenshots, PDFs, `filename=` outputs) go to `$HOME/out`; the gateway copies them into jobs ([Jobs](jobs-and-storage.md)).
 

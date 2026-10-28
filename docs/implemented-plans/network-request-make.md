@@ -98,7 +98,7 @@ Jobs live in the gateway's storage; the toolserver sandbox cannot see them. The 
   `docs/implemented-plans/index.md` when it moves.
 
 ## Open for review
-- Cap on `in/` body files: proposed constant of 25 MiB in the toolserver, as the body is held in memory as base64 for CDP anyway.
+- Cap on request bodies: proposed constant of 25 MiB in the toolserver. Implemented instead as the gateway env `MAX_REQUEST_BODY`, default 64 MiB (a 500 MiB default was tried and cannot work: Chromium refuses CDP messages over 100 MiB and the whole browser context dies, ceiling measured at 75 MiB of body).
 - Maximum for `timeout_ms`: proposed 120000.
 - One fresh hidden tab per call, closed afterwards, proposed for isolation and no leaked state; a reused tab is the alternative.
 - Sec-Fetch-* and `Accept` are navigation values unless the agent overrides them; sites that treat navigation and XHR differently

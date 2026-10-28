@@ -8,3 +8,5 @@ Plans awaiting implementation or kept as background. Implemented plans move to [
   Builds on [Network request jobs](../implemented-plans/network-request-jobs.md).
 - [Newsroom browsers](newsroom-browsers-plan.md) — the earlier container-per-session design. Superseded by
   [Browser sessions](../implemented-plans/browser-sessions-plan.md); kept for its Keycloak/Tor background.
+- [`browser_network_request_make` request types](network-request-make-types.md) — `type` navigation / form / xhr, form fields and
+  file parts from jobs, per-request cookies, caller-chosen origin; large uploads without the 75 MiB CDP ceiling.

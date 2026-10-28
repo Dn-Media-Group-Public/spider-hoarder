@@ -58,9 +58,14 @@ MAX_ARCHIVE_MEMBERS = int(os.environ.get("MAX_ARCHIVE_MEMBERS") or os.environ.ge
 FILE_TOOLS = {
     "browser_take_screenshot": "screenshot.png", "browser_pdf_save": "page.pdf",
     "browser_snapshot": "snapshot.yml", "browser_find": "matches.txt", "browser_evaluate": "evaluate.json",
-    "browser_console_messages": "console.txt", "browser_network_request": "network-request",
+    "browser_console_messages": "console.txt", "browser_network_request_get": "network-request",
+    "browser_network_request_make": "network-request",
     "browser_network_requests": "network-requests.txt", "browser_storage_state": "storage-state.json",
 }
+TREE_TOOLS = ("browser_network_request_get", "browser_network_request_make")  # output is a directory, named by the gateway alone
+# Request bodies go to Chromium as one base64 CDP message, which it refuses above 100 MiB (= 75 MiB raw) by killing the whole browser
+# context; measured: 74 MiB works, 76 does not. The default leaves room for the headers. Raising it past ~72 MiB is unsafe.
+MAX_REQUEST_BODY = int(os.environ.get("MAX_REQUEST_BODY", 64 * 1024 * 1024))
 CAPPED_TOOLS = ("browser_snapshot", "browser_find")  # take `text_cap`
 FILE_TOOLS_NOTE = ("\n\nThe result is {job_id, files, text?}: `text` is the content if small, else page through it "
                    "with get_file_text or search it with grep_file; get_file_url for a link. `filename` only names "
@@ -373,6 +378,63 @@ def _out_files(uid: int, name: str, tree: bool = False):
             os.close(fd)
 
 
+def _write_in(uid: int, data: bytes) -> str:
+    """Leave `data` for the session as <home>/in/<random name> (the mirror image of reading out/: every component
+    O_NOFOLLOW from the home fd, the file O_EXCL so a planted name or symlink is never written through). Returns the name."""
+    name = f"{uuid.uuid4()}.body"
+    fds = [os.open(ports.home(uid), os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW)]
+    try:
+        fds.append(os.open("in", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fds[0]))
+        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o644, dir_fd=fds[1])
+        with os.fdopen(fd, "wb") as f:
+            os.fchmod(f.fileno(), 0o644)  # the session user is neither owner nor in our group; its home is not traversable by others
+            f.write(data)
+        return name
+    finally:
+        for fd in fds:
+            os.close(fd)
+
+
+def _drop_in(uid: int, name: str) -> None:
+    """Backstop for a body the toolserver never got to delete."""
+    try:
+        fd = os.open(ports.home(uid), os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            d = os.open("in", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+            try:
+                os.unlink(name, dir_fd=d)
+            finally:
+                os.close(d)
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+
+
+def _request_body(owner: str, uid: int, arguments: dict) -> tuple[dict, str | None]:
+    """browser_network_request_make: validate the body arguments, resolve body_job_id/body_path (owner-scoped) to a file in
+    the session's in/. Returns the arguments for the toolserver (hidden `body_file` set by us only) and that file's name."""
+    a = {k: v for k, v in arguments.items() if k not in ("body_job_id", "body_path", "body_file")}
+    job, path = arguments.get("body_job_id"), arguments.get("body_path")
+    if (job is None) != (path is None):
+        raise ValueError("body_job_id and body_path go together")
+    too_big = ValueError(f"request body too large (max {MAX_REQUEST_BODY} bytes)")
+    if job is None:
+        if len(str(arguments.get("body") or "").encode()) > MAX_REQUEST_BODY:
+            raise too_big
+        return a, None
+    if arguments.get("body") is not None:
+        raise ValueError("body and body_job_id/body_path are mutually exclusive")
+    key, path = _key(owner, job), _check_rel_path(path)
+    if not storage.exists(key, path):
+        raise ValueError("file not found")
+    if next(f["size"] for f in storage.get_manifest(key)["files"] if f["path"] == path) > MAX_REQUEST_BODY:  # before reading it
+        raise too_big
+    data = storage.read_bytes(key, path)
+    name = _write_in(uid, data)
+    return {**a, "body_file": name}, name
+
+
 def _job_name(filename: Any, default: str) -> str:
     """Agent-supplied filename -> a bare job-internal name (never a path)."""
     name = os.path.basename(str(filename or "").replace("\\", "/"))
@@ -419,11 +481,18 @@ def _ingest_out(uid: int, private: str, key: str, jname: str, tree: bool, base_u
 
 async def _file_tool(bs: sessions.BrowserSession, name: str, arguments: dict) -> types.CallToolResult:
     """Run a file-producing upstream tool; the file ends up under a new job_id."""
-    tree = name == "browser_network_request"  # its output is a directory, named by the gateway alone
+    tree = name in TREE_TOOLS
     jname = FILE_TOOLS[name] if tree else _job_name(arguments.get("filename"), FILE_TOOLS[name])
     job_id = _new_job_id()
     private = f"{uuid.uuid4()}-{jname}"  # gateway-chosen, relative: lands in out/, never an agent-chosen path
-    res = await bs.client.call_tool(name, {**arguments, "filename": private})
+    in_name = None
+    if name == "browser_network_request_make":
+        arguments, in_name = await asyncio.to_thread(_request_body, bs.owner, bs.uid, arguments)
+    try:
+        res = await bs.client.call_tool(name, {**arguments, "filename": private})
+    finally:
+        if in_name:
+            await asyncio.to_thread(_drop_in, bs.uid, in_name)
     up = sessions.result_text(res)
     if res.isError or "](out/" not in up:  # an error, or a plain text answer such as "No new requests."
         return res
@@ -432,6 +501,10 @@ async def _file_tool(bs: sessions.BrowserSession, name: str, arguments: dict) ->
         m = re.search(r"^\d+\. \[(\S+)\] (\S+) => \[(\w+)\]", up, re.M)
         if m:
             meta = {"url": m.group(2), "method": m.group(1), "status": int(m.group(3)) if m.group(3).isdigit() else None}
+        if m and m.group(3) == "BLOCKED":
+            meta["blocked"] = "media policy"
+        if r := re.search(r"^Redirects: (.+)$", up, re.M):
+            meta["redirects"] = json.loads(r.group(1))
     key = _key(bs.owner, job_id)
     try:
         result = await asyncio.to_thread(_ingest_out, bs.uid, private, key, jname, tree, meta.get("url", ""))
@@ -444,6 +517,8 @@ async def _file_tool(bs: sessions.BrowserSession, name: str, arguments: dict) ->
         if name == "browser_find":
             meta["query"] = {k: arguments[k] for k in ("text", "regex") if arguments.get(k)}
     storage.set_meta(key, keep_none=("text_cap",), **meta)
+    if meta.get("blocked"):
+        result["notes"] = [*result.get("notes", []), "blocked by the media policy: the response body was never read"]
     return _text(json.dumps({"job_id": job_id, **result}))
 
 
@@ -484,7 +559,7 @@ def _text(msg: str, error: bool = False) -> types.CallToolResult:
 
 
 def _without_filename(t: types.Tool) -> types.Tool:
-    """browser_network_request fills a whole job: the agent has no filename to choose."""
+    """browser_network_request_get/_make fill a whole job: the agent has no filename to choose."""
     sch = {**t.inputSchema, "properties": {k: v for k, v in t.inputSchema.get("properties", {}).items() if k != "filename"}}
     desc = (t.description or "").replace(" `filename` only names the file inside the job.", "")
     return t.model_copy(update={"inputSchema": sch, "description": desc})
@@ -496,7 +571,7 @@ async def list_tools() -> list[types.Tool]:
     tools = [t for t in await sessions.upstream_tools() if t.name not in HIDDEN | own]
     tools = [t.model_copy(update={"description": (t.description or "") + FILE_TOOLS_NOTE}) if t.name in FILE_TOOLS else t
              for t in tools]
-    tools = [_without_filename(t) if t.name == "browser_network_request" else t for t in tools]
+    tools = [_without_filename(t) if t.name in TREE_TOOLS else t for t in tools]
     tools = [t.model_copy(update={"description": f"[{EGRESS.upper()}] {EGRESS_NOTE}\n\n{t.description or ''}"}) if t.name == "browser_navigate" else t
              for t in tools]
     return tools + EXTRA_TOOLS

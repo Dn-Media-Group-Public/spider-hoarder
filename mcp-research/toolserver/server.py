@@ -39,6 +39,19 @@ NEW = {
         "call browser_end_session with that id when done.", schema(), False),
     "browser_end_session": ("Close one browser (its window and tabs) when given `browser`; with no `browser`, close all browsers "
         "and end the session.", schema(), True),
+    "browser_network_request_make": ("Sends one HTTP request through this session's real browser (its cookies, TLS fingerprint, proxy "
+        "and media policy) and returns the response as a job, laid out like browser_network_request_get: request/ and response/, each "
+        "headers.json and the body (raw bytes, extension from its content-type); parseable bodies (HTML, PDF, ...) are parsed like any "
+        "file. Redirects are followed: the job is the final request and `redirects` lists the hops. A response the media policy blocks "
+        "gives a job with `blocked` set and no body. A `Content-Disposition: attachment` reply is stored as the body. DNS, connection "
+        "and timeout failures are errors. Cookies of the session are sent unless `headers` has a Cookie. The request is a browser "
+        "navigation, so Accept and Sec-Fetch-* are navigation values unless you override them.",
+        schema(["url"], url=s_, method={"type": "string", "description": "Default GET"},
+               headers={"type": "object", "additionalProperties": s_, "description": "Request headers. Content-Type is never inferred: set it yourself."},
+               body={"type": "string", "description": "Request body (text). Not with body_job_id/body_path."},
+               body_job_id={"type": "string", "description": "Job id of a stored file to send as the body; needs body_path."},
+               body_path={"type": "string", "description": "Path of that file inside the job, as listed by list_files (e.g. original/data.json)."},
+               timeout_ms={"type": "integer", "minimum": 1, "description": "Default 30000, at most 120000."}), True),
     "browser_bring_to_front": ("Raise a browser's window.", schema(), True),
     "browser_cookie_list": ("List cookies, optionally only those applying to `url` or matching `domain` / `path`.",
         schema(url=s_, domain=s_, path=s_), True),
@@ -128,4 +141,5 @@ def build(port: int) -> FastMCP:
 def main(config_path: str) -> None:
     _cfg.update(json.load(open(config_path)))
     tools.OUT = _cfg["outDir"]
+    tools.IN = _cfg.get("inDir", "in")
     build(_cfg["port"]).run(transport="streamable-http")

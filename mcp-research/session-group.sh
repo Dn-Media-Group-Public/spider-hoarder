@@ -34,6 +34,7 @@ cat > "$HOME/toolserver.json" <<JSON
   "args": [$ARGS],
   "initScript": "/app/consent.js",
   "outDir": "$HOME/out",
+  "inDir": "$HOME/in",
   "navTimeout": $NAV_TIMEOUT,
   "port": $MCP_PORT
 }

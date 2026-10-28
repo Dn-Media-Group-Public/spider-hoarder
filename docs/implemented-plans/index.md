@@ -14,3 +14,4 @@ Back to the [documentation index](../index.md). Open plans: [plans](../plans/ind
 - [I2P egress (`/i2p/mcp`)](i2p-egress.md)
 - [More archive formats and binary structured data → JSON](more-file-formats.md)
 - [No-media sessions (`open_session`, block media at request and header level)](no-media-sessions.md)
+- [`browser_network_request_make`, `browser_network_request` renamed `_get`](network-request-make.md)

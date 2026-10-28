@@ -4,7 +4,9 @@ container smoke test covers headed mode). Run: pytest test_toolserver.py"""
 import asyncio
 import json
 import os
+import shutil
 import tempfile
+import time
 
 import pytest
 
@@ -67,7 +69,7 @@ def test_network_new_cursor_and_binary_body(env):
     assert call(R, "browser_network_requests", new=True) == "### Result\nNo new requests."
     i = next(int(l.split(".")[0]) for l in call(R, "browser_network_requests", static=True).splitlines() if "b.png" in l)
     assert i > 1  # indexes stay global
-    call(R, "browser_network_request", index=i, filename="img")
+    call(R, "browser_network_request_get", index=i, filename="img")
     assert open(tools.OUT + "/img/response/body.png", "rb").read() == png
 
 
@@ -78,7 +80,8 @@ def val(text):
 def test_schemas_match_golden():
     golden = {t["name"]: t for t in json.load(open(GOLDEN))}
     ours = {t.name: t for t in TOOLS}
-    assert set(golden) - set(ours) == {"browser_run_code_unsafe"}
+    assert set(golden) - set(ours) == {"browser_run_code_unsafe", "browser_network_request"}  # the latter is renamed _get
+    golden["browser_network_request_get"] = golden.pop("browser_network_request")
     for n, g in golden.items():
         if n in ours:
             props = dict(ours[n].inputSchema["properties"])
@@ -88,7 +91,7 @@ def test_schemas_match_golden():
             want = dict(g["inputSchema"].get("properties", {}))
             if n == "browser_network_requests":
                 assert props.pop("new")["type"] == "boolean"
-            if n == "browser_network_request":
+            if n == "browser_network_request_get":
                 want.pop("part")  # replaced by a job with a file per part
             assert props == want, n
     assert {"browser_start_session", "browser_cookie_list", "browser_localstorage_set", "browser_set_storage_state"} <= set(ours)
@@ -245,7 +248,7 @@ def test_storage_and_console(env):
     assert val(call(R, "browser_localstorage_list")) == {}
     assert "s.test" in call(R, "browser_network_requests", static=True)
     d = tmp_path_out()
-    assert "](out/net)" in call(R, "browser_network_request", index=1, filename="net") and "s.test" in call(R, "browser_network_request", index=1, filename="net")
+    assert "](out/net)" in call(R, "browser_network_request_get", index=1, filename="net") and "s.test" in call(R, "browser_network_request_get", index=1, filename="net")
     tree = sorted(os.path.relpath(os.path.join(r, f), d + "/net") for r, _, fs in os.walk(d + "/net") for f in fs)
     assert tree == ["request/headers.json", "response/body.html", "response/headers.json"], tree  # no request body: no file
     assert open(d + "/net/response/body.html", "rb").read() == b"<title>s</title>"
@@ -359,3 +362,101 @@ def test_deny_with_media_true(nomedia, media_site):
     call(R, "browser_navigate", url=base + "/a.png")  # media allowed
     with pytest.raises(Exception, match="blocked"):
         call(R, "browser_navigate", url=base + "/plain")
+
+
+# ------------------------------------------------- browser_network_request_make
+@pytest.fixture
+def echo():
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class H(BaseHTTPRequestHandler):
+        def log_message(self, *a):
+            pass
+
+        def do(self):
+            body = self.rfile.read(int(self.headers.get("content-length") or 0))
+            if self.path == "/redir":
+                self.send_response(302); self.send_header("Location", "/echo"); self.end_headers(); return
+            if self.path == "/redir307":
+                self.send_response(307); self.send_header("Location", "/echo"); self.end_headers(); return
+            if self.path == "/slow":
+                time.sleep(3)
+            ct, extra, data = "application/json", {}, json.dumps(
+                {"method": self.command, "headers": {k.lower(): v for k, v in self.headers.items()}, "body": body.decode("latin1")}).encode()
+            if self.path == "/att":
+                ct, extra, data = "text/csv", {"Content-Disposition": "attachment; filename=a.csv"}, b"a,b\n1,2\n"
+            if self.path == "/img":
+                ct, data = "image/png", b"\x89PNG" + bytes(50)
+            self.send_response(200); self.send_header("Content-Type", ct)
+            for k, v in extra.items():
+                self.send_header(k, v)
+            self.end_headers(); self.wfile.write(data)
+        do_GET = do_POST = do_PUT = do
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{srv.server_port}"
+    srv.shutdown()
+
+
+def make(R, **a):
+    out = call(R, "browser_network_request_make", filename="m", **a)
+    d = tools.OUT + "/m"
+    tree = {os.path.relpath(os.path.join(r, f), d): open(os.path.join(r, f), "rb").read() for r, _, fs in os.walk(d) for f in fs}
+    shutil.rmtree(d)
+    return out, tree
+
+
+def test_make_post_headers_cookie_and_hidden_tab(env, echo):
+    R = env
+    run_loop.run_until_complete(R.ctx.add_cookies([{"name": "sid", "value": "1", "url": echo, "sameSite": "Lax"}]))
+    before = len(R.tabs.get("main", []))
+    out, tree = make(R, url=echo + "/echo", method="post", headers={"Content-Type": "application/json", "X-Foo": "bar"}, body='{"x":1}')
+    assert out.splitlines()[2:] == [f"1. [POST] {echo}/echo => [200] OK"], out
+    got = json.loads(tree["response/body.json"])
+    assert (got["method"], got["body"], got["headers"]["x-foo"], got["headers"]["cookie"]) == ("POST", '{"x":1}', "bar", "sid=1"), got
+    assert json.loads(tree["request/headers.json"])["content-type"] == "application/json" and tree["request/body.json"] == b'{"x":1}'
+    assert len(R.tabs.get("main", [])) == before and len(R.ctx.pages) == before  # the tab belonged to no browser and is gone
+    _, tree = make(R, url=echo + "/echo", headers={"cookie": "own=2"})  # an explicit Cookie wins
+    assert json.loads(tree["response/body.json"])["headers"]["cookie"] == "own=2" and "request/body.json" not in tree
+
+
+def test_make_redirects_attachment_blocked_errors(env, echo):
+    R = env
+    out, tree = make(R, url=echo + "/redir", method="POST", headers={"Content-Type": "text/plain"}, body="hi")
+    assert f"1. [GET] {echo}/echo => [200]" in out and f'Redirects: [{{"url": "{echo}/redir", "status": 302}}]' in out, out  # POST -> GET
+    assert "request/body.txt" not in tree and json.loads(tree["response/body.json"])["method"] == "GET"
+    out, tree = make(R, url=echo + "/redir307", method="POST", headers={"Content-Type": "text/plain"}, body="hi")
+    assert "[POST]" in out and tree["request/body.bin"] == b"hi" and json.loads(tree["response/body.json"])["body"] == "hi"  # 307 keeps method and body, not our headers (only the first request is rewritten)
+    out, tree = make(R, url=echo + "/att")
+    assert tree["response/body.csv"] == b"a,b\n1,2\n" and "[200]" in out, (out, list(tree))
+    with pytest.raises(tools.ToolError, match="ERR_"):
+        make(R, url="http://127.0.0.1:1/")
+    with pytest.raises(tools.ToolError, match="Timeout"):
+        make(R, url=echo + "/slow", timeout_ms=500)
+    for bad in ({"url": "file:///etc/passwd"}, {"url": echo, "method": "G E T"}, {"url": echo, "headers": {"a": 1}},
+                {"url": echo, "body": "x", "body_file": "y"}):
+        with pytest.raises(tools.ToolError):
+            make(R, **bad)
+
+
+def test_make_body_file_is_read_and_deleted(env, echo, tmp_path):
+    R = env
+    tools.IN = str(tmp_path / "in"); os.mkdir(tools.IN)
+    open(tools.IN + "/b1", "wb").write(b"\x00\x01bytes")
+    _, tree = make(R, url=echo + "/echo", method="PUT", body_file="../b1")  # only the basename counts
+    assert json.loads(tree["response/body.json"])["body"] == "\x00\x01bytes" and not os.listdir(tools.IN)
+    with pytest.raises(tools.ToolError, match="not found"):
+        make(R, url=echo + "/echo", body_file="nope")
+
+
+def test_make_under_media_policy(nomedia, echo):
+    R = nomedia
+    set_policy(R)  # layer A (route) and D (Fetch on the response) are both on the hidden tab
+    _, tree = make(R, url=echo + "/echo", method="POST", headers={"Content-Type": "text/plain"}, body="hi")
+    assert json.loads(tree["response/body.json"])["method"] == "POST" and tree["request/body.txt"] == b"hi"
+    out, tree = make(R, url=echo + "/img")
+    assert "[BLOCKED] blocked: media policy" in out and not any(p.startswith("response/body") for p in tree), (out, list(tree))
+    assert json.loads(tree["response/headers.json"])["content-type"] == "image/png" and "request/headers.json" in tree
+    assert R.blocked[-1]["layer"] == "D" and R.blocked[-1]["url"].endswith("/img")

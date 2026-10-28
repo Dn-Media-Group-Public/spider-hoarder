@@ -142,6 +142,16 @@ class Registry:
         except Exception:  # noqa: BLE001  the page closed or navigated away
             pass
 
+    async def hidden_page(self) -> Page:
+        """A tab for internal use: it belongs to no browser and is nobody's current tab (the media policy still hooks it)."""
+        self._ignore = True
+        try:
+            page = await self.ctx.new_page()
+            await self.settle()  # _attach must see _ignore
+        finally:
+            self._ignore = False
+        return page
+
     async def settle(self) -> None:
         """Wait for popups opened by the last action to be attributed."""
         await asyncio.sleep(0)
