@@ -20,14 +20,16 @@ Documentation (architecture, API, design decisions): [docs/index.md](docs/index.
 
 * Uses a real headed chromium browser - javascript rendered pages work fine ^
 * Browser-in-browser view (using [noVNC](https://novnc.com/)) whenever the agent gets stuck on a captcha
-* Converts everything to markdown using [markitdown](https://github.com/microsoft/markitdown)
+* Content conversion
+  * Converts everything to markdown using [markitdown](https://github.com/microsoft/markitdown)
+  * Terse outline view of every parsed document (headings, links, images) for cheap skimming
+  * Archives (zip, tar, tgz, 7z, rar, gz/bz2/xz) are unpacked
+  * Binary structured formats such as msgpack, CBOR, BSON, plist and protobuf are turned into JSON
+* Network inspection: list and inspect HTTP requests and responses
 * Sessions live in isolated docker containers and all storage is cleared after use
 * [TOR](https://www.torproject.org/) support for anonymous browsing and accessing .onion sites
 * [i2p](https://i2p.net/) support: `*.i2p` eepsites only, no outproxy
 * No-media sessions: images, video and audio are never requested or stored (default on Tor and i2p), chosen once via `open_session`
-* Network inspection: list a page's requests (`new` shows only those since last call); each is saved as a job with request and response as separate files
-* Archives (zip, tar, tgz, 7z, rar, gz/bz2/xz) are unpacked, and msgpack, CBOR, BSON, plist and protobuf are turned into JSON
-* Terse outline view of every parsed document (headings, links, images) for cheap skimming
 * Browser automation using [playwright](https://playwright.dev/)
 * SSO integration (OAUth2)
 
