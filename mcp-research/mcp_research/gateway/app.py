@@ -42,6 +42,7 @@ from mcp_research.common.mediapolicy import ROUTED_UPLOAD_CAP, Policy
 from mcp_research.common.textcap import DEFAULT_TEXT_CAP
 
 EGRESS = sessions.EGRESS
+logging.basicConfig(level="INFO", format="%(name)s %(levelname)s %(message)s")
 log = logging.getLogger("app")
 DEFAULT_TEXT_LENGTH = 20000  # chars; keeps get_file_text results LLM-sized
 PUBLIC_HOST = os.environ["PUBLIC_HOST"]
@@ -695,7 +696,7 @@ async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
                         return res
                     blocked = info["blocked"]
                 await sessions.close(bs)  # no id, or the last browser was closed
-            sessions.policies.pop(sid)  # the session is over: the next open_session asks the user again (clients reuse one MCP session across /clear)
+            sessions.policies.pop(sid, None)  # close() already dropped it; the session is over: the next open_session asks the user again (clients reuse one MCP session across /clear)
             return _text("Browser session closed." + (f" Media policy blocked {blocked} request(s)." if blocked else ""))
         if name == "ingest_page":
             return _text(json.dumps(await _ingest_page(
@@ -750,6 +751,7 @@ async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
             return await _file_tool(bs, name, args)
         return await bs.client.call_tool(name, arguments)
     except Exception as e:  # noqa: BLE001
+        log.exception("tool %s failed", name)  # the MCP client only sees the one-line summary
         return _text(f"{type(e).__name__}: {e}", True)
 
 

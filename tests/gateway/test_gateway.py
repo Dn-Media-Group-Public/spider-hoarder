@@ -552,6 +552,7 @@ def test_multi_browser_routing():
 
     async def close(b):
         closed.append(b)
+        sessions.policies.pop("sid1", None)  # like the real close(): it drops the policy itself
 
     app._caller = lambda: (None, "a@b.c", "sid1")
     sessions.policies["sid1"] = app.Policy.make("clear")
@@ -711,3 +712,13 @@ def test_ingest_page_blocks_media_on_nomedia_session(monkeypatch):
     assert resp.closed
     with pytest.raises(ValueError, match="blocked"):
         fetch.download("http://x/a.png", Policy.make("clear", deny=["image/png"]))
+
+
+def test_tool_exception_is_logged(caplog):
+    """An unexpected exception in a tool reaches the client as a one-liner AND the server log with its traceback."""
+    from mcp_research.gateway import app
+    app._caller = lambda: (None, "a@b.c", "sid1")
+    app.sessions.policies["sid1"] = app.Policy.make("clear")
+    with caplog.at_level("ERROR", logger="app"):
+        res = asyncio.run(app.call_tool("get_file_text", {"job_id": "j"}))   # invalid job_id: ValueError
+    assert res.isError and any(r.exc_info and r.exc_info[0] is ValueError for r in caplog.records)

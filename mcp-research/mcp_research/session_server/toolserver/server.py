@@ -3,6 +3,7 @@ many browsers (windows). See docs/implemented-plans/python-browser-tool-server.m
 
 import asyncio
 import json
+import logging
 import os
 
 from mcp import types
@@ -12,7 +13,7 @@ from playwright.async_api import Error as PWError
 
 from . import tools
 from mcp_research.common.textcap import DEFAULT_TEXT_CAP
-from .browsers import launch
+from .browsers import ToolError, launch
 
 GOLDEN = os.path.join(os.path.dirname(__file__), "tools.json.upstream")  # playwright-mcp 0.0.83, as captured
 TOOLS_FILE = os.path.join(os.path.dirname(__file__), "tools.json")  # copy of it with our descriptions
@@ -102,6 +103,7 @@ def build_tools() -> list[types.Tool]:
     return out
 
 
+log = logging.getLogger("toolserver")
 TOOLS = build_tools()
 assert {t.name for t in TOOLS} <= set(tools.HANDLERS), {t.name for t in TOOLS} - set(tools.HANDLERS)
 
@@ -144,6 +146,8 @@ def build(port: int) -> FastMCP:
             bid = None if name in ("browser_start_session", "browser_end_session", "browser_set_policy") else await R.resolve(args.get("browser"))
             return reply(await tools.HANDLERS[name](R, bid, args))
         except Exception as e:  # noqa: BLE001
+            if not isinstance(e, ToolError):  # ToolError is an expected, user-facing error; anything else is a bug
+                log.exception("tool %s failed", name)
             msg = str(e).split("\nCall log:")[0].strip()
             return reply(f"### Error\nError: {msg[:2000]}", True)
 
@@ -151,6 +155,7 @@ def build(port: int) -> FastMCP:
 
 
 def main(config_path: str) -> None:
+    logging.basicConfig(level="INFO", format="toolserver %(levelname)s %(message)s")
     _cfg.update(json.load(open(config_path)))
     tools.OUT = _cfg["outDir"]
     tools.IN = _cfg.get("inDir", "in")

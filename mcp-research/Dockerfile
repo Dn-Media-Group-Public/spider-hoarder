@@ -10,10 +10,15 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY requirements.txt .
-RUN python3 -m venv /venv && pip install --no-cache-dir -r requirements.txt
+# Docker layer-cache trick: install only the dependencies (declared in setup.py) in a
+# layer that depends on setup.py alone, so source edits don't reinstall them. The empty
+# mcp_research dir is a stub; find_packages() finds nothing, so just the deps get installed.
+# The real package is installed over it after COPY . . below.
+COPY setup.py .
+RUN mkdir mcp_research && python3 -m venv /venv && pip install --no-cache-dir . \
+ && rm -rf mcp_research build *.egg-info
 
-# Chromium for the toolserver (playwright pinned in requirements.txt)
+# Chromium for the toolserver (playwright pinned in setup.py)
 RUN playwright install --with-deps chromium \
  && chmod -R a+rX /ms-playwright \
  && rm -rf /var/lib/apt/lists/*
