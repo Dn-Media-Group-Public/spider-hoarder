@@ -183,7 +183,7 @@ There is no `docs/architecture/` or `docs/api/`; the relevant text is in plans.
   ("runs trafilatura") (add See also).
 - `docs/implemented-plans/file-outputs-as-jobs.md`: the inline-text rule and the
   "prefer `browser_save_page`" wording (add See also).
-- `docs/plans/agentic-research-mcp.md`: blob layout (`simplified/**`, `index.json`
+- `docs/implemented-plans/agentic-research-mcp.md`: blob layout (`simplified/**`, `index.json`
   `url`/`target`) when that plan's docs are consolidated.
 - `docs/implemented-plans/index.md`: link this plan after implementation, and move this
   file to `docs/implemented-plans/save-page-target.md`.

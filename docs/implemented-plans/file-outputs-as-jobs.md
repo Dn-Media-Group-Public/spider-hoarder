@@ -134,6 +134,6 @@ See also: [Plan: Terse outline view](terse-view.md) — when the full text is ov
 - `docs/implemented-plans/browser-sessions-plan.md`: the "Anything that must
   outlive a session ... copied by the gateway" paragraph and the sessiond
   homedir/umask description (add See also).
-- `docs/plans/agentic-research-mcp.md` tool-surface table (when that plan's docs
+- `docs/implemented-plans/agentic-research-mcp.md` tool-surface table (when that plan's docs
   are consolidated): `{job_id, files, text?}` now applies to all file-producing tools.
 - `docs/implemented-plans/index.md` link after implementation, per `CLAUDE.md`.

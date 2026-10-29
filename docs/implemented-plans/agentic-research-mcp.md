@@ -1,5 +1,7 @@
 # Agentic Research MCP
 
+Status: implemented for this repo (`mcp-research`). The `article-graph` parts (`ingest_text`, Layer Access Control) are tracked in the other project's plan; the links to `layer-access-control.md` below point there.
+
 ## Problem / Goal
 
 Enable an agentic workflow: an LLM agent queries the graph/timeline/geography

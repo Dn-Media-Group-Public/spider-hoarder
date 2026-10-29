@@ -1,5 +1,7 @@
 # Newsroom browser automation: implementation plan
 
+Status: superseded by [Browser sessions](browser-sessions-plan.md); kept for its Keycloak/Tor background.
+
 This document is a complete handoff for implementing and deploying a self-hosted,
 per-session browser automation service that Claude uses through MCP. It contains
 the requirements, the design, what has already been verified, the open work, and
@@ -137,27 +139,15 @@ Tor session containers have no route to the internet. Their only egress is
 
 ## Next steps
 
-1. Recreate the files below in a repo, exactly as given.
-2. `docker compose build` and fix any build issues. Watch the browser image: the
-   Debian `novnc`/`websockify` packages, and the Playwright browser download.
-3. Write an integration test that runs without Keycloak. One way is to monkeypatch
-   `KeycloakVerifier.verify_token` as in the test harness below, so you can run the
-   real Docker path: list tools, navigate to a page, call
-   `browser_request_human_help`, and fetch the live view through Caddy.
-4. Verify Tor egress: through the tor connector, open
-   `https://check.torproject.org`, run a WebRTC/DNS leak test, and confirm
-   `wget` from inside a tor session container fails.
-5. Configure Keycloak (see README in the files) and connect both endpoints as
-   custom connectors in Claude. Confirm the OAuth flow and that the tokens carry
-   `aud`, `email` and `groups`.
-6. Hardening, in order of value:
-   - gVisor runtime for browser containers (`runtime="runsc"` in `_start_container`);
-   - Prometheus metrics / structured logs for session start/stop and handoffs;
-   - consider moving to the `mcp` 2.x SDK (FastMCP was renamed to `MCPServer`).
-7. Optional features: a per-user persistent profile option (watch for Chrome
-   profile locks with concurrent sessions); per-session Playwright traces for the
-   evidence trail; Kubernetes variant (pod + service per session instead of a
-   container).
+Superseded by [Browser sessions](browser-sessions-plan.md). Steps 1-5 (recreate files, build, integration test, Tor
+verification, Keycloak/connector setup) were about this original design and are obsolete. The rest were split into
+open plans:
+
+- gVisor runtime: [plans/gvisor-runtime.md](../plans/gvisor-runtime.md)
+- Prometheus metrics / structured logs: [plans/metrics-and-logging.md](../plans/metrics-and-logging.md)
+- `mcp` 2.x SDK: [plans/mcp-sdk-2-migration.md](../plans/mcp-sdk-2-migration.md)
+- Persistent profile, Playwright traces: [plans/optional-session-features.md](../plans/optional-session-features.md)
+- Kubernetes variant: [plans/kubernetes-variant.md](../plans/kubernetes-variant.md)
 
 ### Test harness used for the gateway (reference)
 

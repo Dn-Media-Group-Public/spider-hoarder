@@ -178,7 +178,7 @@ There is no `docs/architecture/` or `docs/api/`.
   true for the tools above (add See also).
 - `docs/implemented-plans/python-browser-tool-server.md`: post-action snapshot removed; `find` / `snapshot`
   parameters and schema addition (add See also).
-- `docs/plans/agentic-research-mcp.md`: tool table gains `grep_file`; blob layout / `index.json` keys when that
+- `docs/implemented-plans/agentic-research-mcp.md`: tool table gains `grep_file`; blob layout / `index.json` keys when that
   plan's docs are consolidated.
 - `docs/implemented-plans/index.md`: link this plan after implementation, and move this file to
   `docs/implemented-plans/jobs-for-all-tools.md`.

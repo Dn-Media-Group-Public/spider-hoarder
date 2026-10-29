@@ -3,7 +3,7 @@
 spider-hoarder is an MCP server (`mcp-research`) that gives Claude per-user, isolated, real (headed) Chromium sessions, with a
 human handoff for CAPTCHAs/logins, Tor or I2P egress, and fetch/parse/store tools that return Markdown. It knows nothing about
 any downstream graph or database: the MCP client is the orchestrator and carries text from here to wherever it belongs
-(see the original framing in [Plan: Agentic research MCP](../plans/agentic-research-mcp.md), whose "independent MCP servers,
+(see the original framing in [Plan: Agentic research MCP](../implemented-plans/agentic-research-mcp.md), whose "independent MCP servers,
 no proxying" shape still holds; its layer-access-control / `ingest_text` parts live in another project).
 
 See also: [Plan: Browser sessions](../implemented-plans/browser-sessions-plan.md)
@@ -40,7 +40,7 @@ No Docker socket and no container creation: a session is a Unix uid plus a proce
 (trafilatura/markitdown), preflight/downloads (`requests`) and blob storage stay in the same service because they are
 stateless library calls and must use the same egress as the browser (`socks5h://tor` in the Tor instance).
 See also: [Plan: Browser sessions](../implemented-plans/browser-sessions-plan.md) (supersedes the container-per-session design of
-[Plan: Newsroom browsers](../plans/newsroom-browsers-plan.md); its Keycloak/Tor background is still referenced).
+[Plan: Newsroom browsers](../implemented-plans/newsroom-browsers-plan.md); its Keycloak/Tor background is still referenced).
 
 ## Gateway and the tool server
 
