@@ -98,6 +98,19 @@ adb_ shell settings put system screen_off_timeout 2147483647 </dev/null
 adb_ shell input keyevent KEYCODE_HOME </dev/null
 sleep 5
 
+# Cap the guest's free storage at ~1.2 GB with a ballast file. The emulator keeps guest writes in a temp qcow2 on the slot's /tmp tmpfs,
+# which counts against the slot's memory limit: with the 6 GiB data partition ~3 GB of guest writes (a download, an install) OOM-killed the
+# emulator, from inside the guest (bring-up plan, W7). With the cap the guest answers "No space left on device" first. (Neither
+# `disk.dataPartition.size` in config.ini nor `-partition-size` shrinks the partition, both tried.) fallocate reserves blocks without writing
+# them, so the image does not grow; the file is owned by the shell uid, so apps cannot touch it. It is part of the snapshot.
+GUEST_FREE_MB=1200
+free_mb=$(( $(adb_ shell df -k /data </dev/null | tr -d '\r' | awk 'END {print $4}') / 1024 ))
+[ "$free_mb" -gt "$GUEST_FREE_MB" ] || { echo "guest /data has only ${free_mb} MB free before the ballast" >&2; exit 1; }
+adb_ shell fallocate -l "$((free_mb - GUEST_FREE_MB))M" /data/local/tmp/ballast </dev/null
+free_mb=$(( $(adb_ shell df -k /data </dev/null | tr -d '\r' | awk 'END {print $4}') / 1024 ))
+echo "guest /data free after the ballast: ${free_mb} MB"
+[ "$free_mb" -ge $((GUEST_FREE_MB - 200)) ] && [ "$free_mb" -le $((GUEST_FREE_MB + 200)) ] || { echo "ballast did not leave ~${GUEST_FREE_MB} MB free (${free_mb})" >&2; exit 1; }
+
 adb_ shell pm list packages -3 </dev/null | tr -d '\r' | sort > /avd/baseline-packages.txt
 grep -q org.fdroid.fdroid /avd/baseline-packages.txt || { echo "F-Droid missing from the baseline" >&2; exit 1; }
 

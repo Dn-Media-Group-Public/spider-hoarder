@@ -154,6 +154,15 @@ def test_init_turns_bluetooth_off_before_the_snapshot_is_saved():
     assert src.index("bluetooth_manager disable") < src.index("snapshot save clean")
 
 
+def test_init_caps_the_guests_free_storage_with_a_ballast_below_the_oom_point():
+    """Guest writes go to a temp qcow2 on the /tmp tmpfs, charged to the slot's memory: ~3 GB of writes OOM-killed the emulator with the
+    6 GiB data partition (which neither config.ini nor -partition-size shrinks). A fallocate ballast leaves ~1.2 GB, and init checks it."""
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "init-snapshot.sh")).read()
+    assert "fallocate" in src and "/data/local/tmp/ballast" in src and "GUEST_FREE_MB=1200" in src
+    assert src.index("fallocate") < src.index("baseline-packages.txt") < src.index("snapshot save clean")  # in the snapshot
+    assert "ballast did not leave" in src  # init fails instead of shipping an uncapped image
+
+
 def test_emulator_is_started_without_the_nested_virtualization_dialog():
     os.environ["SLOT_SECRET"] = "s3cret"
     import slotd
@@ -322,11 +331,23 @@ def test_end_session_answers_then_exits_without_restarting_anything():
         slotd.state = slotd.FREE
 
 
+def test_deploy_builds_the_snapshot_in_a_scratch_volume_and_keeps_the_old_one_if_init_fails():
+    """deploy.sh used to remove the working golden snapshot before init ran; a failed init then left the stack without Android capacity."""
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "deploy.sh")).read()
+    assert 'NEWSNAP="${SNAP}-new"' in src and '-v "$NEWSNAP:/avd"' in src, "init must write the scratch volume"
+    assert src.index("init-snapshot.sh") < src.index('docker volume rm -f "$SNAP"'), "the old snapshot goes only after init"
+    failed = src[src.index("init-snapshot.sh"):src.index('docker volume rm -f "$SNAP"')]
+    assert "exit 1" in failed and "android-wrapper=$ANDROID_WRAPPER_REPLICAS" in failed, "a failed init aborts and restarts the wrapper"
+    assert "cp -a --sparse=always /from/. /to/" in src
+
+
 if __name__ == "__main__":
     test_firewall_clear()
     test_firewall_tor()
     test_slotd_files_and_auth()
     test_init_turns_bluetooth_off_before_the_snapshot_is_saved()
+    test_init_caps_the_guests_free_storage_with_a_ballast_below_the_oom_point()
+    test_deploy_builds_the_snapshot_in_a_scratch_volume_and_keeps_the_old_one_if_init_fails()
     test_emulator_is_started_without_the_nested_virtualization_dialog()
     test_watchdog_marks_dead_emulator_broken()
     test_verify_checks_packages_and_accounts_not_sdcard()

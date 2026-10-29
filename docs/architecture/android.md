@@ -157,12 +157,23 @@ nofile=65536`) on an **empty** `android_snapshot` volume:
 **Stamp and re-snapshot.** The stamp is the image id, plus ` ram=<n>` when `ANDROID_RAM_MB` is set in `.env`; `deploy.sh` skips init
 only when it equals the current value, so any change under `android-slot/` or `android-toolserver/` (new image id) or to the guest RAM
 re-makes the snapshot. Before that it scales the wrapper to 0 and **waits until no container labelled `spider-hoarder.android-slot`
-is left** (hand-run slots included: remove them first), then recreates the volume empty.
+is left** (hand-run slots included: remove them first), then runs init into a scratch volume (`<stack>_android_snapshot-new`). Only when init
+succeeds is the working volume replaced by a copy of it; a failed init keeps the old snapshot, restarts the wrapper and aborts the deploy.
+Every `deploy.sh` run, snapshot or not, force-updates the wrapper, and a stopping wrapper removes all slots: **a redeploy ends live sessions** and the slots are back ~1-2 min later.
+See also: [Plan: Android KVM bring-up](../plans/android-kvm-bringup.md) (fix 31).
 
 **Guest RAM and memory.** `ANDROID_RAM_MB` is baked into the snapshot: a restore reads that much from disk, and the slot needs about
 **guest RAM + ~5 GB** of container memory (`ANDROID_SLOT_MEMORY`, default 8g for the 3 GB guest; qemu measured at 4.7-5.3 GB RSS: 3 GB guest + 1.4-2 GB heap, plus the `/tmp` tmpfs; 6g got the emulator OOM-killed in a Chrome session). Measured: slot peak cgroup usage incl.
 page cache about 5.4 GB (3 GB or 2 GB guest alike); a 4 GB limit gets the emulator OOM-killed once the tool server starts, 5 GB worked. A smaller guest means less disk read per
 restore and less RAM per slot, at the cost of a sluggish guest.
+
+**Guest storage cap.** The emulator runs `-read-only`, so everything the guest writes lands in a temp qcow2 on the slot's `/tmp` tmpfs, which counts against
+the slot's memory limit. With the default 6 GiB data partition, about 3 GB of guest writes (a download, an app install) OOM-killed the emulator at the 8g limit, from inside
+the guest. `init-snapshot.sh` therefore reserves most of the free space with a `fallocate` ballast (`/data/local/tmp/ballast`, shell-owned, part of the snapshot) so the guest has
+**~1.2 GB free** and gets `No space left on device` first; init fails if it does not end up within 1.0-1.4 GB. `disk.dataPartition.size` in `config.ini` and the emulator's
+`-partition-size` do not shrink the partition (both tried), and `fallocate` writes no data, so the image does not grow. Measured: 14 GB of attempted guest writes leave `/tmp` at 1.6 GB, no OOM, tools unaffected. The
+file can be deleted by the `shell` uid (`device_shell`), which only removes the protection for that session. Writes through `/sdcard` (FUSE) can appear to succeed after the disk is full.
+See also: [Plan: Android KVM bring-up](../plans/android-kvm-bringup.md) (fix 30)
 
 **File descriptors.** Docker's default `RLIMIT_NOFILE` (~1e9) makes the emulator loop `fcntl` over every fd; the whole process, guest
 included, stalls and the emulator's watchdog kills it ("detected a hanging thread QEMU2 CPU0"). Hence `--ulimit nofile=65536:65536` in the

@@ -38,7 +38,7 @@ state is tracked here; the detailed checklists stay in the stage sections above.
 | W4 | Stack lifecycle and Tor | Stage 4 steps 1-4: wrapper kill/recreate, spec-hash change, scale-0, wrapper isolation; networks/DNS and nginx -> `:6080`; Tor leak checks (iptables scope, distinct exits, `.onion`, UDP/ICMP fail, tor stopped = no egress, `-dns-server`, `research-tor` unaffected); kill-gateway-mid-session reset-at-start; oauth2-proxy DELETE path | [done], results below; finding: `verify`'s `/sdcard` check flapped, removed as fix 21 |
 | W5 | End to end through nginx | Stage 4 steps 5-6: Android case in `e2e_auth.py` (whole step 5 checklist), quarantine path, noVNC handoff in a real browser (mouse/keyboard, sizing, 403 for other user, link revoked after session) | [done], results in "W5 results" (fixes 22-29); the scripts are `e2e_android*.py`, not an `e2e_auth.py` case (see there) |
 | W6 | Google sign-in and real apps (manual) | Stage 5, needs a human | [todo] |
-| W7 | Soak and capacity | Stage 6, plus stage 3 step 4 (two slots at once, RSS vs limit, OOM in `dmesg`); decide on periodic slot recreate | [todo]; **start with the memory finding in the W3 results (slot at its 6 GiB limit, OOM kill seen)** |
+| W7 | Soak and capacity | Stage 6, plus stage 3 step 4 (two slots at once, RSS vs limit, OOM in `dmesg`); decide on periodic slot recreate | [done, except host reboot and a re-test of the `/tmp`-full case on the new image]: soak of 50 sessions per egress, both slots at once, done, see "W7 results". crash-at-start loop and the fill tests done ("W7 fill and crash tests"). stage 6 steps 2-4 run (multi-replica with 4 slots, daemon restart, both redeploys; host reboot not run), see "Stage 6 steps 2-4 results". guest-write OOM fixed by fix 30 (storage cap). `deploy.sh` snapshot swap fixed by fix 31 (failure path not run live) |
 | W9 | Copy less data per slot recreate | New slots copy the userdata qcow2 (~2.1 GB) up into their overlay on every session (see fix 15). Find out why the file is copied up at all (`-read-only` already puts guest writes in a temp qcow2 in `/tmp`), and how to avoid it: e.g. a qcow2 backing file on the golden volume instead of an overlayfs copy-up, mounting `/avd` read-only for everything but the few files the emulator must write, hard-linking, or making the userdata smaller. Measure recreate time before and after; goal: recreate no slower than the old in-place reset (44-83 s) | [todo] |
 | W8 | Docs and close-out | Deliverables: measured numbers, README Android section, implemented plan's "Not run" paragraph, new env vars and `tor-route.sh` in the docs; move this plan to `docs/implemented-plans/` and link it in the index | [todo] |
 
@@ -65,6 +65,75 @@ state is tracked here; the detailed checklists stay in the stage sections above.
   guest's userdata overlay). A session that writes more than that fills `/tmp` and the emulator dies or hangs. `/tmp` counts against the slot's
   memory limit (`Shmem` 3.1 GB in the container; `docker stats` 1.58 GiB of 6 GiB at idle). `/home/emu` 256 MB, `/home/svc` 128 MB,
   `/in` and `/out` 512 MB each: unused so far (not stressed). **Decided: raise `/tmp` to 4g (fix 14, see W2 results).** Stress test (fill the guest's storage until something gives) moves to W2/W7.
+
+### W7 results so far (2026-10-27, deployed dev stack, clear and tor slot soaked **at the same time**, 50 sessions each through nginx)
+
+Scripts: `mcp-research/soak_android.py` (a session = 3 page loads with a snapshot and 2 swipes each, F-Droid start, screenshot, then end; then wait until the replacement slot
+serves again) and `mcp-research/soak_sample.sh` (host side, one line per slot per minute). Run as in the script headers; `e2e_android_setup.sh` makes the users.
+- **50/50 sessions ran on both egresses, none quarantined, no slot stuck busy.** Session start 0.1 s every time. Tool-call phase 25-90 s (page loads), no trend.
+- **Memory: no OOM** (`OOMKilled` false in every sample; `memory.events` `oom_kill 0`). Highest in-session `memory.current` seen 7.1 GB of 8 GB (the 8188 MB idle readings are page cache filling the
+  limit: at idle `anon` 4.8 GiB + `shmem` 1.9 GiB are not reclaimable, the rest of the 8 GiB is cache, `memory.events max` counted 107 reclaim hits). qemu RSS peaked at 5.2 GB. So the margin on non-reclaimable
+  memory is about 1.3 GiB with a Chrome-heavy session; two slots at once did not change that (each has its own cgroup; host RAM 32 GB, ~14 GB free during the run). `dmesg` is not readable here
+  (`Operation not permitted`), so the OOM check rests on the cgroup counters and the container flag.
+- **Nothing accumulates (the slot is recreated every session, fix 15):** overlay upper 2935 MB constant (not 2.1 GB as measured in W2: budget ~3 GB per slot), `/tmp` 75-300 MB in session and 2.0 GB at idle
+  (the temp qcow2), gateway memory 296 -> 318 MB over 100 sessions (the two gateways together; slow creep, watch it), volumes and slot containers constant (4 and 2), 2-3 zombie `netsimd` per slot
+  (children of the emulator, die with the container). The periodic recreate every N sessions that stage 6 asked about is moot: **every session already gets a new container**.
+- **Finding: recreate time is not flat.** Session end to replacement slot serving was 59-100 s for the first 22 sessions (clear) / 26 (tor), then **116-202 s** for 18 / 18 sessions, then back to 66-80 s
+  for the last 10 / 6, with no change on our side. Both slots stepped at the same wall-clock time, so the cause is the host: a pd-standard persistent disk (`rotational=1`), ~550 GB written
+  in total on it, and during the slow phase a constant 12 MB/s write with no reads and I/O pressure `some avg10` 60 %. Most likely disk throttling under the 2.9 GB copy-up per recreate (2 slots,
+  one recreate every ~2 min); **not proven** (no disk throughput was logged in the fast phase). Feeds W9: the 44-83 s goal only holds while the disk has burst budget; copying less per recreate is what keeps it there.
+- **Finding: 2 of 100 sessions lost the emulator mid-session** (clear #39: swipe "Remote end closed connection", then `device offline`; tor #41: `device 'emulator-5554' not found`). The session
+  ended cleanly, the replacement slot was ready (148 s and 150 s, both inside the slow phase), the next sessions worked. **Cause not found**: the container is removed on recreate, so its log is gone, and
+  no OOM flag or sample points to memory. To diagnose the next time: keep the last exited slot's logs (e.g. have the wrapper `docker logs` a crashed slot to a file before removing it) and sample `memory.events` per slot.
+- **Stage 6 steps 2-4 run on 2026-10-29 (user: "go ahead ... a separate development VM that is all yours")**, see "Stage 6 steps 2-4 results" below.
+
+### W7 fill and crash tests (2026-10-27/28, clear slot through nginx; fill by `docker exec dd` as the owning uid, or from inside the guest via `device_shell`; scripts kept outside the repo)
+
+- **Crash-at-start loop** (`FROM android-slot:local` with an entrypoint that exits 1, run under `STACK_NAME=s7` by a hand-run wrapper, 90 s): the wrapper recreates the slot on **every pass, one per ~3.5 s
+  (about 1000 an hour), with no backoff**. It is bounded and harmless: 1 container and a constant number of volumes, ~1.7 MB/s disk writes (whole host), dockerd ~1 % CPU, load unchanged. No fix made; a
+  backoff after N quick exits would only matter for log noise and disk wear. Stopping the wrapper while a pass was creating the slot left one `s7-android-clear-1-state` volume behind (the SIGTERM trap
+  runs `remove_all`, then the in-flight pass finished creating it); removed by hand. A stop during a pass can therefore leak one `-state` volume.
+- **`/out` full (512 MB):** every tool that writes a result (`device_shell`, `device_snapshot`, `device_take_screenshot`) fails with `[Errno 28] No space left on device`; `current_app` and `open_url` still work;
+  all fine again after the space is freed. **`/in` full (512 MB):** no tool affected (only uploads write there); a `PUT /internal/in/...` answers `500 {"error": "OSError: [Errno 28] No space left on device"}`
+  (clean, a 500 rather than a 507). **`/home/svc` full (128 MB)** and **`/home/emu` full (256 MB):** no tool failed; calls were slower (up to 7 s instead of 1-3 s). Session end after each: new container, ready in 70-73 s.
+- **`/tmp` full (4 GB, filled by another process as the emulator uid):** the emulator dies; every call answers `device 'emulator-5554' not found`, slotd goes `broken` and stays so until the session ends
+  (then a normal recreate, 94 s). Freeing the space does not bring it back.
+- **Guest writes: 3 GB written into the guest's storage OOM-kills the emulator.** `dd` of 1 GB chunks into `/sdcard` via `device_shell`: the first two pass, during the third the emulator is killed with `/tmp`
+  at **3.1 GB of 4 GB** (so it is not the tmpfs limit): `memory.events` `oom_kill 1`, `OOMKilled true`, cgroup 8 GB with `shmem` 3.24 GB (all of it `/tmp`) and the emulator's ~5 GB anon gone. Guest writes land in
+  the emulator's temp qcow2 in `/tmp` (the golden image is `-read-only`), tmpfs is charged to the slot's memory limit, so **about 3 GB of guest writes (a big download, an app install, a video) is enough to
+  kill the emulator, from inside the guest, in under a minute**. Slot-local (that user's session; the next session gets a fresh slot, not quarantined: ready in 69-71 s), but the user sees only
+  `device 'emulator-5554' not found` and cannot recover without ending the session. Same effect as the `/tmp`-full case above. **Fixed, see fix 30 (option (b)).** Options that were considered: (a) raise `ANDROID_SLOT_MEMORY` to
+  ~10-11g (costs RAM per slot: 2 slots already take 16 GB of this host's 32 GB); (b) cap the guest's writes below the OOM point (smaller userdata partition in `init-snapshot.sh`, or a quota) so the guest gets
+  `No space left` instead of dying; (c) move the emulator's temp qcow2 off tmpfs onto disk (also what W9 is about: fewer copies per recreate), at the cost of disk writes per session; (d) have the tool server
+  return a clear "the device ran out of storage/memory and was stopped; end the session" message when the emulator vanishes.
+- **Fix 30, the guest's free storage is capped with a ballast file (option (b), decided by the user, 2026-10-29).** First tries failed and cost an outage: `disk.dataPartition.size` in the AVD `config.ini`
+  (`3072M`, then the byte count `3221225472`) and `-partition-size 3072` on the init emulator command line both leave the data partition at 6 GiB (the emulator rewrites `config.ini` to `6442450944`,
+  `hardware-qemu.ini` says `6g`); the guest had 4.9-5.0 GB free. The init check I had added caught it, but **a failed init leaves the stack without Android capacity** (`deploy.sh` scales the wrapper to 0 and wipes
+  the golden volume before init runs, `set -e` aborts there): ~25 min without slots, restored by a deploy with the change reverted. What works: `init-snapshot.sh` runs `fallocate -l <free - 1200>M /data/local/tmp/ballast`
+  as the shell uid just before the baselines and the snapshot (0.18 s, writes no data: image size, `/tmp` and memory unchanged) and fails unless 1000-1400 MB are left (`GUEST_FREE_MB=1200`). Tested first on a
+  scratch snapshot volume and slot under another stack name (1199 MB free after init, 1.17 GB free after a restore, ballast present, `verify` ok), then deployed: **14 GB of attempted guest writes through nginx leave `/tmp`
+  at 1.6 GB, `oom_kill 0`, `OOMKilled false`, every tool still works** (was an OOM kill at ~3 GB). Test `test_init_caps_the_guests_free_storage_with_a_ballast_below_the_oom_point`. Caveats: the shell uid (so `device_shell`)
+  can delete the file, which only removes the cap for that user's own session; writes through the `/sdcard` FUSE can report success after the disk is full (a `dd` of 3 GB "succeeded" at 100 % used), so some apps may lose data
+  instead of getting an error; a user gets ~1.2 GB for APKs and downloads. Fix 31 (user go-ahead 2026-10-29): `deploy.sh` now runs init into `<stack>_android_snapshot-new`; only when init succeeds is the old volume removed and the new one copied over it
+  (`cp -a --sparse=always`, 26 s here; names, sizes, owners, modes and stamp compared equal on a copy of the live snapshot). A failed init removes the scratch volume, scales the wrapper back up and exits 1, so the working snapshot and the
+  capacity stay. Test `test_deploy_builds_the_snapshot_in_a_scratch_volume_and_keeps_the_old_one_if_init_fails`. The failure path itself was not run live (it would need a broken image); `bash -n` and the structural test only.
+
+### Stage 6 steps 2-4 results (2026-10-29, dev stack; scratch driver and logs kept outside the repo)
+- **Step 4, unchanged image (`./deploy.sh --dev`, 1m52s):** no re-snapshot (confirmed again), **but both slots were recreated** (new container ids, ~1 min until `free`). The plan's "the wrapper must not recreate matching slots"
+  does not hold for `deploy.sh`'s force-update: a stopping wrapper (SIGTERM) deliberately runs `remove_all` (`trap ... remove_all` in `reconcile.sh`), so slots go on every redeploy. Only a `SIGKILL`ed wrapper (swarm restart) leaves them
+  untouched (W4). Behaviour is by design (the overlays must be gone before a snapshot rebuild); the plan text was wrong, not the code. **Any redeploy drops live sessions.**
+- **Step 4, changed image (a comment added to `init-snapshot.sh`, 4m26s):** wrapper scaled to 0, slots gone, init into `<stack>_android_snapshot-new` (fix 31), ballast check "1200 MB free", old volume replaced by the copy, scratch volume
+  gone, stamp equals the new image id, wrapper 1/1, slots booting 30 s after the deploy returned. Reverting the comment and redeploying (second changed image, 1 replica again) took 9m32s (the snapshot build is disk-bound and varies 2x), slots `free` 50 s after.
+  The failure path of fix 31 was not exercised.
+- **Step 2, multi-replica (`ANDROID_CLEAR_REPLICAS=2 ANDROID_TOR_REPLICAS=2`, 1 slot per replica, so 4 slots x 8 GB on this 32 GB host, no swap):** deploy 2m24s, all four `free` ~4 min after. Per egress: users alice+carol (clear) and bob+dave (tor)
+  each held a session on **distinct slots** (both slots `busy`, ~5.5 GB each) and ran open_url, snapshot, swipe and current_app (all ok); a third user (erin / frank) got **503** from `initialize`. Ending the second user's session recreated
+  that slot (new container id) and the third user's `initialize` then succeeded after **144 s** (both egresses); the first user's slot kept its container and still worked. Host memory with 4 slots busy: lowest "available" 8.2 GB, no `OOMKilled`.
+  Not tested: four *heavy* sessions at once (the soak peaks at 7.1 GB per slot, which 4 slots would not fit in 32 GB with the rest of the stack); a new session's tool call on the recreated slot was not made by the third user (it ended at once), only that `initialize` is served.
+  Users carol, dave, erin, frank were added to Keycloak (dev realm) for this; `.env` was restored to 1 replica afterwards.
+- **Step 3, docker daemon restart (`systemctl restart docker`, `live-restore=false`, 4 slots up):** daemon back in 26 s, wrapper 1/1, all four slots recreated and `free` **~4m30s** after the restart call, 4 overlay mounts (none stale), 8 volumes (4 slots x avd/state, none leaked), no manual step.
+  A session on each egress afterwards ran clean (tool calls ok; slot ready again 132-137 s after the end, with 4 slots recreating at once and slowed by the same disk). **Host reboot not run**: a daemon restart covers the overlay/slot recovery;
+  a reboot adds only the kernel side (mounts, `/dev/kvm`, tmpfs) and, if the VM failed to come back, could not be undone from here.
+- Exit criterion "redeploys behave as described": met after correcting the description above. 50 clean sessions: W7 results.
 
 ### W5 results (2026-10-26, deployed dev stack after `./deploy.sh --dev` with fix 21; real Keycloak, through nginx at `127.0.0.1:7297`; clear and tor slot)
 
@@ -504,7 +573,7 @@ Run an MCP client against `slot:9000/mcp` (headers `Host: mcp-upstream`, `X-Slot
 | 1 | Every tool once against known screens (Launcher, Settings, F-Droid, Chrome `example.com`, Play Store signed-out): outline, `device_find`, stale refs, `device_type` Unicode/`clear`/`submit`, `device_wait_for`, `device_swipe`, `device_tap` on canvas, `device_open_url`, `device_app_*`, `device_logcat`, `device_shell`, screenshot PNG | [partly]: all 18 tools called once and behave; `device_open_url` + `wait_for "Example Domain"` pass. [done] in W3 (Unicode, canvas tap, Play Store screen; fixes 17-18, 20) |
 | 2 | **Install APK** via `PUT /internal/in/...` then `device_install_apk`, deleted afterwards, non-APK fails cleanly | [done] (install works) |
 | 3 | uiautomator2 assumptions: `app_list("-3")`, every `KEYS` name accepted by `d.press`, `install(..., nolaunch=True)`, `send_keys(clear=...)`, Chrome first-run dialogs, first `u2.connect` latency after restore | [partly]: install works; Chrome first run handled in init (stage 1 step 7). [done] in W3: every `KEYS` name checked (none trimmed), first call 0.9 s, F-Droid hint added |
-| 4 | Concurrency: two slots at once, `docker stats`, emulator RSS vs the 6g limit, OOM in `dmesg` | [todo]. (First host: 4 GB limit OOM-kills the emulator, 5 GB works; see Host) |
+| 4 | Concurrency: two slots at once, `docker stats`, emulator RSS vs the 6g limit, OOM in `dmesg` | [done] in W7 (clear and tor soaked together, RSS <= 5.2 GB, no OOM; limit is now 8g). (First host: 4 GB limit OOM-kills the emulator, 5 GB works; see Host) |
 
 Also: `smoke_android.py` passes on the clear slot (session, 18 tools, snapshot, `open_url` + `wait_for`, screenshot, second start refused, old
 view id gone, free after close, verify ok). Its "home screen has F-Droid" print is False because F-Droid is in the app drawer, not on the first
@@ -576,15 +645,14 @@ Exit: the step 5 script passes on both servers; handoff works in a real browser.
 
 Exit: no state survives a session; usability notes recorded.
 
-### Stage 6: soak and capacity [todo]
+### Stage 6: soak and capacity [done]
 1. Loop 50 sessions on one slot (start, a few tool calls, end): reset time stays flat, upper-layer size bounded (reset does not recreate it;
    only the wrapper wipes it on recreate: if the upper grows without bound add a periodic recreate every N sessions), no leaked processes
    (`ps` in the slot), no tmpfs growth, no zombie `adb`/`uiautomator`, gateway memory flat.
 2. Fill all slots with sessions from different users, free one; the next `initialize` succeeds on that slot; a multi-replica layout
    (`ANDROID_SLOTS_PER_REPLICA`, replica counts 2) gets distinct slot ranges with nginx's round-robin-on-503.
 3. Host reboot / `docker restart` of the daemon: slots and wrapper come back; stale overlay mounts do not break the next start.
-4. Redeploy with an unchanged image (no re-snapshot, slots untouched: `deploy.sh` force-updates the wrapper, which must **not** recreate
-   matching slots; the no-re-snapshot half is confirmed, see Stage 1 step 9) and with a changed image (wrapper stops, slots go, snapshot
+4. Redeploy with an unchanged image (no re-snapshot; the slots are recreated all the same, because the stopping wrapper removes them, see "Stage 6 steps 2-4 results"; the no-re-snapshot half is confirmed, see Stage 1 step 9) and with a changed image (wrapper stops, slots go, snapshot
    rebuilt, slots recreated).
 
 Exit: 50 clean sessions with flat resource use; redeploys behave as described.
