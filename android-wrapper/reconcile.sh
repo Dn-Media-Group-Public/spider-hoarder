@@ -51,6 +51,16 @@ wipe_state() {  # fresh overlay upper/work dirs (the overlay must not be mounted
     --opt "o=lowerdir=$lower,upperdir=$upper/u,workdir=$upper/w" "$n-avd" >/dev/null
 }
 
+report_exit() {  # $1 = exited slot: its logs go with the container, so an abnormal end is written to the wrapper's log first
+  st=$($DOCKER inspect -f '{{.State.ExitCode}} {{.State.OOMKilled}}' "$1" 2>/dev/null) || return 0
+  set -- "$1" $st
+  tail=$($DOCKER logs --tail 60 "$1" 2>&1 | tr -d '\000-\010\013-\037' || true)   # the slot's own output: no control characters in our log
+  if [ "$2" != 0 ] || [ "$3" = true ] || printf %s "$tail" | grep -q "slot broken"; then
+    log "$1 ended abnormally (exit=$2 oom_killed=$3), last log lines:"
+    printf '%s\n' "$tail" | sed 's/^/android-wrapper:   | /' >&2
+  fi
+}
+
 remove_slot() {  # $1 = container name
   $DOCKER rm -f "$1" >/dev/null 2>&1 || true
 }
@@ -94,7 +104,7 @@ reconcile_egress() {  # $1 egress, $2 wanted count
       "$hash true") ;;
       # a stopped slot is a finished session (slotd exits on reset), a crash or a reboot: never restart it, its overlay may hold
       # anything the guest wrote. Recreate it from scratch (empty upper), which is the reset.
-      "$hash false") log "$n exited, recreating from scratch"; create_slot "$e" "$k" "$hash" ;;
+      "$hash false") log "$n exited, recreating from scratch"; report_exit "$n"; create_slot "$e" "$k" "$hash" ;;
       *) log "$n: spec changed, recreating"; create_slot "$e" "$k" "$hash" ;;
     esac
     # the tor task gets a new address whenever it is replaced (every deploy): the slot's route must follow

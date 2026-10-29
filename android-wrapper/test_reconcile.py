@@ -31,8 +31,10 @@ case "$cmd" in
       shift
     done
     if [ -n "$name" ]; then echo "$spec true" > "$S/c/$name"; echo "$lab" > "$S/l/$name"; echo "$stk" > "$S/s/$name"; fi ;;
+  logs) for last; do :; done; cat "$S/logs/$last" 2>/dev/null ;;
   inspect)
     for last; do :; done
+    case "$*" in *ExitCode*) cat "$S/exit/$last" 2>/dev/null || echo "0 false"; exit 0 ;; esac
     if [ -f "$S/c/$last" ]; then cat "$S/c/$last"; else exit 1; fi ;;
   start) for last; do :; done; read spec _ < "$S/c/$last"; echo "$spec true" > "$S/c/$last" ;;
   exec) echo "$*" >> "$S/exec"; [ -f "$S/route-moved" ] && exit 10; exit 0 ;;
@@ -53,6 +55,8 @@ class Env:
         os.makedirs(f"{self.d}/c")
         os.makedirs(f"{self.d}/l")
         os.makedirs(f"{self.d}/s")
+        os.makedirs(f"{self.d}/exit")
+        os.makedirs(f"{self.d}/logs")
         p = f"{self.d}/docker"
         open(p, "w").write(FAKE)
         os.chmod(p, 0o755)
@@ -134,9 +138,33 @@ def test_needs_kvm_group_and_secret():
     assert subprocess.run(["sh", f"{HERE}/reconcile.sh"], env=e.env, capture_output=True).returncode != 0
 
 
+def test_an_abnormal_slot_end_is_logged_before_the_container_goes():
+    """Logs are deleted with the container, so a slot that died (non-zero exit, OOM kill, emulator lost) is written to the wrapper's log first."""
+    e = Env(ANDROID_CLEAR_SLOTS="1", ANDROID_TOR_SLOTS="0")
+    e.run()
+    p = f"{e.d}/c/st-android-clear-1"
+    h = open(p).read().split()[0]
+
+    def end(code, logs):
+        open(p, "w").write(h + " false\n")
+        open(f"{e.d}/exit/st-android-clear-1", "w").write(code + "\n")
+        open(f"{e.d}/logs/st-android-clear-1", "w").write(logs)
+        return subprocess.run(["sh", f"{HERE}/reconcile.sh"], env=e.env, check=True, capture_output=True, text=True).stderr
+
+    err = end("0 false", "session over\nslot reset ok\n")
+    assert "exited, recreating" in err and "ended abnormally" not in err and "session over" not in err  # a normal end stays quiet
+    err = end("137 true", "emulator started\nkilled\n")
+    assert "ended abnormally (exit=137 oom_killed=true)" in err and "| emulator started" in err
+    err = end("0 false", "x\nemulator is not running (exit -9): slot broken\n")
+    assert "ended abnormally (exit=0 oom_killed=false)" in err and "slot broken" in err
+    err = end("1 false", "bad \x1b[31m\x07line\n")
+    assert "\x1b" not in err and "\x07" not in err and "line" in err
+
+
 if __name__ == "__main__":
     test_reconcile()
     test_wrapper_only_touches_its_own_stack()
     test_tor_route_is_fixed_by_exec_into_tor_slots_only()
     test_needs_kvm_group_and_secret()
+    test_an_abnormal_slot_end_is_logged_before_the_container_goes()
     print("ok")

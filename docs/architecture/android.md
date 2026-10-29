@@ -60,6 +60,8 @@ slot; instead it only looks at whether its own slots run. `reset` makes `slotd` 
 stopped slot (finished session, crash, or a host reboot) is recreated by the wrapper's next pass (`RECONCILE_INTERVAL`, 3 s) with an empty
 overlay upper: the guest, the emulator uid's files and anything an escaped guest could have written under `/avd` are all gone. Cost: each new
 container copies the userdata qcow2 up into its overlay again (~2.1 GB), on top of the snapshot restore.
+Container logs go with the container, so before recreating a slot that ended abnormally (non-zero exit, `OOMKilled`, or `slot broken` in its log) the wrapper writes the exit code, the OOM flag and the last 60 log lines to its own log (`docker service logs spider-hoarder_android-wrapper`); a normal session end stays quiet.
+See also: [Plan: Android KVM bring-up](../plans/android-kvm-bringup.md) (fix 32).
 
 `slotd` boots the slot once, when the container starts (`boot_slot()`; `health` answers `booting` meanwhile). Steps: wipe both tmpfs homes
 (a no-op in a fresh container), start Xvfb and the emulator (`-read-only -snapshot clean -no-snapshot-save`, `ANDROID_EMU_TMP=/tmp`), wait for
