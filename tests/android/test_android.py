@@ -85,7 +85,7 @@ def serve():
 
 
 def test_slot_slice_per_replica():
-    code = "import slots; print(list(slots.SLOTS))"
+    code = "from mcp_research.gateway import slots; print(list(slots.SLOTS))"
     for slot, want in ((1, [1, 2, 3]), (2, [4, 5, 6]), (3, [7, 8, 9])):
         env = {**os.environ, "REPLICA_SLOT": str(slot), "ANDROID_SLOTS_PER_REPLICA": "3"}
         out = subprocess.run([sys.executable, "-c", code], env=env, capture_output=True, text=True, cwd=HERE).stdout

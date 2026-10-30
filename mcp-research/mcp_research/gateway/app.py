@@ -58,6 +58,7 @@ MCP_PATH = f"/{PREFIX}/mcp"
 UPLOAD_MARK = "@upload"  # blobtoken path marking an upload-link token (never a real file path)
 INLINE_LIMIT = 50_000
 MAX_PARSE_BYTES = int(os.environ.get("MAX_PARSE_BYTES", 50 * 1024 * 1024))  # stored files have no cap; parsing does
+MAX_FILE_BYTES = int(os.environ.get("MAX_FILE_BYTES", 50 * 1024 * 1024))  # android: APK / device output files pulled through the gateway
 MAX_ARCHIVE_BYTES = int(os.environ.get("MAX_ARCHIVE_BYTES") or os.environ.get("MAX_ZIP_BYTES") or 4 * 1024**3)  # uncompressed, per archive
 MAX_ARCHIVE_MEMBERS = int(os.environ.get("MAX_ARCHIVE_MEMBERS") or os.environ.get("MAX_ZIP_MEMBERS") or 50_000)
 # Proxied tools whose output is a file in a job: name -> default job-internal file name when the MCP client gives

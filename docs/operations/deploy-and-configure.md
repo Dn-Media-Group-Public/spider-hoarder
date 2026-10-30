@@ -75,7 +75,7 @@ Host (`pip install -e mcp-research`, then `pytest tests`): `tests/common`, `test
 stub Keycloak, `smoke_e2e.py` for real sessions. Exact commands are in the README.
 See also: [Plan: Restructure directories](../implemented-plans/restructure-directories.md)
 
-Android: `tests/gateway/test_android.py` (run on its own), `android-toolserver/test_android_toolserver.py`,
+Android: `tests/android/test_android.py` (`pytest tests/android`; kept out of other runs, it sets `MODE=android`), `android-toolserver/test_android_toolserver.py`,
 `android-slot/test_slot.py` and `android-wrapper/test_reconcile.py` run on the host without KVM; a real emulator is only exercised on a KVM
 host: `tests/live/smoke_android.py` inside a `research-android-*` container, and against the deployed `--dev` stack **through nginx** with
 real Keycloak tokens `e2e_android.py`, `e2e_android_view.py` (noVNC handoff in headless Chromium) and `e2e_android_lifecycle.py` (idle, disconnect,
