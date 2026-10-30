@@ -1,9 +1,9 @@
 # Plan: Android bring-up and verification on a KVM host
 
-Status: **in progress** (stages 0-4 done, 5-6 not started). Work started 2026-10-20, last updated 2026-10-26.
-Follows [Android hoarder](../implemented-plans/android-hoarder.md), which was built and tested on a host without `/dev/kvm`. This plan
+Status: **implemented** (closed 2026-10-29; the manual Google sign-in test was split out into [Android manual test](../plans/android-manual-test.md)). Work started 2026-10-20.
+Follows [Android hoarder](android-hoarder.md), which was built and tested on a host without `/dev/kvm`. This plan
 covers what was **not** run there (see that plan's "Implementation notes", "Not run") and the assumptions in the code that were never
-checked against a real emulator. Nothing is committed yet. Tags: **[done]**, **[partly]**, **[todo]**.
+checked against a real emulator. Tags: **[done]**, **[partly]**, **[todo]**.
 
 ## Problem / Goal
 
@@ -21,8 +21,11 @@ fresh deploy, on both egresses.
 | 2 one slot by hand | [partly] | reset during a tool call, overlay hygiene, tmpfs sizes, 5x repeat with the full dirtying set, tor-slot firewall list, TCP-level firewall proof |
 | 3 tool server on the device | [partly] | Unicode `device_type`, two slots at once, first-call latency after restore, `KEYS` trimming |
 | 4 stack | [done] (W4, W5) | - |
-| 5 Google sign-in (manual) | [todo] | all |
-| 6 soak and capacity | [todo] | all |
+| 5 Google sign-in (manual) | moved | split out into [Android manual test](../plans/android-manual-test.md) |
+| 6 soak and capacity | [done] (W7, W9) | host reboot deliberately never run |
+
+The per-stage checklists further down keep their original tags: the work-stage table below (W1-W9) is the authoritative state; a step still tagged
+[todo] there was run under a W, or was dropped (host reboot).
 
 ## Remaining work, grouped into work stages (W1-W9)
 
@@ -37,10 +40,10 @@ state is tracked here; the detailed checklists stay in the stage sections above.
 | W3 | Tool server and device behaviour | Stage 3 leftovers: Unicode `device_type`, canvas tap, Play Store screen, check and trim `KEYS`, first-call latency after restore, F-Droid "first steps" hint in tool descriptions, then `export_tools.py`. Guest clock lag after restore (set time at session start) | [done], results below (fixes 17-20), re-tested on the deployed stack |
 | W4 | Stack lifecycle and Tor | Stage 4 steps 1-4: wrapper kill/recreate, spec-hash change, scale-0, wrapper isolation; networks/DNS and nginx -> `:6080`; Tor leak checks (iptables scope, distinct exits, `.onion`, UDP/ICMP fail, tor stopped = no egress, `-dns-server`, `research-tor` unaffected); kill-gateway-mid-session reset-at-start; oauth2-proxy DELETE path | [done], results below; finding: `verify`'s `/sdcard` check flapped, removed as fix 21 |
 | W5 | End to end through nginx | Stage 4 steps 5-6: Android case in `e2e_auth.py` (whole step 5 checklist), quarantine path, noVNC handoff in a real browser (mouse/keyboard, sizing, 403 for other user, link revoked after session) | [done], results in "W5 results" (fixes 22-29); the scripts are `e2e_android*.py`, not an `e2e_auth.py` case (see there) |
-| W6 | Google sign-in and real apps (manual) | Stage 5, needs a human | [todo] |
+| W6 | Google sign-in and real apps (manual) | Stage 5, needs a human | moved to [Android manual test](../plans/android-manual-test.md) |
 | W7 | Soak and capacity | Stage 6, plus stage 3 step 4 (two slots at once, RSS vs limit, OOM in `dmesg`); decide on periodic slot recreate | [done; host reboot deliberately never run; open: re-test of the `/tmp`-full case on the new image]: soak of 50 sessions per egress, both slots at once, done, see "W7 results". crash-at-start loop and the fill tests done ("W7 fill and crash tests"). stage 6 steps 2-4 run (multi-replica with 4 slots, daemon restart, both redeploys; host reboot not run), see "Stage 6 steps 2-4 results". guest-write OOM fixed by fix 30 (storage cap). `deploy.sh` snapshot swap fixed by fix 31 (failure path not run live) |
-| W9 | Copy less data per slot recreate | New slots copy the userdata qcow2 (~2.1 GB) up into their overlay on every session (see fix 15). Find out why the file is copied up at all (`-read-only` already puts guest writes in a temp qcow2 in `/tmp`), and how to avoid it: e.g. a qcow2 backing file on the golden volume instead of an overlayfs copy-up, mounting `/avd` read-only for everything but the few files the emulator must write, hard-linking, or making the userdata smaller. Measure recreate time before and after; goal: recreate no slower than the old in-place reset (44-83 s) | [todo] |
-| W8 | Docs and close-out | Deliverables: measured numbers, README Android section, implemented plan's "Not run" paragraph, new env vars and `tor-route.sh` in the docs; move this plan to `docs/implemented-plans/` and link it in the index | [todo] |
+| W9 | Copy less data per slot recreate | New slots copy the userdata qcow2 (~2.1 GB) up into their overlay on every session (see fix 15). Find out why the file is copied up at all (`-read-only` already puts guest writes in a temp qcow2 in `/tmp`), and how to avoid it: e.g. a qcow2 backing file on the golden volume instead of an overlayfs copy-up, mounting `/avd` read-only for everything but the few files the emulator must write, hard-linking, or making the userdata smaller. Measure recreate time before and after; goal: recreate no slower than the old in-place reset (44-83 s) | [partly]: cause found (the emulator opens the userdata qcow2 read-write), fixed by a read-only base plus a 200 KB top image (fix 33): upper 1105 MB -> 4 MB, recreate time on a fast disk unchanged (~81-90 s). See "W9 results". 50-session soak under way |
+| W8 | Docs and close-out | Deliverables: measured numbers, README Android section, implemented plan's "Not run" paragraph, new env vars and `tor-route.sh` in the docs; move this plan to `docs/implemented-plans/` and link it in the index | [done] 2026-10-29: README Android section, measured-numbers paragraph in `docs/architecture/android.md`, the implemented plan's verification record; the env vars and tor route were already documented; plan moved |
 
 ### W1 results (2026-10-22, stack slots `spider-hoarder-android-{clear,tor}-1`, guest traffic modelled as `docker exec -u 2000 ... nc -z -w4`)
 
@@ -144,6 +147,19 @@ serves again) and `mcp-research/soak_sample.sh` (host side, one line per slot pe
 - **Finding from fix 32's first live log: that `/tmp`-full case ends with `oom_killed=true`.** The emulator dies from the cgroup OOM killer (4 GB tmpfs + ~5 GB emulator > 8 GB), **not from ENOSPC as the W7 fill-test text assumed**. Same mechanism as the guest-write OOM
   that fix 30 removed. It also makes an OOM the first suspect for the two mid-session emulator losses (clear #39, tor #41), though their `OOMKilled` flags were not recorded; with fix 32 the next one is in the wrapper log.
 - The log tail of a slot is mostly startup noise (slotd/websockify/MCP lines); `slot broken` and the exit state are the useful parts.
+
+### W9 results (2026-10-29, deployed dev stack; scratch volumes `s9-*` under `docker run`, scripts kept outside the repo)
+- **Why the file is copied up:** the emulator opens `userdata-qemu.img.qcow2` read-write although `-read-only` is set (the guest-write temp qcow2 in `/tmp` is separate). Evidence: with that one file bind-mounted `:ro` from the golden volume the emulator exits during boot with no message
+  (slotd `broken`); the upper's copy differs from the golden file (1105 vs 1090 MB), i.e. the snapshot restore rewrites tables in it. overlayfs copies a file up on a read-write open, so each recreate wrote 1.1 GB (the 6 MB backing `userdata-qemu.img`, `cache.img.qcow2` 78 MB, etc. are small).
+  Timeline of a recreate on a fast disk: container start 0 s, copy-up done ~12-15 s, slot `free` 64 s.
+- **Correction:** the "upper 2.1 GB" (W2) and "2935 MB" (W7) were `du` of the merged `/avd/slot.avd`; the real upper measured on the host was **1105 MB**, the rest is the golden volume seen through the overlay. (`soak_sample.sh` still prints the merged number in its `upper_MB` column.)
+- **Not the fix:** a `volatile` overlay mount (skips overlayfs's fsync of the copy-up) mounts fine by hand but fails under docker's local volume driver ("invalid argument") because docker mounts the volume twice and a volatile upper cannot be mounted twice; `:nocopy` on the volume avoids that and it worked, but a cgroup write throttle
+  (`--device-write-bps`) did not slow the copy-up, so the fsync theory was not shown, and it would still write the 1.1 GB. Not adopted.
+- **Fix 33 (the fix, avoids the copy entirely):** at init, after the snapshot is saved, `qemu-img convert -l snapshot.name=clean` flattens the state of snapshot `clean` into `userdata-base.qcow2`, the old file is replaced by `qemu-img create -b userdata-base.qcow2` plus `qemu-img snapshot -c clean`.
+  Tried first on a scratch copy of the golden volume: the emulator restored `clean` from it, slot `free` after 87 s, upper 4 MB (was 1105 MB). Deployed: init prints `userdata: base 1254 MB read-only, top 204 KB per slot`, snapshot build 4m40s, golden volume ~+0.1 GB. Test `test_init_splits_userdata_into_a_read_only_base_and_a_tiny_top_before_the_stamp`.
+- **Soak after the fix (8 sessions per egress, both at once, fast disk):** 16/16 clean; end-to-ready median **81 s clear, 90 s tor** (min 74, max 104), upper 4 MB on both slots, no OOM. **This is not faster than the old fast phase (~65 s)**: on a healthy disk the copy-up was only ~10 s of the 64 s and the rest (snapshot restore, boot checks) is unchanged,
+  so the 44-83 s goal is only met roughly. What changed is the I/O: 1.1 GB less written per session, which is what should keep recreates flat once the disk throttles.
+  **Whether the 2-3x slow phase of the W7 soak (116-202 s after ~22 sessions) is gone is shown only by the 50-session soak below.**
 
 ### W5 results (2026-10-26, deployed dev stack after `./deploy.sh --dev` with fix 21; real Keycloak, through nginx at `127.0.0.1:7297`; clear and tor slot)
 
@@ -646,14 +662,8 @@ Fixes made in this stage:
 
 Exit: the step 5 script passes on both servers; handoff works in a real browser. **Not yet met.**
 
-### Stage 5: Google sign-in and real apps (manual, with a human) [todo]
-1. Through the live view, sign in to a throwaway Google account on `android-clear`, open Play Store, install an app; end the session; start
-   another: **no account, no app** (`verify` ok and visually). The headline privacy guarantee: do it twice.
-2. Same on `android-tor`: record what happens (expected: Google often blocks; document in the README note).
-3. Use two or three real apps for `device_snapshot` quality (native list app, webview-heavy app, game/canvas): note where the outline is
-   unusable and whether `device_tap`/screenshots are enough (feeds the "webview/Chrome automation out of scope" decision).
-
-Exit: no state survives a session; usability notes recorded.
+### Stage 5: Google sign-in and real apps (manual, with a human) [moved]
+Split out on 2026-10-29 into [Plan: Android manual test](../plans/android-manual-test.md), together with the two other human-only leftovers (F-Droid unknown-sources flow, Chrome login). Its steps and exit criteria are there.
 
 ### Stage 6: soak and capacity [done]
 1. Loop 50 sessions on one slot (start, a few tool calls, end): reset time stays flat, upper-layer size bounded (reset does not recreate it;
@@ -693,10 +703,10 @@ Exit: 50 clean sessions with flat resource use; redeploys behave as described.
 |---|---|
 | Fixes for everything found, each with a host regression test where it can be modelled without KVM | [partly]: tests added for watchdog, nofile flag, logcat, tor route; `ensure_network`, console.py and the sdcard baseline are only covered by live runs |
 | `smoke_android.py` run and output recorded; an Android e2e through nginx that runs unattended on a KVM host | [done]: `e2e_android.py` / `_view.py` / `_lifecycle.py` (real Keycloak tokens on the dev stack; the stub IdP of `e2e_auth.py` cannot front the deployed gateways); smoke passes on the clear slot |
-| Measured numbers in the docs: boot/restore/reset times, per-slot CPU/RAM/disk, image and golden-volume size, slots per host | [todo]; numbers are in this file (Host, Stage 1, Stage 2) |
-| README "Android" section corrected (Play Store on Tor, first-run dialogs, host resources) | [todo] |
-| The implemented plan's "Not run" paragraph replaced by "Verified on KVM host <date, host type>" | [todo] |
-| Docs for the new env vars `ANDROID_BOOT_TIMEOUT`, `ANDROID_RESET_TIMEOUT`, `ANDROID_RAM_MB` (`docs/operations/deploy-and-configure.md`, `docs/architecture/android.md`) and for the tor route repair (the wrapper now execs one fixed command, `tor-route.sh`, in tor slots) | [todo] (`.env.example` is done) |
+| Measured numbers in the docs: boot/restore/reset times, per-slot CPU/RAM/disk, image and golden-volume size, slots per host | [done]: paragraph in `docs/architecture/android.md`, README Android section |
+| README "Android" section corrected (Play Store on Tor, first-run dialogs, host resources) | [done]; what Play Store/Google really does on Tor is for the manual test |
+| The implemented plan's "Not run" paragraph replaced by "Verified on KVM host <date, host type>" | [done] |
+| Docs for the new env vars `ANDROID_BOOT_TIMEOUT`, `ANDROID_RESET_TIMEOUT`, `ANDROID_RAM_MB` (`docs/operations/deploy-and-configure.md`, `docs/architecture/android.md`) and for the tor route repair (the wrapper now execs one fixed command, `tor-route.sh`, in tor slots) | [done] (all four were already in the docs and `.env.example`) |
 
 ## Files likely to change
 
@@ -713,5 +723,4 @@ Exit: 50 clean sessions with flat resource use; redeploys behave as described.
 ## Docs to update
 
 `docs/architecture/android.md` (numbers, tor route repair, any changed behaviour), `docs/operations/deploy-and-configure.md` (host sizing,
-new env vars), `README.md` (Android section), and the implemented plan's notes. On completion (all stages done), move this file to
-`docs/implemented-plans/` and link it from `docs/implemented-plans/index.md`; until then it stays in `docs/plans/`.
+new env vars), `README.md` (Android section), and the implemented plan's notes. This file was moved to `docs/implemented-plans/` on 2026-10-29 and is linked from `docs/implemented-plans/index.md`.

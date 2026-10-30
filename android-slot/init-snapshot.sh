@@ -121,7 +121,22 @@ grep -q org.fdroid.fdroid /avd/baseline-packages.txt || { echo "F-Droid missing 
 wait "$EMU" || true
 [ -e /avd/slot.avd/snapshots/clean/snapshot.pb ] && [ -e /avd/slot.avd/snapshots/clean/ram.bin ] || { echo "snapshot clean was not saved" >&2; ls -R /avd/slot.avd/snapshots >&2 || true; exit 1; }
 adb_ kill-server || true
+
+# The emulator opens its userdata qcow2 read-write even with -read-only (restoring the snapshot rewrites the image's tables), so on a
+# slot's overlay the whole ~1.1 GB file was copied up, and fsynced, at the start of every session (bring-up plan, W9). Make the big part
+# a read-only backing file instead: a flat image of what snapshot `clean` holds, and a tiny qcow2 on top of it with its own empty `clean`
+# snapshot (the disk state at the time of saving is exactly the base, so ram.bin still matches). Only the tiny file is copied up.
+Q=/opt/android-sdk/emulator/qemu-img
+( cd /avd/slot.avd
+  $Q convert -f qcow2 -l snapshot.name=clean -O qcow2 userdata-qemu.img.qcow2 userdata-base.qcow2
+  rm userdata-qemu.img.qcow2
+  $Q create -f qcow2 -b /avd/slot.avd/userdata-base.qcow2 -F qcow2 userdata-qemu.img.qcow2
+  $Q snapshot -c clean userdata-qemu.img.qcow2
+  top_kb=$(du -k userdata-qemu.img.qcow2 | cut -f1)
+  [ "$top_kb" -lt 20480 ] || { echo "userdata top image is ${top_kb} KB, expected a few hundred" >&2; exit 1; }
+  echo "userdata: base $(du -m userdata-base.qcow2 | cut -f1) MB read-only, top ${top_kb} KB per slot" )
 chown -R "$EMU_UID:$EMU_UID" /avd
+chmod a+r /avd/slot.avd/userdata-base.qcow2
 chmod a+r /avd/baseline-*.txt
 echo "$IMAGE_ID" > /avd/.stamp
 echo "snapshot clean ready"

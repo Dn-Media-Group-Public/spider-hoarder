@@ -29,7 +29,7 @@ snapshot on this host (skipped while the volume's stamp matches the image; a new
 starts from an empty volume); and the wrapper creates the slots on this node (`ANDROID_PLACEMENT`). Slot capacity per egress is
 replicas × `ANDROID_SLOTS_PER_REPLICA`; each slot takes `ANDROID_SLOT_CPUS` (2) and `ANDROID_SLOT_MEMORY` (8g).
 See also: [Android emulators](../architecture/android.md), [Plan: Android hoarder](../implemented-plans/android-hoarder.md),
-[Plan: Android KVM bring-up](../plans/android-kvm-bringup.md)
+[Plan: Android KVM bring-up](../implemented-plans/android-kvm-bringup.md)
 
 **Host sizing.** Per slot: 2 CPUs, 8 GB RAM (guest RAM + ~5 GB: emulator heap ~2 GB, tmpfs, page cache), ~0.75 GB disk for its overlay upper; the golden volume is ~3.8 GB. Plan
 for 8 vCPU / 24 GB / 40 GB disk for 2 slots, and **SSD-class disk reads**: a slot (re)start reads a snapshot as large as the guest RAM,
@@ -72,7 +72,7 @@ Android: `mcp-research/test_android.py` (run on its own), `android-toolserver/te
 host: `mcp-research/smoke_android.py` inside a `research-android-*` container, and against the deployed `--dev` stack **through nginx** with
 real Keycloak tokens `e2e_android.py`, `e2e_android_view.py` (noVNC handoff in headless Chromium) and `e2e_android_lifecycle.py` (idle, disconnect,
 failure and quarantine phases), after `e2e_android_setup.sh` (throwaway Keycloak users). Commands: the scripts' docstrings.
-See also: [Plan: Android KVM bring-up](../plans/android-kvm-bringup.md) (W5)
+See also: [Plan: Android KVM bring-up](../implemented-plans/android-kvm-bringup.md) (W5)
 
 Slot internals not configurable from `.env`: `TOOLSERVER_TIMEOUT` (180 s, `slotd` waiting for the tool server), `--ulimit nofile=65536:65536`
 (required: with Docker's default the emulator stalls), pids limit 4096, tmpfs sizes. Tor slots: the wrapper re-points each slot's

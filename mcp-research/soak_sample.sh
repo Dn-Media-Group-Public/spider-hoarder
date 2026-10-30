@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Host-side sampler for soak_android.py (docs/plans/android-kvm-bringup.md stage 6): every INTERVAL seconds one TSV line per
+# Host-side sampler for soak_android.py (docs/implemented-plans/android-kvm-bringup.md stage 6): every INTERVAL seconds one TSV line per
 # android slot (container id, cgroup memory now/peak, qemu RSS, /tmp and overlay upper size, process and zombie counts, OOM flag)
 # plus gateway memory, leaked volumes/containers, and new OOM lines in dmesg. Usage: ./soak_sample.sh [interval=60] > samples.tsv
 set -u

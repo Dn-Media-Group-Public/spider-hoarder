@@ -11,3 +11,4 @@ Back to the [documentation index](../index.md). Open plans: [plans](../plans/ind
 - [oauth2-proxy registers itself via DCR](oauth2-proxy-dcr.md)
 - [Scale `research-*` containers (sticky replicas on Swarm)](research-replicas.md)
 - [Android hoarder (`android-clear` / `android-tor` emulator servers)](android-hoarder.md)
+- [Android bring-up and verification on a KVM host](android-kvm-bringup.md)

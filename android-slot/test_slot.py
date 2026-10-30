@@ -331,6 +331,17 @@ def test_end_session_answers_then_exits_without_restarting_anything():
         slotd.state = slotd.FREE
 
 
+def test_init_splits_userdata_into_a_read_only_base_and_a_tiny_top_before_the_stamp():
+    """The emulator opens userdata-qemu.img.qcow2 read-write, so on the slot's overlay all ~1.1 GB were copied up per session: the file is
+    now a read-only flat base (snapshot `clean` of the old file) plus a tiny qcow2 on top that carries its own `clean` snapshot."""
+    src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "init-snapshot.sh")).read()
+    for must in ("convert -f qcow2 -l snapshot.name=clean -O qcow2 userdata-qemu.img.qcow2 userdata-base.qcow2",
+                 "-b /avd/slot.avd/userdata-base.qcow2 -F qcow2 userdata-qemu.img.qcow2", "snapshot -c clean userdata-qemu.img.qcow2",
+                 "userdata top image is"):
+        assert must in src, must
+    assert src.index("snapshot clean was not saved") < src.index("snapshot.name=clean") < src.index("chown -R") < src.index('> /avd/.stamp')
+
+
 def test_deploy_builds_the_snapshot_in_a_scratch_volume_and_keeps_the_old_one_if_init_fails():
     """deploy.sh used to remove the working golden snapshot before init ran; a failed init then left the stack without Android capacity."""
     src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "deploy.sh")).read()
@@ -347,6 +358,7 @@ if __name__ == "__main__":
     test_slotd_files_and_auth()
     test_init_turns_bluetooth_off_before_the_snapshot_is_saved()
     test_init_caps_the_guests_free_storage_with_a_ballast_below_the_oom_point()
+    test_init_splits_userdata_into_a_read_only_base_and_a_tiny_top_before_the_stamp()
     test_deploy_builds_the_snapshot_in_a_scratch_volume_and_keeps_the_old_one_if_init_fails()
     test_emulator_is_started_without_the_nested_virtualization_dialog()
     test_watchdog_marks_dead_emulator_broken()

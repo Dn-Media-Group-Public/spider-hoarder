@@ -64,7 +64,7 @@ see [Scaling](scaling.md).
 
 Android sessions are isolated differently: a slot is a container with `/dev/kvm`, the emulator is the VM boundary, and the
 firewall is per uid inside the slot (the guest's traffic is the emulator uid's). See [Android emulators](android.md).
-See also: [Plan: Android hoarder](../implemented-plans/android-hoarder.md), [Plan: Android KVM bring-up](../plans/android-kvm-bringup.md)
+See also: [Plan: Android hoarder](../implemented-plans/android-hoarder.md), [Plan: Android KVM bring-up](../implemented-plans/android-kvm-bringup.md)
 
 - Slot containers: `cap_drop ALL` plus `NET_ADMIN SETUID SETGID SETPCAP KILL CHOWN DAC_OVERRIDE FOWNER` for the entrypoint and `slotd`;
   the emulator, adb, tool server and VNC run under `setpriv --bounding-set=-all` (verified: 0 caps, `no_new_privs`). `slotd` keeps the

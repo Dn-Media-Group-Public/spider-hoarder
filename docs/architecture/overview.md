@@ -9,7 +9,7 @@ no proxying" shape still holds; its layer-access-control / `ingest_text` parts l
 See also: [Plan: Browser sessions](../implemented-plans/browser-sessions-plan.md)
 
 The same stack also serves Android emulators (`/android-clear/mcp`, `/android-tor/mcp`): [Android emulators](android.md).
-See also: [Plan: Android hoarder](../implemented-plans/android-hoarder.md), [Plan: Android KVM bring-up](../plans/android-kvm-bringup.md)
+See also: [Plan: Android hoarder](../implemented-plans/android-hoarder.md), [Plan: Android KVM bring-up](../implemented-plans/android-kvm-bringup.md)
 
 ## Components (Docker Swarm stack)
 

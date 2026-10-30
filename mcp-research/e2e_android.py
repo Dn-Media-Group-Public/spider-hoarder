@@ -7,7 +7,7 @@ public addresses the gateways were deployed with:
         --entrypoint python mcp-research:local e2e_android.py [android-clear|android-tor]
 
 Two throwaway Keycloak users (alice, bob) and a client with direct grants are created by `e2e_android_setup.sh`.
-Covers the slot-independent part of docs/plans/android-kvm-bringup.md stage 4 step 5. The noVNC handoff in a browser is
+Covers the slot-independent part of docs/implemented-plans/android-kvm-bringup.md stage 4 step 5. The noVNC handoff in a browser is
 `e2e_android_view.py` (needs a human-free Chromium, also in this image)."""
 
 import asyncio

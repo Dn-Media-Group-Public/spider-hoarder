@@ -1,6 +1,6 @@
 """Soak test for one Android egress THROUGH NGINX on a deployed (dev) stack: N sessions back to back, each with a realistic
 mix of tool calls, then end the session and time how long until the replacement slot serves again.
-docs/plans/android-kvm-bringup.md stage 6 step 1. Run (same setup as e2e_android.py; one run per egress, both at once is
+docs/implemented-plans/android-kvm-bringup.md stage 6 step 1. Run (same setup as e2e_android.py; one run per egress, both at once is
 the "two slots at once" test):
 
     docker run --rm --network host -v $PWD:/app -w /app -e KC_ALICE_PASSWORD=... -e KC_BOB_PASSWORD=... \

@@ -410,7 +410,7 @@ Built as planned, with these differences and additions (the text above is the de
   from the fixed `ANDROID_TOR_SUBNET`, default `10.99.0.0/24`, deliberately outside `10.192.0.0/10`) and `sysctls: net.ipv4.ip_forward=1`.
 - **Wrapper network.** Swarm has no `network_mode: none`, so the wrapper sits on an `internal` overlay nobody else joins. It finds the
   kvm gid in the host's `/etc/group` (bind-mounted read-only) unless `ANDROID_KVM_GID` is set.
-- **Changes found on a real KVM host** (see [Plan: Android KVM bring-up](../plans/android-kvm-bringup.md); how it works now is in
+- **Changes found on a real KVM host** (see [Plan: Android KVM bring-up](../implemented-plans/android-kvm-bringup.md); how it works now is in
   [Android emulators](../architecture/android.md)): `--ulimit nofile=65536` (spec `spec-v2`); snapshot saved through `console.py` (root,
   console auth token), not `adb emu`; `/sdcard/` baseline with a stability wait; Chrome first run dismissed in init; `ANDROID_RAM_MB`
   (guest RAM, in the stamp), `ANDROID_BOOT_TIMEOUT`, `ANDROID_RESET_TIMEOUT`; `slotd` boot-loop exit detection, watchdog and
@@ -424,11 +424,8 @@ handling; the wrapper's reconcile pass against a fake `docker`; the gateway's sl
 upstream, file tools, APK push and idle/help behaviour against a fake `slotd`; the existing browser tests still pass; the compose
 file validates with `docker stack config`.
 
-**Superseded in part:** the assembled system has since been run on a KVM host (clear slot end to end, Tor routing, stack up); what is
-still open is tracked in [Plan: Android KVM bring-up](../plans/android-kvm-bringup.md). The paragraph below is the state at the time of writing.
-
-**Not run (needs a KVM host, to be checked on the first deploy):** the slot image build, `init-snapshot.sh`, the emulator boot and
-snapshot restore under `slotd` (including the Xvfb size, `-snapshot clean -read-only` flags and the overlay mount), the live
-firewall and Tor redirect inside real containers, `uiautomator2` against the built image through the gateway, the noVNC handoff
-through nginx, and `smoke_android.py`. The spikes S1-S6 covered the same mechanisms by hand; the assembled system has not been
-run.
+**Verified on a KVM host (2026-10-22 to 2026-10-29, GCE VM with nested KVM, 8 vCPU / 32 GB, Debian 13, Swarm dev stack):** the slot image build, `init-snapshot.sh`,
+emulator boot and snapshot restore under `slotd`, the firewall and Tor redirect inside real containers, `uiautomator2` through the gateway, the noVNC handoff through nginx and
+oauth2-proxy, the e2e scripts with real Keycloak tokens, a soak of 50 sessions per egress, fill and crash tests, multi-replica, and a Docker daemon restart. What was found and
+changed is in [Plan: Android KVM bring-up](../implemented-plans/android-kvm-bringup.md) (fixes 1-33). **Not run:** Google sign-in and real apps with a human
+([Android manual test plan](../plans/android-manual-test.md)), and a host reboot (deliberately never run on that host). The "Not run" paragraph that stood here is replaced by this one.

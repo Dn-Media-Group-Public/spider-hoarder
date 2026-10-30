@@ -43,7 +43,7 @@ Control verbs, on `slotd` (port 9001), each needing `X-Slot-Secret`:
 | `GET /internal/health` | `{state: booting\|free\|busy\|resetting\|broken}` |
 | `POST /internal/start {vnc_password}` | session begins: x11vnc + websockify with a fresh per-session password; 409 unless `free` |
 | `POST /internal/reset` | session over: answers `ok`, then `slotd` exits (after 0.5 s) and the container stops. The wrapper recreates it from scratch (empty overlay upper, fresh tmpfs); the new `slotd` boots from snapshot `clean` (see below). `health` says `resetting` until the old process is gone |
-| `GET /internal/verify` | `{ok, problems}`: emulator running, guest booted, third-party packages equal the baseline, no accounts. No `/sdcard` listing: a slot is recreated with an empty overlay after every session, and system apps keep creating and deleting files there for minutes after a restore. See also: [Plan: Android bring-up](../plans/android-kvm-bringup.md) (fix 21) |
+| `GET /internal/verify` | `{ok, problems}`: emulator running, guest booted, third-party packages equal the baseline, no accounts. No `/sdcard` listing: a slot is recreated with an empty overlay after every session, and system apps keep creating and deleting files there for minutes after a restore. See also: [Plan: Android bring-up](../implemented-plans/android-kvm-bringup.md) (fix 21) |
 | `GET /internal/out/<name>` | a file a tool wrote; read once, then deleted (`O_NOFOLLOW`, regular files, size cap) |
 | `PUT /internal/in/<name>` | a file for a tool (an APK); exclusive create |
 
@@ -59,9 +59,9 @@ link are per session, and `/authz` answers 403 for an ended session id.
 slot; instead it only looks at whether its own slots run. `reset` makes `slotd` exit, the slot has no restart policy (`--restart no`), and a
 stopped slot (finished session, crash, or a host reboot) is recreated by the wrapper's next pass (`RECONCILE_INTERVAL`, 3 s) with an empty
 overlay upper: the guest, the emulator uid's files and anything an escaped guest could have written under `/avd` are all gone. Cost: each new
-container copies the userdata qcow2 up into its overlay again (~2.1 GB), on top of the snapshot restore.
+container needs only the snapshot restore: the userdata is a read-only base plus a ~200 KB top image (see "Userdata split"), so nothing big is copied up.
 Container logs go with the container, so before recreating a slot that ended abnormally (non-zero exit, `OOMKilled`, or `slot broken` in its log) the wrapper writes the exit code, the OOM flag and the last 60 log lines to its own log (`docker service logs spider-hoarder_android-wrapper`); a normal session end stays quiet.
-See also: [Plan: Android KVM bring-up](../plans/android-kvm-bringup.md) (fix 32).
+See also: [Plan: Android KVM bring-up](../implemented-plans/android-kvm-bringup.md) (fix 32).
 
 `slotd` boots the slot once, when the container starts (`boot_slot()`; `health` answers `booting` meanwhile). Steps: wipe both tmpfs homes
 (a no-op in a fresh container), start Xvfb and the emulator (`-read-only -snapshot clean -no-snapshot-save`, `ANDROID_EMU_TMP=/tmp`), wait for
@@ -85,7 +85,7 @@ Measured on the first KVM host (GCE VM, 8 vCPU, 32 GB, nested KVM, ~48 MB/s disk
 restore reads `ram.bin`, which is as large as the guest RAM, so **disk read speed decides** (a 2 vCPU / 7.9 GB host with a ~7.6 MB/s disk
 needed 240-540 s). The guest clock is the snapshot time plus the time since restore, so it lags by the snapshot's age (52 min seen);
 `slotd.set_guest_time()` sets it from the host clock (`cmd alarm set-time`, works as the shell uid) at the end of boot and again when a session starts.
-See also: [Plan: Android KVM bring-up](../plans/android-kvm-bringup.md)
+See also: [Plan: Android KVM bring-up](../implemented-plans/android-kvm-bringup.md)
 
 Idle timeout `ANDROID_IDLE_TIMEOUT` (600 s) ends the session and wipes the slot (the reaper looks every 60 s, so it takes up to a minute
 longer); a pending `device_request_human_help` suspends it (until the next tool call, at most `ANDROID_HELP_TIMEOUT`, 3600 s). A request through
@@ -97,13 +97,13 @@ Ending a session (`device_end_session`, DELETE, reaper) waits for the slot's rep
 and `pool.release` finishes on its own task, so a caller that gives up cannot leave the slot `busy` in the pool.
 Bluetooth is switched off in the golden snapshot: the emulator's virtual controller (`netsimd`) needs loopback, which the slot firewall rejects for the
 emulator uid, so a restored guest with Bluetooth on crashes its stack in every session and sometimes shows "Bluetooth keeps stopping" over the app (hiding it
-from uiautomator). Wi-Fi uses the emulator's user-mode stack either way. See also: [Plan: Android KVM bring-up](../plans/android-kvm-bringup.md) (fix 29)
+from uiautomator). Wi-Fi uses the emulator's user-mode stack either way. See also: [Plan: Android KVM bring-up](../implemented-plans/android-kvm-bringup.md) (fix 29)
 
 If the slot container dies mid-session (killed, OOM, daemon restart), the gateway's upstream task ends with the connection error and every call
 in flight or made afterwards fails at once with "the device session ended unexpectedly (...)" (`sessions._Guarded`); the cleanup does not need the
 dead container: it waits for the replacement to be `free` and verifies it. The gateway-to-slot connections also use TCP keepalive and
 `TCP_USER_TIMEOUT` (about a minute) for peers that vanish without closing their sockets.
-See also: [Plan: Android KVM bring-up](../plans/android-kvm-bringup.md) (fixes 22 and 26-28, W5 results)
+See also: [Plan: Android KVM bring-up](../implemented-plans/android-kvm-bringup.md) (fixes 22 and 26-28, W5 results)
 
 Through nginx, uploads (`get_upload_link`, APKs) may be up to 50 MB (`client_max_body_size` on the upload/blob location, the gateway's
 `MAX_FILE_BYTES` default; nginx's own 1 MB stopped every real APK), and the SSO redirect is relative (`absolute_redirect off`), so it keeps the
@@ -133,7 +133,7 @@ The slot entrypoint loops it until a default route exists; afterwards the wrappe
 (10 logs "tor task moved, default route re-pointed"), nothing the slot prints is used. The exec has `NET_ADMIN` because the container
 is created with it (`slotd` itself does not). Between a tor task replacement and the next pass the slot has no network (fails closed);
 measured: re-pointed within 18 s of `docker service update --force spider-hoarder_tor`.
-See also: [Plan: Android KVM bring-up](../plans/android-kvm-bringup.md)
+See also: [Plan: Android KVM bring-up](../implemented-plans/android-kvm-bringup.md)
 
 **Known property: `tini`.** PID 1 (`tini`) keeps the container's full capability set including `NET_ADMIN`; only `slotd` (the entrypoint execs it
 under `setpriv --bounding-set`) and its children are bounded. Nothing else in the container can signal PID 1, so the risk is low, but
@@ -156,13 +156,16 @@ nofile=65536`) on an **empty** `android_snapshot` volume:
    `-snapshot clean` autosave on exit does not work (emulator 37). init checks that `snapshots/clean/{snapshot.pb,ram.bin}` exist.
 6. Stamp `/avd/.stamp`.
 
+**Userdata split.** The emulator opens `userdata-qemu.img.qcow2` read-write even with `-read-only` (restoring snapshot `clean` rewrites the image's tables; a read-only bind mount makes it exit at boot), and overlayfs copies a file up on a read-write open, so every new slot wrote ~1.1 GB (about 10 s on a good disk, much more on a throttled one). `init-snapshot.sh` therefore, after saving the snapshot, flattens snapshot `clean` of that file into `userdata-base.qcow2` (read-only in the golden volume, ~1.25 GB) and replaces the file with a ~200 KB qcow2 backed by it that carries its own empty `clean` snapshot. The disk state at save time is exactly the base, so `ram.bin` still matches. The upper layer of a slot is ~4 MB. Init fails if the top image is over 20 MB.
+See also: [Plan: Android KVM bring-up](../implemented-plans/android-kvm-bringup.md) (W9).
+
 **Stamp and re-snapshot.** The stamp is the image id, plus ` ram=<n>` when `ANDROID_RAM_MB` is set in `.env`; `deploy.sh` skips init
 only when it equals the current value, so any change under `android-slot/` or `android-toolserver/` (new image id) or to the guest RAM
 re-makes the snapshot. Before that it scales the wrapper to 0 and **waits until no container labelled `spider-hoarder.android-slot`
 is left** (hand-run slots included: remove them first), then runs init into a scratch volume (`<stack>_android_snapshot-new`). Only when init
 succeeds is the working volume replaced by a copy of it; a failed init keeps the old snapshot, restarts the wrapper and aborts the deploy.
 Every `deploy.sh` run, snapshot or not, force-updates the wrapper, and a stopping wrapper removes all slots: **a redeploy ends live sessions** and the slots are back ~1-2 min later.
-See also: [Plan: Android KVM bring-up](../plans/android-kvm-bringup.md) (fix 31).
+See also: [Plan: Android KVM bring-up](../implemented-plans/android-kvm-bringup.md) (fix 31).
 
 **Guest RAM and memory.** `ANDROID_RAM_MB` is baked into the snapshot: a restore reads that much from disk, and the slot needs about
 **guest RAM + ~5 GB** of container memory (`ANDROID_SLOT_MEMORY`, default 8g for the 3 GB guest; qemu measured at 4.7-5.3 GB RSS: 3 GB guest + 1.4-2 GB heap, plus the `/tmp` tmpfs; 6g got the emulator OOM-killed in a Chrome session). Measured: slot peak cgroup usage incl.
@@ -175,16 +178,22 @@ the guest. `init-snapshot.sh` therefore reserves most of the free space with a `
 **~1.2 GB free** and gets `No space left on device` first; init fails if it does not end up within 1.0-1.4 GB. `disk.dataPartition.size` in `config.ini` and the emulator's
 `-partition-size` do not shrink the partition (both tried), and `fallocate` writes no data, so the image does not grow. Measured: 14 GB of attempted guest writes leave `/tmp` at 1.6 GB, no OOM, tools unaffected. The
 file can be deleted by the `shell` uid (`device_shell`), which only removes the protection for that session. Writes through `/sdcard` (FUSE) can appear to succeed after the disk is full.
-See also: [Plan: Android KVM bring-up](../plans/android-kvm-bringup.md) (fix 30)
+See also: [Plan: Android KVM bring-up](../implemented-plans/android-kvm-bringup.md) (fix 30)
 
 **File descriptors.** Docker's default `RLIMIT_NOFILE` (~1e9) makes the emulator loop `fcntl` over every fd; the whole process, guest
 included, stalls and the emulator's watchdog kills it ("detected a hanging thread QEMU2 CPU0"). Hence `--ulimit nofile=65536:65536` in the
 wrapper's `create_slot` (it is part of the spec hash) and in `deploy.sh`'s init run, and `ulimit -n 65536` in `entrypoint.sh` and
 `init-snapshot.sh`. A ~20 s "hanging thread" warning on every restore is harmless.
 
-Measured (same host): init 3 min 20 s (3 GB guest); golden volume 3.8 GB; each slot's overlay upper is ~2.1 GB (a full copy-up of the userdata qcow2; constant across sessions, see the KVM bring-up plan) plus tmpfs
+Measured (same host): init 3 min 20 s (3 GB guest); golden volume 3.8 GB; each slot's overlay upper is ~4 MB since the userdata split (it was 1.1 GB, a full copy-up of the userdata qcow2; the 2.1 GB and 2.9 GB quoted earlier were `du` of the merged `/avd`, i.e. mostly the golden volume) plus tmpfs
 (`/tmp` 4g, of which the emulator's own temp file takes ~1.5 GB, `/home/emu` 256m, `/out`, `/in` 512m each).
-See also: [Plan: Android KVM bring-up](../plans/android-kvm-bringup.md)
+See also: [Plan: Android KVM bring-up](../implemented-plans/android-kvm-bringup.md)
+
+Measured on the 8 vCPU / 32 GB / 100 GB GCE dev VM (rotational persistent disk), 2026-10-22 to 29, details in the plan's results sections:
+slot image 5.3 GB, golden volume ~2.8 GB on disk; a cold slot boots from the snapshot in 44-62 s, a recreate after a session takes **65-90 s** (up to 2-3x
+when the host disk throttles, see the plan's W7/W9 results); per slot 2 CPUs, memory peak ~7.1 GB of the 8 GB limit in use (qemu RSS 4.7-5.3 GB, `/tmp` temp file ~1.5 GB),
+~4 MB overlay upper; 50 sessions on each egress at once ran clean, nothing accumulated (containers and volumes constant, gateway memory 296 to 318 MB);
+four slots (2 replicas per egress) fit on the 32 GB host with at least 8 GB free, but not four heavy sessions at once; the stack, daemon restart included, is back with all slots 4.5 min after `systemctl restart docker`.
 
 Each slot mounts an overlay volume at `/avd` (golden volume read-only below, a private upper layer; mounted by `dockerd`, so no
 `SYS_ADMIN`); the wrapper creates it fresh whenever it (re)creates a slot. The wrapper recreates a slot when its spec hash changes
