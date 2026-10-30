@@ -40,11 +40,13 @@ fi
 # Dynamic Client Registration for Claude (claude.ai/claude.com and Claude Code on localhost).
 # Anonymous DCR is governed by the realm's "Trusted Hosts" policy. Claude's registration
 # request comes from unknown servers, so the sender host is not checked; what is enforced is
-# that every redirect URI of a registered client belongs to a trusted host.
+# that every redirect URI of a registered client belongs to a trusted host: Claude's, and this deployment's own host
+# (oauth2-proxy registers itself with a redirect URI on PUBLIC_HOST).
+PUBLIC_NAME=${PUBLIC_HOST%%:*}
 policy=$($K get components -r "$REALM" --fields id,providerId,subType --format csv --noquotes \
   | while IFS=, read -r id prov sub; do [ "$prov" = trusted-hosts ] && [ "$sub" = anonymous ] && { echo "$id"; break; }; done)
 $K update "components/$policy" -r "$REALM" \
-  -s 'config."trusted-hosts"=["claude.ai","claude.com","localhost"]' \
+  -s "config.\"trusted-hosts\"=[\"claude.ai\",\"claude.com\",\"localhost\",\"$PUBLIC_NAME\"]" \
   -s 'config."host-sending-registration-request-must-match"=["false"]' \
   -s 'config."client-uris-must-match"=["true"]'
 

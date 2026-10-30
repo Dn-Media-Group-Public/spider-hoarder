@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Docker Swarm stack deploy (production runs on Swarm).
 #   ./deploy.sh          prod: external OIDC IdP (OIDC_ISSUER), TLS ends at the load balancer
-#   ./deploy.sh --dev    local: adds a Keycloak (docker-compose.dev.yml), http://localhost, no TLS
+#   ./deploy.sh --dev    local: a Keycloak (docker-compose.keycloak.yml), http://localhost, no TLS
+#   ./deploy.sh --dev-keycloak   prod-style (PUBLIC_HOST and OIDC_ISSUER from .env as they are) plus that local dev Keycloak:
+#                        set OIDC_ISSUER=http://<PUBLIC_HOST's host>:${KC_DEV_PORT:-8085}/realms/${KC_REALM:-newsroom}
 # Config comes from .env (or $ENV_FILE). What runs is BACKENDS (space-separated canonical names, e.g.
 # "browser_clear browser_tor android_tor"); every backend is a pip package that registers a descriptor under the entry-point
 # group spider_hoarder.backends. In-tree packages (sdk/, backends/*) are installed into .venv/ (made here with `virtualenv`);
@@ -12,10 +14,12 @@ cd "$(dirname "$0")"
 
 STACK=spider-hoarder
 DEV=0
+DEV_KC=0
 while [[ $# -gt 0 ]]; do
   case $1 in
     --stack) STACK="$2" ; shift 2 ;;
-    --dev) DEV=1 ; shift ;;
+    --dev) DEV=1 ; DEV_KC=1 ; shift ;;
+    --dev-keycloak) DEV_KC=1 ; shift ;;
     *) shift ;;
   esac
 done
@@ -32,7 +36,11 @@ if [ "$DEV" -eq 1 ]; then
   echo "Deploying in DEV mode (local Keycloak, http://localhost, no TLS)"
   export PUBLIC_HOST=localhost:$HTTP_PORT PUBLIC_SCHEME=http
   export OIDC_ISSUER="http://localhost:${KC_DEV_PORT:-8085}/realms/${KC_REALM:-newsroom}"
-  export KC_SETUP_HASH=$(md5sum keycloak/setup.sh | cut -c1-8)
+fi
+if [ "$DEV_KC" -eq 1 ]; then
+  export KC_SETUP_HASH=$(md5sum keycloak/setup.sh | cut -c1-8)   # swarm configs are immutable: the hash is in the name
+  # the issuer the tokens will carry: the origin of OIDC_ISSUER
+  export KC_HOSTNAME="${OIDC_ISSUER%%/realms/*}"
   REQUIRED+=(KC_USER_PASSWORD)
 fi
 export PUBLIC_SCHEME="${PUBLIC_SCHEME:-https}"
@@ -77,6 +85,9 @@ $TOOL post-build
 eval "$($TOOL env)"
 $TOOL landing .build/landing.html
 FILES=(-c docker-compose.yml)
+if [ "$DEV_KC" -eq 1 ]; then
+  FILES+=(-c docker-compose.keycloak.yml)
+fi
 if [ "$DEV" -eq 1 ]; then
   $TOOL dev-overlay .build/docker-compose.dev-gateways.yml
   FILES+=(-c docker-compose.dev.yml -c .build/docker-compose.dev-gateways.yml)

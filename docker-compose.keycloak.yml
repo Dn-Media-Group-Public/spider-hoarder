@@ -1,0 +1,46 @@
+# Local Keycloak (`./deploy.sh --dev-keycloak`, also part of `--dev`): start-dev, sslRequired none, plain http. Never for real users.
+# Not tied to localhost: KC_HOSTNAME is the origin of OIDC_ISSUER (deploy.sh), so the issuer the tokens carry is the one the gateways,
+# oauth2-proxy and the MCP clients are configured with. Point OIDC_ISSUER at http://<PUBLIC_HOST host>:${KC_DEV_PORT}/realms/${KC_REALM}.
+version: "3.8"
+
+services:
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    command: start-dev
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: admin
+      KC_HTTP_PORT: "${KC_DEV_PORT:-8085}"
+      KC_HOSTNAME: ${KC_HOSTNAME}
+    ports: ["${KC_DEV_PORT:-8085}:${KC_DEV_PORT:-8085}"]
+    volumes: [keycloak_data:/opt/keycloak/data]
+    deploy: { replicas: 1, restart_policy: { condition: any } }
+    networks: [public]
+
+  # One-shot and idempotent: realm, scopes, DCR policy, initial user (keycloak/setup.sh).
+  # Runs on every deploy; also what you run by hand against a prod Keycloak (see README).
+  keycloak-init:
+    image: quay.io/keycloak/keycloak:26.0
+    entrypoint: ["bash", "-c", "until kcadm.sh config credentials --server $$KC_URL --realm master --user admin --password admin >/dev/null 2>&1; do sleep 5; done; exec bash /setup.sh"]
+    environment:
+      PATH: /usr/bin:/bin:/opt/keycloak/bin
+      KC_URL: http://keycloak:${KC_DEV_PORT:-8085}
+      KC_ADMIN: admin
+      KC_ADMIN_PASSWORD: admin
+      KC_REALM: ${KC_REALM:-newsroom}
+      KC_USER: ${KC_USER:-researcher}
+      KC_USER_PASSWORD: ${KC_USER_PASSWORD}
+      PUBLIC_HOST: ${PUBLIC_HOST}
+      PUBLIC_SCHEME: ${PUBLIC_SCHEME}
+      MCP_SCOPE: ${MCP_SCOPE:-}
+    configs:
+      - { source: keycloak_setup, target: /setup.sh, mode: 0555 }
+    deploy: { replicas: 1, restart_policy: { condition: on-failure, delay: 10s, max_attempts: 5 } }
+    networks: [public]
+
+configs:
+  # swarm configs are immutable: deploy.sh puts a hash of the script in the name so edits redeploy
+  keycloak_setup: { name: "keycloak_setup_${KC_SETUP_HASH}", file: ./keycloak/setup.sh }
+
+volumes:
+  keycloak_data: {}
