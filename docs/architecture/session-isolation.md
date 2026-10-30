@@ -6,14 +6,14 @@ See also: [Plan: Browser sessions](../implemented-plans/browser-sessions-plan.md
 ## The uid lifecycle
 
 The pool is `UID_BASE .. UID_BASE+N-1` (default 20000; N = `MAX_SESSIONS_TOTAL` + 2 spare for `ingest_page` and the tool-list
-probe). Display number, VNC/websockify port and tool-server port are all derived from `uid - UID_BASE` (`ports.py`), so nothing else
+probe). Display number, VNC/websockify port and tool-server port are all derived from `uid - UID_BASE` (`common/ports.py`), so nothing else
 is allocated or leaked.
 
 **Invariant: a uid is in exactly one state: `free`, `busy(session)` or `quarantined`.** `sessiond` (the only root process: fixed
 verbs over a gateway-only socket, no parsing, no network) is the authority:
 
 1. `start(uid)` is refused unless the uid is free, no process owns that uid, and its homedir does not exist.
-2. It creates `/home/s<uid>` (`0710`, group `gw-collect`) and `out/` (`2750`), then forks a child that sets `umask 027`, drops
+2. It creates `/home/s<uid>` (`0710`, group `gw-collect`) `out/` (`2750`) and `in/` (`2770`, owned by the session, group `gw-collect`), then forks a child that sets `umask 027`, drops
    groups, `setgid`/`setuid`, applies `RLIMIT_NPROC`/`NOFILE`, a clean environment (no gateway secrets), `setsid`, and execs
    the session group. `no-new-privileges` is set by the entrypoint (`setpriv`) because Swarm cannot set `security_opt`.
 3. `stop(uid)`: SIGKILL the group → sweep with `kill(-1)` as that uid → wait until no process owns the uid → delete everything
@@ -24,6 +24,10 @@ verbs over a gateway-only socket, no parsing, no network) is the authority:
 Anything that must outlive a session is copied by the gateway into blob storage before `stop`
 ([Jobs and storage](jobs-and-storage.md)); the homedir is disposable. Each session has a private gid, so group-readable `out/` files
 only ever mean "the gateway" (member of `gw-collect`).
+`in/` is the opposite channel, gateway to sandbox, used only for the files of `browser_network_request_make`: per file the gateway creates
+a random directory (`0777`) and a `0644` file in it through `O_PATH`/`O_NOFOLLOW`/`O_EXCL` (the session owns `in/` and could plant a symlink
+or swap the dir); the home is not traversable by other sessions, and the directory is deleted after use.
+See also: [Plan: network request make](../implemented-plans/network-request-make.md), [Plan: network request make types](../implemented-plans/network-request-make-types.md)
 See also: [Plan: Tool file outputs become jobs](../implemented-plans/file-outputs-as-jobs.md)
 
 ## What isolation does and does not give
@@ -48,9 +52,22 @@ Firewall rules are installed per session uid by `entrypoint.sh` (`iptables -m ow
 |---|---|
 | `research-clear` | Public internet only. REJECT RFC1918, link-local, CGNAT, loopback, cloud-metadata and other stack services (this is the SSRF fix for browsers). Configured DNS resolvers stay reachable. |
 | `research-tor` | ACCEPT only the session's own Tor SocksPort on `tor`; REJECT everything else. IPv6 is rejected for all session uids. |
+| `research-i2p` | ACCEPT only the session's own SOCKS port on `i2pd-<slot>`; REJECT everything else. |
 
 The gateway's own `requests` downloads (non-HTML) use `netguard.py` on clear (resolve, reject non-public, pin the IP, re-check every
-redirect) and `socks5h://tor:<port>` on Tor.
+redirect) and `socks5h://<router>:<port>` on Tor and I2P (`tor` / `i2pd-<slot>`; the session's own port when `ingest_page` runs inside a
+live session, so cookies and circuit match its browser, else the gateway's own port).
+
+## I2P
+
+Each router has one `type=socks` section per session slot with `keys=transient`: its own destination, tunnel pool and leaseset
+(`tunnels.conf` is generated at start, no dynamic add/remove). No outproxy: i2pd refuses clearnet names and raw IPs (SOCKS 0x08), and
+`filter_proxy.py` (`ALLOW_SUFFIX=.i2p`) refuses everything but `*.i2p` first; `fetch.py` does the same. Browsers are on the internal
+network `sessions_i2p`, so only the routers see the internet. Before a session's first use the gateway probes an eepsite
+(`I2P_PROBE_HOST`) and returns "not ready, retry" instead of hanging; Chromium's HTTPS upgrades are off and navigation timeout is 120 s.
+**Known limitation:** sessions on one replica share the router identity, exploratory tunnels and transports, so a router-level observer
+(or a hop seeing several pools) could correlate them; tunnel isolation is per destination only. Upgrade path: one router per session
+slot. Fingerprinting caveats are those of Chromium over Tor. See also: [Plan: I2P egress](../implemented-plans/i2p-egress.md)
 
 ## Tor
 
@@ -75,8 +92,36 @@ See also: [Plan: Android hoarder](../implemented-plans/android-hoarder.md), [Pla
 - Tor slots: the `android-wrapper` (docker.sock holder) execs one fixed command, `/app/tor-route.sh`, in each tor slot every pass and reads
   only its exit code, so a compromised slot cannot steer the wrapper.
 
+## No-media sessions
+
+Loading an image, video or audio file can be a legal risk on the dark web, so the user chooses once per gateway session (before anything
+else; fail-closed gate in the gateway and the toolserver) via `open_session(media?, allow?, deny?)`. The policy cannot change within a
+session, is installed in the toolserver at browser start, and applies to every window and to `ingest_page`. `media` defaults to false on
+Tor / I2P. `get_session()` reports it read-only.
+
+**Lifetime.** The policy lives in `sessions.policies`, keyed by MCP session id, and is dropped by `sessions.close()`, so every way a
+session ends (`browser_end_session` of the last browser or with no id, idle reaper, MCP disconnect/close) also forgets the policy: the next
+tool call fails closed until `open_session` is called and the user has been asked again. MCP clients such as Claude Code keep one MCP
+session across `/new` and `/clear`, and the MCP client cannot tell its conversation is not the first, so without this a new conversation would
+inherit the previous one's policy and browser (cookies, tabs). For the same reason a repeat `open_session` is not an error: it validates the
+new arguments, then **ends the existing session** (all browsers) and starts over with the new policy. Residual gap: `get_session` on a
+leftover session reports `opened: true`, so an MCP client that trusts it instead of calling `open_session` inherits the old browser until
+`IDLE_TIMEOUT`. See also: [Plan: No-media sessions](../implemented-plans/no-media-sessions.md)
+
+| Layer | Where | Blocks |
+|---|---|---|
+| A | `context.route`, by resource type | `<img>`, `srcset`, favicons, CSS backgrounds, `<video>`, `<audio>`, `<object>`, web fonts: never requested |
+| D | CDP `Fetch` at response headers, documents only | navigations and iframes whose `Content-Type` is not allowed: text allowlist + `allow`, minus `deny` (deny, then allow, then default) |
+| gateway/content/fetch.py | `requests` streaming | same Content-Type rule; connection closed before the body is read |
+
+`allow` / `deny` only affect layer D and `fetch.py`: `allow=["image/svg+xml"]` lets you navigate to an SVG, `<img src=svg>` still does not
+load. Not done: disk-cache flags, placeholders, extension denylists, relay-level filtering. **Residual risks:** a server lying about
+`Content-Type`; headers of blocked responses (and for D, the request itself) reach the browser; the first request of a popup and
+cross-origin iframes can bypass D; the policy is only as good as the question the MCP client asked the user. The effective policy is logged
+(`app` logger) and returned by `open_session`. See also: [Plan: No-media sessions](../implemented-plans/no-media-sessions.md)
+
 ## Consent banners
 
 `consent.js` (init script in every page) auto-clicks consent buttons. Known consent-vendor hosts (Fanboy Cookiemonster list, ~670, fetched
 at image build) are blocked: on clear egress with Chromium `--host-rules`; under Tor `--host-rules` do not apply (the proxy resolves
-names), so each Tor session runs a small SOCKS5 filtering relay (`filter_proxy.py`) between Chromium and its SocksPort.
+names), so each Tor and I2P session runs a small SOCKS5 filtering relay (`session_server/session/filter_proxy.py`) between Chromium and its SocksPort.

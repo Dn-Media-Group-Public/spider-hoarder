@@ -1,7 +1,7 @@
 # Browser sessions: merging newsroom-browsers into mcp-research
 
 Status: implemented 2026-10-07 (see "Implementation notes" at the end). Supersedes the container-per-session design in
-[newsroom-browsers-plan.md](../plans/newsroom-browsers-plan.md) (reuse its Keycloak,
+[newsroom-browsers-plan.md](../implemented-plans/newsroom-browsers-plan.md) (reuse its Keycloak,
 Caddy/oauth2-proxy and Tor sections; its Docker-launching parts are dropped).
 Builds on the existing `mcp-research` service.
 See also: [Plan: Android hoarder](android-hoarder.md) (the same gateway fronting Android emulators, `MODE=android`).

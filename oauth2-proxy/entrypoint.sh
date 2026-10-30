@@ -7,6 +7,14 @@ S=/state/registration.json
 REDIRECT="${PUBLIC_SCHEME}://${PUBLIC_HOST}/oauth2/callback"
 # Same scopes as the MCP gateway advertises (so the consent screen matches); DCR without a scope gets every realm default
 SCOPES="basic email${MCP_SCOPE:+ $MCP_SCOPE}"
+# curl (>= 7.78) resolves "localhost" to loopback itself, ignoring /etc/hosts; in dev the issuer is
+# http://localhost:PORT and /etc/hosts points localhost at the host (dev/localhost-is-host.sh)
+curl() {
+  case "$OIDC_ISSUER" in
+    http://localhost:*) command curl --resolve "localhost:$(echo "${OIDC_ISSUER#http://localhost:}" | cut -d/ -f1):$(getent hosts localhost | awk '{print $1; exit}')" "$@" ;;
+    *) command curl "$@" ;;
+  esac
+}
 field() { jq -r ".$1" "$S"; }
 
 if [ -f "$S" ]; then

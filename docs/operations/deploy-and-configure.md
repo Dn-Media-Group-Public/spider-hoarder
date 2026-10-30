@@ -5,8 +5,8 @@ See also: [Plan: Browser sessions](../implemented-plans/browser-sessions-plan.md
 [Plan: Scale research containers](../implemented-plans/research-replicas.md)
 
 ## Stack
-`deploy.sh` builds `mcp-research:local`, `spider-hoarder-tor:local`, `oauth2-proxy-dcr:local` (Swarm ignores `build:`), inits Swarm, runs
-`docker stack deploy`, then force-updates `nginx`, `research-*`, `tor` so fresh `:local` images and an edited `nginx.conf.template` are
+`deploy.sh` builds `mcp-research:local`, `spider-hoarder-tor:local`, `spider-hoarder-i2pd:local`, `spider-hoarder-i2pd-seed:local`, `oauth2-proxy-dcr:local` (Swarm ignores `build:`), inits Swarm, runs
+`docker stack deploy`, then force-updates `nginx`, `research-*`, `tor`, `i2pd`, `i2pd-seed` so fresh `:local` images and an edited `nginx.conf.template` are
 picked up. Swarm constraints: no `security_opt` (entrypoint sets `no_new_privs`), no `shm_size` (Chromium uses
 `--disable-dev-shm-usage`). One image: Debian bookworm + Python venv, Playwright's Chromium, Xvfb, x11vnc, noVNC, websockify, iptables.
 
@@ -20,7 +20,14 @@ picked up. Swarm constraints: no `security_opt` (entrypoint sets `no_new_privs`)
 | `MAX_SESSIONS_TOTAL` (18, max 48), `MAX_SESSIONS_PER_USER` (3), `IDLE_TIMEOUT` (1800 s), `DISCONNECT_TIMEOUT_MINUTES` (5) | per-container limits |
 | `HTTP_PORT`, `GATEWAY_PORT` | published nginx port; port gateways listen on (nothing else may use it) |
 | `RESEARCH_TOR_REPLICAS`, `RESEARCH_CLEAR_REPLICAS`, `MAX_REPLICAS` | scaling ([Scaling](../architecture/scaling.md)) |
+| `RESEARCH_I2P_REPLICAS` (1) | replicas of both `research-i2p` and `i2pd` |
+| `I2P_SOCKS_BASE` (4500), `I2P_TUNNEL_QUANTITY` (2), `I2P_TUNNEL_LENGTH` (3) | first SOCKS port per router; tunnels per session destination; hops. See also: [Plan: I2P egress](../implemented-plans/i2p-egress.md)
+| `I2P_SNAPSHOT_INTERVAL` (1800 s), `I2P_PROBE_HOST` (`stats.i2p`) | seed snapshot period; eepsite probed for readiness |
 | `KC_*` | dev Keycloak and `keycloak/setup.sh` only |
+
+The size/time limits `MAX_PARSE_BYTES`, `MAX_ARCHIVE_BYTES`, `MAX_ARCHIVE_MEMBERS`, `MAX_REQUEST_BODY`, `MAX_UPLOAD_BYTES`,
+`MAX_REQUEST_TIMEOUT_MS` (and `OIDC_JWKS_URL`) are read from the container environment but `docker-compose.yml` does not pass them
+through; add them to the `research-env` block to change the defaults.
 
 ## Android (opt in)
 Set `ANDROID_CLEAR_REPLICAS` / `ANDROID_TOR_REPLICAS` above 0. `deploy.sh` then requires `SLOT_SECRET`, `ANDROID_FDROID_URL`,
@@ -62,14 +69,15 @@ ignores the `/etc/hosts` rewrite of `dev/localhost-is-host.sh`; busybox wget lac
 See [Authentication](../architecture/auth.md). For an external Keycloak run `keycloak/setup.sh` once from the Keycloak image (command in
 the README). The user's password is reset to `KC_USER_PASSWORD` on every run: change it outside dev.
 
-## Tests (`mcp-research/`)
-Host: `test_pool.py`, `test_security.py`, `test_gateway.py`, `test_replicas.py`; `pytest test_toolserver.py` (needs Playwright + Chromium).
-In-container with the deployed capability set (plain root hides permission bugs): `test_sessiond.py`; end to end: `e2e_auth.py` against a
+## Tests (`tests/`)
+Host (`pip install -e mcp-research`, then `pytest tests`): `tests/common`, `tests/gateway`, `tests/egress`, and `tests/session_server/test_toolserver.py` (needs Playwright + Chromium).
+`tests/live/` is not run by plain `pytest`: in-container with the deployed capability set (plain root hides permission bugs): `test_sessiond.py`; end to end: `e2e_auth.py` against a
 stub Keycloak, `smoke_e2e.py` for real sessions. Exact commands are in the README.
+See also: [Plan: Restructure directories](../implemented-plans/restructure-directories.md)
 
-Android: `mcp-research/test_android.py` (run on its own), `android-toolserver/test_android_toolserver.py`,
+Android: `tests/gateway/test_android.py` (run on its own), `android-toolserver/test_android_toolserver.py`,
 `android-slot/test_slot.py` and `android-wrapper/test_reconcile.py` run on the host without KVM; a real emulator is only exercised on a KVM
-host: `mcp-research/smoke_android.py` inside a `research-android-*` container, and against the deployed `--dev` stack **through nginx** with
+host: `tests/live/smoke_android.py` inside a `research-android-*` container, and against the deployed `--dev` stack **through nginx** with
 real Keycloak tokens `e2e_android.py`, `e2e_android_view.py` (noVNC handoff in headless Chromium) and `e2e_android_lifecycle.py` (idle, disconnect,
 failure and quarantine phases), after `e2e_android_setup.sh` (throwaway Keycloak users). Commands: the scripts' docstrings.
 See also: [Plan: Android KVM bring-up](../implemented-plans/android-kvm-bringup.md) (W5)

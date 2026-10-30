@@ -1,9 +1,9 @@
 # Architecture overview
 
 spider-hoarder is an MCP server (`mcp-research`) that gives Claude per-user, isolated, real (headed) Chromium sessions, with a
-human handoff for CAPTCHAs/logins, optional Tor egress, and fetch/parse/store tools that return Markdown. It knows nothing about
-any downstream graph or database: the agent is the orchestrator and carries text from here to wherever it belongs
-(see the original framing in [Plan: Agentic research MCP](../plans/agentic-research-mcp.md), whose "independent MCP servers,
+human handoff for CAPTCHAs/logins, Tor or I2P egress, and fetch/parse/store tools that return Markdown. It knows nothing about
+any downstream graph or database: the MCP client is the orchestrator and carries text from here to wherever it belongs
+(see the original framing in [Plan: Agentic research MCP](../implemented-plans/agentic-research-mcp.md), whose "independent MCP servers,
 no proxying" shape still holds; its layer-access-control / `ingest_text` parts live in another project).
 
 See also: [Plan: Browser sessions](../implemented-plans/browser-sessions-plan.md)
@@ -15,7 +15,8 @@ See also: [Plan: Android hoarder](../implemented-plans/android-hoarder.md), [Pla
 
 ```
 Claude ──Bearer JWT──▶ nginx ─▶ research-tor ──▶ tor ──▶ internet      /tor/mcp
-                         │  └─▶ research-clear ───────▶ internet       /clear/mcp
+                         │  ├─▶ research-clear ───────▶ internet       /clear/mcp
+                         │  └─▶ research-i2p ─▶ i2pd-k ─▶ I2P (*.i2p)  /i2p/mcp   (i2pd-seed: warm netDb snapshot)
 Human (live view) ─SSO─▶ nginx ─▶ oauth2-proxy ─▶ Keycloak (external OIDC)
 
 research-<egress> container (1..N replicas):
@@ -30,11 +31,12 @@ research-<egress> container (1..N replicas):
 
 | Service | Role | Source |
 |---|---|---|
-| `nginx` | Only published port. Routes by egress (`/tor`, `/clear`) and by replica id; SSO for the live view. TLS ends at the load balancer in front of it. | `nginx.conf.template` |
+| `nginx` | Only published port. Routes by egress (`/tor`, `/clear`, `/i2p`) and by replica id; SSO for the live view. TLS ends at the load balancer in front of it. | `nginx.conf.template` |
 | `oauth2-proxy` | Human SSO for the live view only (MCP uses bearer JWTs verified by the gateway). Registers its own OIDC client. | `oauth2-proxy/` |
 | `research-tor`, `research-clear` | The gateway + `sessiond` + per-session browsers; one image, `EGRESS` selects the policy. Shared by all users, **not** one container per session. | `mcp-research/` |
 | `tor` | A single Tor daemon with a pool of SocksPorts (and, for the Android slots, a transparent proxy: root entrypoint with `NET_ADMIN` for the redirect rules, tor itself runs as `debian-tor` with no caps). | `tor/` |
-| `research-android-clear`, `research-android-tor`, `android-wrapper`, slots | Optional Android emulators: the same gateway image in `MODE=android`, a wrapper that makes the slot containers, one emulator per slot. See [Android emulators](android.md). | `android-*`, `mcp-research/slots.py` |
+| `research-i2p`, `i2pd`, `i2pd-seed` | I2P egress: one `i2pd` router per `research-i2p` replica (slot k ↔ `i2pd-k`), a SOCKS destination per session; `i2pd-seed` serves a netDb snapshot so routers start fast. See also: [Plan: I2P egress](../implemented-plans/i2p-egress.md) | `i2pd/`, `i2pd-seed/` |
+| `research-android-clear`, `research-android-tor`, `android-wrapper`, slots | Optional Android emulators: the same gateway image in `MODE=android`, a wrapper that makes the slot containers, one emulator per slot. See [Android emulators](android.md). | `android-*`, `mcp-research/mcp_research/gateway/slots.py` |
 | Keycloak | External OIDC provider (prod); a throwaway one in `--dev`. | `keycloak/setup.sh` |
 
 ### Why one container per egress, not per session
@@ -42,11 +44,11 @@ No Docker socket and no container creation: a session is a Unix uid plus a proce
 (trafilatura/markitdown), preflight/downloads (`requests`) and blob storage stay in the same service because they are
 stateless library calls and must use the same egress as the browser (`socks5h://tor` in the Tor instance).
 See also: [Plan: Browser sessions](../implemented-plans/browser-sessions-plan.md) (supersedes the container-per-session design of
-[Plan: Newsroom browsers](../plans/newsroom-browsers-plan.md); its Keycloak/Tor background is still referenced).
+[Plan: Newsroom browsers](../implemented-plans/newsroom-browsers-plan.md); its Keycloak/Tor background is still referenced).
 
 ## Gateway and the tool server
 
-The gateway (`app.py`, `sessions.py`) speaks MCP to Claude (low-level `mcp` SDK, because the tool list is dynamic: proxied from the
+The gateway (`gateway/app.py`, `gateway/sessions.py`) speaks MCP to Claude (low-level `mcp` SDK, because the tool list is dynamic: proxied from the
 session's tool server) and proxies browser tool calls over loopback HTTP to that session's tool server on port `9000+n`
 (`Host: mcp-upstream` is required). It adds its own tools (`browser_request_human_help`, `browser_save_page`,
 `browser_end_session`, `ingest_page`, file tools) and turns every bulk output into a *job*
@@ -54,22 +56,41 @@ session's tool server) and proxies browser tool calls over loopback HTTP to that
 
 Session lifecycle: `initialize` reserves a uid, the browser starts lazily on the first tool call, and every ending path
 (`browser_end_session`, idle timeout `IDLE_TIMEOUT`, MCP session close, MCP client silent for `DISCONNECT_TIMEOUT_MINUTES`,
-crash) goes through one `close()` → `sessiond stop`. Limits: `MAX_SESSIONS_PER_USER`, `MAX_SESSIONS_TOTAL` (per container).
+crash) goes through one `close()` → `sessiond stop`, which also drops the session's media policy (the next `open_session` asks the user again). Limits: `MAX_SESSIONS_PER_USER`, `MAX_SESSIONS_TOTAL` (per container).
 See [Session isolation](session-isolation.md).
 
 ## Request routing and replicas
 See [Scaling and routing](scaling.md). Authentication: [Authentication and live view](auth.md).
 
+## Naming
+
+| Name | Meaning |
+|---|---|
+| **Gateway** | The shared MCP server in each `research-<egress>` container (uid 1000). |
+| **Content pipeline** | extract / store / fetch of bytes -> Markdown; part of the gateway. |
+| **Sessiond** | The only root process; owns the uid pool; starts/stops sessions. |
+| **Session** | One uid + process group (Xvfb, x11vnc, websockify, toolserver, Chromium, egress filter). Not a Docker container. |
+| **Toolserver** | The Python MCP browser server inside a session. |
+| **Session server** | Umbrella for everything that makes sessions happen on a container: sessiond, session, toolserver. |
+| **Common** | Code imported by both the gateway and session server. |
+
+The MCP client is whatever drives the tools over MCP (Claude); the user is the human using the live view.
+
 ## Code map (`mcp-research/`)
 
-| File | Responsibility |
+One Python distribution (`setup.py`, installed into `/venv` with `pip install .`), top-level package `mcp_research`; tests live in `tests/`.
+
+| Path (under `mcp_research/`) | Responsibility |
 |---|---|
-| `app.py` | MCP server, tool schemas/descriptions, job results, blob/upload/live-view routes, `/authz`, replica session-id middleware |
-| `sessions.py` | Session registry, reservations, reaper, page HTML capture, `fetch_html` |
-| `pool.py`, `sessiond.py`, `ports.py` | uid pool (gateway side / root side) and the port/uid layout derived from pool size and replica slot |
-| `slots.py`, `android-tools.json` | `MODE=android`: the replica's slot slice and the pool backend that talks to the slots; static tool list ([Android emulators](android.md)) |
-| `session-group.sh`, `entrypoint.sh` | per-session process group; container start (firewall, sessiond, gateway; with `MODE=android` just the unprivileged gateway, restarted on exit) |
-| `toolserver/` | Python MCP server driving Chromium ([details](browser-toolserver.md)) |
-| `extract.py`, `storage.py`, `blobtoken.py` | Markdown conversion + terse outline + grep, fsspec storage, HMAC links |
-| `fetch.py`, `netguard.py`, `filter_proxy.py`, `cmp_rules.py`, `consent.js` | non-HTML downloads, SSRF guard, Tor SOCKS filter relay, consent-banner handling |
-| `auth.py` | Keycloak JWT verification |
+| `gateway/app.py` | MCP server, tool schemas/descriptions, job results, blob/upload/live-view routes, `/authz`, replica session-id middleware |
+| `gateway/sessions.py` | Session registry, reservations, reaper, page HTML capture, `fetch_html` |
+| `gateway/pool.py`, `session_server/sessiond/` | uid pool (gateway side / root side) |
+| `gateway/slots.py`, `gateway/android-tools.json` | `MODE=android`: the replica's slot slice and the pool backend that talks to the slots; static tool list ([Android emulators](android.md)) |
+| `gateway/auth.py`, `gateway/blobtoken.py` | Keycloak JWT verification, HMAC links |
+| `gateway/content/` | content pipeline: `extract.py` (Markdown, terse outline, grep), `storage.py` (fsspec), `fetch.py` (non-HTML downloads), `netguard.py` (SSRF guard) |
+| `session_server/session/` | `session-group.sh` (per-session process group), `filter_proxy.py` (SOCKS filter relay) |
+| `session_server/toolserver/` | toolserver driving Chromium, `consent.js`, `tools.json` ([details](browser-toolserver.md)) |
+| `common/` | `ports.py` (uid/port layout from pool size and replica slot), `cmp_rules.py`, `mediapolicy.py`, `textcap.py` |
+| `entrypoint.sh` (next to `setup.py`) | container start: firewall, sessiond, gateway; with `MODE=android` just the unprivileged gateway, restarted on exit |
+
+See also: [Plan: Restructure directories](../implemented-plans/restructure-directories.md)

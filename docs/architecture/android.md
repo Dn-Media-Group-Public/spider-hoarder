@@ -205,4 +205,4 @@ There is no pre-logged-in Google account: a human signs in through the live view
 
 [Tool reference](../api/tools.md#android-tools). Code map: `android-toolserver/android_ui.py` (hierarchy → outline and refs,
 no device access), `android_tools.py` (tool schemas and handlers), `device.py` (the one `uiautomator2` connection),
-`android_server.py` (MCP + secret gate), `export_tools.py` (writes `mcp-research/android-tools.json`, checked by the tests).
+`android_server.py` (MCP + secret gate), `export_tools.py` (writes `mcp-research/mcp_research/gateway/android-tools.json`, checked by the tests).

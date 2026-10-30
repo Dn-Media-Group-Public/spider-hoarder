@@ -1,4 +1,4 @@
-"""Write the tool list for the gateway (mcp-research/android-tools.json). The gateway lists tools without a
+"""Write the tool list for the gateway (mcp-research/mcp_research/gateway/android-tools.json). The gateway lists tools without a
 running slot; test_android_toolserver.py fails if the file is out of date. Run: python export_tools.py"""
 
 import json
@@ -6,7 +6,7 @@ import os
 
 import android_tools
 
-PATH = os.path.join(os.path.dirname(__file__), "..", "mcp-research", "android-tools.json")
+PATH = os.path.join(os.path.dirname(__file__), "..", "mcp-research", "mcp_research", "gateway", "android-tools.json")
 
 
 def render() -> str:

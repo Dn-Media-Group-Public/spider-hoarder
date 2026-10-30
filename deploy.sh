@@ -30,6 +30,7 @@ if [ "$DEV" -eq 1 ]; then
   echo "Deploying in DEV mode (local Keycloak, http://localhost, no TLS)"
   export PUBLIC_HOST=localhost:$HTTP_PORT PUBLIC_SCHEME=http
   export OIDC_ISSUER="http://localhost:${KC_DEV_PORT:-8085}/realms/${KC_REALM:-newsroom}"
+  export KC_SETUP_HASH=$(md5sum keycloak/setup.sh | cut -c1-8)
   FILES+=(-c docker-compose.dev.yml)
   REQUIRED+=(KC_USER_PASSWORD)
 fi
@@ -63,6 +64,8 @@ docker build -t mcp-research:local mcp-research
 docker build -t spider-hoarder-tor:local tor
 docker build -t oauth2-proxy-dcr:local oauth2-proxy
 docker build -t android-wrapper:local android-wrapper
+docker build -t spider-hoarder-i2pd:local i2pd
+docker build -t spider-hoarder-i2pd-seed:local i2pd-seed
 
 # Initialize swarm if not already active
 docker info --format '{{.Swarm.LocalNodeState}}' | grep -q active || docker swarm init
@@ -117,6 +120,6 @@ fi
 docker stack deploy --resolve-image never "${FILES[@]}" "$STACK"
 
 # Force restart so freshly-built :local images (and an edited nginx.conf.template) are picked up.
-for s in nginx research-tor research-clear research-android-clear research-android-tor android-wrapper tor; do
+for s in nginx research-tor research-clear research-i2p research-android-clear research-android-tor android-wrapper tor i2pd i2pd-seed; do
   docker service update --force --no-resolve-image "${STACK}_$s"
 done

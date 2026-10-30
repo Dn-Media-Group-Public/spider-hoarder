@@ -116,7 +116,7 @@ today.
 
 ## Docs to update
 
-- `docs/plans/agentic-research-mcp.md`: blob layout (`terse/**`) and the
+- `docs/implemented-plans/agentic-research-mcp.md`: blob layout (`terse/**`) and the
   `get_file_text` row (when that plan's docs are consolidated).
 - `docs/implemented-plans/file-outputs-as-jobs.md`: the inline-text rule
   (add See also).

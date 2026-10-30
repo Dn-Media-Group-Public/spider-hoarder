@@ -19,7 +19,7 @@ tool descriptions.
   `docker exec spider-hoarder-android-clear-1 ...health`). The bring-up plan's results sections list the commands.
 - A **throwaway Google account** (never a real one: its credentials end up typed into a shared emulator, and Google may lock it).
   For `android-tor` a second throwaway account, since a sign-in from a Tor exit is likely to be challenged and may lock the account.
-- A browser logged in to the stack's SSO, and an MCP client (Claude Code with both servers added, or `mcp-research/e2e_android.py`'s
+- A browser logged in to the stack's SSO, and an MCP client (Claude Code with both servers added, or `tests/live/e2e_android.py`'s
   `Conn` class) to start sessions and call `device_request_human_help` for the live-view link.
 - Two or three real apps to try (one native list app, one webview-heavy app, one game or canvas app), installable from Play Store or F-Droid.
 - Do **not** reboot the host and do not redeploy during the run: a redeploy removes every slot and ends the session.

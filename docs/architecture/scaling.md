@@ -12,10 +12,14 @@ files and jobs stay per replica; Swarm only (`tasks.<service>` DNS, `{{.Task.Slo
   `/blob/<rid>/…`, `/upload/<rid>/…`, `/view/<rid>/…`. nginx extracts it and proxies straight to that IP on `GATEWAY_PORT`.
 - **`initialize`** has no session id → round-robin over `tasks.research-<egress>`; a replica reserves a uid at `initialize` and returns
   503 when full; nginx tries the next one; all full → 503 to Claude. The browser itself still starts lazily on the first tool call.
-- **SSRF guard** (the `rid` in a URL is attacker-controlled): nginx is only on `sessions_tor`, `sessions_clear` and `auth`, never on
+- **SSRF guard** (the `rid` in a URL is attacker-controlled): nginx is only on `sessions_tor`, `sessions_clear`, `sessions_i2p` and `auth`, never on
   `public`, and connects only to the dedicated `GATEWAY_PORT`, where the gateway enforces its own auth. Residual: blind probing.
 - **Tor**: one shared `tor`; replica slot `k` uses SocksPorts `9050 + (k-1)*SOCKS_STRIDE + index`; the per-uid firewall allows only
   that range. `MAX_REPLICAS` (default 4) sizes the range; scaling past it needs a larger value and a `tor` redeploy.
+- **I2P**: one `i2pd` per `research-i2p` replica (`RESEARCH_I2P_REPLICAS` sets both counts). Slot `k` finds its router as `i2pd-k`
+  (`hostname: "i2pd-{{.Task.Slot}}"`, overlay DNS, no `docker.sock`); ports are `I2P_SOCKS_BASE + index`. The per-uid firewall pins the
+  router's IP; if `i2pd-k` gets a new IP the replica exits and Swarm restarts it, rebuilding the rules (sessions on it are lost).
+  See also: [Plan: I2P egress](../implemented-plans/i2p-egress.md)
 - **Consequences**: a `job_id` from another replica is not readable ("lives on another replica"); a restarted/rescheduled replica loses
   its sessions and links (new IP); `nginx.conf.template` is bind-mounted (single node; use a Swarm `config:` otherwise).
   Upgrade path for shared files: shared blob storage (`RESEARCH_BLOB_URL` is already a URL).
