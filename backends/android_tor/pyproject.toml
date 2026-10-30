@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "android_tor"
+version = "0.1.0"
+description = "Android emulator slots whose egress is Tor only"
+requires-python = ">=3.11"
+dependencies = ["spider-hoarder-android-sdk"]
+
+[project.entry-points."spider_hoarder.backends"]
+android_tor = "android_tor.descriptor:descriptor"
+
+[tool.setuptools.packages.find]
+include = ["android_tor*"]
+
+[tool.setuptools.package-data]
+android_tor = ["docker-compose.yml", "image/*", "*/Dockerfile", "*/*.sh", "*/*.conf"]

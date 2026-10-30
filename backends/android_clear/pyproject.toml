@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "android_clear"
+version = "0.1.0"
+description = "Android emulator slots with direct internet egress"
+requires-python = ">=3.11"
+dependencies = ["spider-hoarder-android-sdk"]
+
+[project.entry-points."spider_hoarder.backends"]
+android_clear = "android_clear.descriptor:descriptor"
+
+[tool.setuptools.packages.find]
+include = ["android_clear*"]
+
+[tool.setuptools.package-data]
+android_clear = ["docker-compose.yml", "image/*", "*/Dockerfile", "*/*.sh", "*/*.conf"]

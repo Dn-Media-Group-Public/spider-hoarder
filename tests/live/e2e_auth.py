@@ -44,10 +44,10 @@ async def call(cs, name, **args):
 
 
 async def main():
-    assert requests.post(f"{HOST}/clear/mcp", json={}).status_code == 401, "unauthenticated must be 401"
-    assert requests.get(f"{HOST}/.well-known/oauth-protected-resource/clear/mcp").status_code == 200
+    assert requests.post(f"{HOST}/browser-clear/mcp", json={}).status_code == 401, "unauthenticated must be 401"
+    assert requests.get(f"{HOST}/.well-known/oauth-protected-resource/browser-clear/mcp").status_code == 200
     alice, bob = "alice@example.org", "bob@example.org"
-    async with streamablehttp_client(f"{HOST}/clear/mcp", headers={"Authorization": f"Bearer {token(alice)}"}) as (r, w, _):
+    async with streamablehttp_client(f"{HOST}/browser-clear/mcp", headers={"Authorization": f"Bearer {token(alice)}"}) as (r, w, _):
         async with ClientSession(r, w) as cs:
             await cs.initialize()
             names = {t.name for t in (await cs.list_tools()).tools}
@@ -107,15 +107,15 @@ async def main():
             err, text = await call(cs, "browser_navigate", url="https://example.org")
 
             err, text = await call(cs, "browser_request_human_help", reason="solve the captcha")
-            view = re.search(r"/clear/view/([0-9-]+/[A-Za-z0-9_-]+)/start", text).group(1)
+            view = re.search(r"/browser-clear/view/([0-9-]+/[A-Za-z0-9_-]+)/start", text).group(1)
             h = lambda email, **x: {"x-auth-request-email": email, **x}
-            uri = f"/clear/view/{view}/vnc.html"
+            uri = f"/browser-clear/view/{view}/vnc.html"
             ok = requests.get(f"{HOST}/authz", headers=h(alice, **{"x-forwarded-uri": uri}))
             bad = requests.get(f"{HOST}/authz", headers=h(bob, **{"x-forwarded-uri": uri}))
             none = requests.get(f"{HOST}/authz", headers={"x-forwarded-uri": uri})
             print("authz owner/other/none:", ok.status_code, ok.headers.get("X-Upstream"), bad.status_code, none.status_code)
-            st = requests.get(f"{HOST}/clear/view/{view}/start", headers=h(alice), allow_redirects=False)
-            stb = requests.get(f"{HOST}/clear/view/{view}/start", headers=h(bob), allow_redirects=False)
+            st = requests.get(f"{HOST}/browser-clear/view/{view}/start", headers=h(alice), allow_redirects=False)
+            stb = requests.get(f"{HOST}/browser-clear/view/{view}/start", headers=h(bob), allow_redirects=False)
             print("start owner/other:", st.status_code, "password=" in st.headers.get("location", ""), stb.status_code)
 
             err, text = await call(cs, "get_upload_link")
@@ -132,7 +132,7 @@ async def main():
             print("upload token as blob:", requests.get(url.replace("/upload/", "/blob/")).status_code)
 
             # owner scoping: bob cannot see alice's jobs
-            async with streamablehttp_client(f"{HOST}/clear/mcp", headers={"Authorization": f"Bearer {token(bob)}"}) as (r2, w2, _):
+            async with streamablehttp_client(f"{HOST}/browser-clear/mcp", headers={"Authorization": f"Bearer {token(bob)}"}) as (r2, w2, _):
                 async with ClientSession(r2, w2) as cb:
                     await cb.initialize()
                     print("bob list_files:", await call(cb, "list_files", job_id=up["job_id"]))

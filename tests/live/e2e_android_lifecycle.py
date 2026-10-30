@@ -9,7 +9,7 @@ One phase per run: python e2e_android_lifecycle.py <phase> [android-clear|androi
               what a user sees and that the slot recovers
 
 The short timeouts are set by the caller on the gateway service, e.g.
-  docker service update --env-add ANDROID_IDLE_TIMEOUT=60 --env-add DISCONNECT_TIMEOUT_MINUTES=1 spider-hoarder_research-android-clear
+  docker service update --env-add ANDROID_IDLE_TIMEOUT=60 --env-add DISCONNECT_TIMEOUT_MINUTES=1 spider-hoarder_android-clear-gateway
 and removed afterwards (`--env-rm`, or ./deploy.sh --dev)."""
 
 import asyncio

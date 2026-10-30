@@ -2,10 +2,10 @@
 
 Every tool that produces bulk content returns a **job**: `{job_id, files, text?, text_path?}`.
 See also: [Plan: Tool file outputs become jobs](../implemented-plans/file-outputs-as-jobs.md),
-[Plan: Jobs for all tools](../implemented-plans/jobs-for-all-tools.md)
+[Plan: Jobs for all tools](../implemented-plans/jobs-for-all-tools.md), [Plan: Pluggable backends](../implemented-plans/backend-plugins.md) (job helpers live in the SDK, file-producing tools in the drivers)
 
 ## Which tools produce jobs
-`FILE_TOOLS` in `gateway/app.py`: `browser_take_screenshot`, `browser_pdf_save`, `browser_snapshot`, `browser_find`, `browser_evaluate`,
+`FILE_TOOLS` in the browser driver (`spider_hoarder_browser_sdk/driver.py`; the Android driver has its own, `device_*`): `browser_take_screenshot`, `browser_pdf_save`, `browser_snapshot`, `browser_find`, `browser_evaluate`,
 `browser_console_messages`, `browser_network_request_get`, `browser_network_request_make` (not a reader, but its output is a job), `browser_network_requests`, `browser_storage_state`, plus `browser_save_page`, `ingest_page` and uploads.
 A client-supplied `filename` only renames the file inside the job; the MCP client never controls a host path. A file the session wrote is read
 by the gateway from `out/` (opened through an `O_PATH` home fd, then `O_NOFOLLOW`, regular files only) and streamed into storage in 1 MiB chunks, **before** the session's homedir is wiped. Stored files have no size
@@ -56,10 +56,10 @@ See also: [Plan: save-page target](../implemented-plans/save-page-target.md)
   content type only (`extract.archive_kind`): zip, tar (`.tar .tgz .tar.gz .tbz .tbz2 .tar.bz2 .txz .tar.xz`, streamed), 7z (`py7zr`),
   rar (`rarfile`, needs `unar` in the image) and single-file `.gz/.bz2/.xz` (one member named without the suffix). Only regular files
   are extracted: names with an absolute path or `..` are dropped, symlinks/hardlinks/devices/FIFOs are skipped and listed in `notes`
-  (`"<name> skipped (symlink)"`), never followed (`tests/gateway/test_security.py`). Limits, enforced while extracting: `MAX_ARCHIVE_MEMBERS` (50,000)
+  (`"<name> skipped (symlink)"`), never followed (`sdk/tests/test_security.py`). Limits, enforced while extracting: `MAX_ARCHIVE_MEMBERS` (50,000)
   and `MAX_ARCHIVE_BYTES` (4 GiB uncompressed, counted from bytes actually read; `MAX_ZIP_*` still read as fallbacks); an aborted unpack
   is reported in `notes`. 7z members are extracted into memory in 64 MiB batches (by declared size). One parse rule serves every
-  caller (`_store_one` / `_store_tree` in `gateway/app.py`).
+  caller (`_store_one` / `_store_tree` in `spider_hoarder_sdk/gateway/jobs.py`).
   See also: [Plan: network request jobs](../implemented-plans/network-request-jobs.md), [Plan: more file formats](../implemented-plans/more-file-formats.md)
 - Binary structured data is decoded to pretty-printed JSON at `parsed/<path>.json` (`extract.binary_to_json`; the original is untouched,
   `.json` originals are not parsed): msgpack (`.msgpack .mp`), CBOR (`.cbor`), BSON (`.bson`, the PyPI `bson` package, concatenated

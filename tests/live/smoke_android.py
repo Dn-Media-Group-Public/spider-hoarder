@@ -1,4 +1,4 @@
-"""Live smoke test for MODE=android, run inside a research-android-* container as uid 1000 on a KVM host
+"""Live smoke test for the Android backends (BACKEND=android_clear or android_tor), run inside an android-<egress>-gateway container as uid 1000 on a KVM host
 (see README): a real slot, a session, the tool list, screen reading and input, a file output, human-help
 isolation, reset + verify after the session. Not part of the host tests: it needs a booted emulator."""
 
@@ -6,14 +6,14 @@ import asyncio
 import os
 import sys
 
-os.environ.setdefault("MODE", "android")
+os.environ.setdefault("BACKEND", "android_clear")
 
-from mcp_research.gateway import sessions
-from mcp_research.gateway import slots
+from spider_hoarder_sdk.gateway import sessions
+from spider_hoarder_android_sdk import slots
 
 
 async def main():
-    assert sessions.ANDROID, "run with MODE=android (inside research-android-<egress>)"
+    assert sessions.driver.noun == "device", "run with BACKEND=android_clear|android_tor (inside android-<egress>-gateway)"
     await sessions.pool.reset()
     print("slots:", list(slots.SLOTS), "free:", sorted(sessions.pool.free))
     names = {t.name for t in await sessions.upstream_tools()}

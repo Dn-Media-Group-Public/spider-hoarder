@@ -1,6 +1,6 @@
 # Tool reference
 
-What Claude sees at `/<egress>/mcp`. The server also sends its own `instructions`. Bulk results are jobs
+What Claude sees at `/<backend>/mcp` (see [Servers and URLs](#servers-and-urls)). The server also sends its own `instructions`. Bulk results are jobs
 (`{job_id, files, text?, text_path?}`; [Jobs and storage](../architecture/jobs-and-storage.md)).
 See also: [Plan: Browser sessions](../implemented-plans/browser-sessions-plan.md),
 [Plan: Python browser tool server](../implemented-plans/python-browser-tool-server.md),
@@ -69,14 +69,22 @@ Every one takes optional `browser` (default `main`).
 - Refs from snapshot/find stay valid until the page re-renders or navigates; actions return no snapshot.
 - Not implemented: `browser_run_code_unsafe`, network mocking, tracing, video, raw mouse.
 
+## Servers and URLs
+One MCP server per enabled backend (`BACKENDS`), at `/<backend with dashes>/mcp`: `/browser-clear/mcp`, `/browser-tor/mcp`, `/browser-i2p/mcp`,
+`/android-clear/mcp`, `/android-tor/mcp`, plus any out-of-tree backend. The MCP server name is `spider-hoarder-<backend with dashes>`.
+**URL rename:** the browser servers used to be `/clear/mcp`, `/tor/mcp`, `/i2p/mcp` (server names `spider-hoarder-clear`, ...); there are no aliases, so existing
+clients re-add the server at the new URL. Tool descriptions and notes never name sibling servers; instead the server instructions end with one entry per *other enabled*
+backend (`spider-hoarder-<backend with dashes> (<title>): <description>`, one per line, no lead-in label), taken from the backends' descriptors, so the model
+learns what alternatives exist without a hardcoded list. See also: [Plan: Pluggable backends](../implemented-plans/backend-plugins.md)
+
 ## Egress
-`/tor/mcp` browses only via Tor (anonymised, but some sites block Tor); `/clear/mcp` browses directly
+`/browser-tor/mcp` browses only via Tor (anonymised, but some sites block Tor); `/browser-clear/mcp` browses directly
 (public internet only, not `.onion`). Use Tor for sensitive research, clear when a site blocks Tor.
-`/i2p/mcp` reaches only `*.i2p` (eepsites, `.b32.i2p`), nothing else. The first request on a fresh session can take a minute (tunnel build);
+`/browser-i2p/mcp` reaches only `*.i2p` (eepsites, `.b32.i2p`), nothing else. The first request on a fresh session can take a minute (tunnel build);
 until then tools fail with "I2P router/tunnels not ready, retry". See also: [Plan: I2P egress](../implemented-plans/i2p-egress.md)
 
 ## Android tools
-Served at `/android-clear/mcp` and `/android-tor/mcp` ([Android emulators](../architecture/android.md)); one device per session, no
+Served at `/android-clear/mcp` and `/android-tor/mcp` (unchanged by the backend rename) ([Android emulators](../architecture/android.md)); one device per session, no
 `browser` parameter. Bulk results are jobs, as above. See also: [Plan: Android hoarder](../implemented-plans/android-hoarder.md)
 
 | Tool | Behaviour |

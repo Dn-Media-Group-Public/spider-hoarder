@@ -1,0 +1,77 @@
+# browser_i2p: Browser sessions that reach only *.i2p through i2pd.
+# Overlay contract (docs/architecture/backend-plugins.md): every service, network and volume is prefixed `browser-i2p-`; the gateway is
+# `browser-i2p-gateway`; it sets BACKEND and BACKENDS; nginx gets this backend's session network.
+version: "3.8"
+
+x-gateway-env: &gateway-env
+  PUBLIC_HOST: ${PUBLIC_HOST}
+  PUBLIC_SCHEME: ${PUBLIC_SCHEME:-https}
+  OIDC_ISSUER: ${OIDC_ISSUER}
+  MCP_SCOPE: ${MCP_SCOPE:-}
+  RESEARCH_BLOB_URL: ${RESEARCH_BLOB_URL:-file:///data}
+  BLOB_TOKEN_SECRET: ${BLOB_TOKEN_SECRET}
+  MAX_SESSIONS_TOTAL: ${MAX_SESSIONS_TOTAL:-18}
+  MAX_SESSIONS_PER_USER: ${MAX_SESSIONS_PER_USER:-3}
+  IDLE_TIMEOUT: ${IDLE_TIMEOUT:-1800}
+  DISCONNECT_TIMEOUT_MINUTES: ${DISCONNECT_TIMEOUT_MINUTES:-5}
+  GATEWAY_PORT: ${GATEWAY_PORT}
+  BACKENDS: ${BACKENDS}                 # the overlay contract: every gateway knows what else is enabled ...
+  BACKEND_SERVERS: ${BACKEND_SERVERS}   # ... and the text to tell the model about it (deploy.sh builds it from the descriptors)
+  REPLICA_SLOT: "{{.Task.Slot}}"   # expanded per task by stack deploy: this replica's slice of the router's SocksPorts
+
+services:
+  # nginx reaches the gateways over this backend's session network (list-merged into the base nginx service)
+  nginx:
+    networks: [browser-i2p-sessions]
+
+  browser-i2p-gateway:
+    image: spider-hoarder-browser-i2p:local
+    cap_drop: [ALL]
+    # NET_ADMIN: the start script's firewall only, dropped before sessiond/gateway start.
+    # The rest is sessiond's (setuid/setgid/chown/kill, DAC_OVERRIDE+FOWNER to sweep session files).
+    cap_add: [NET_ADMIN, SETUID, SETGID, CHOWN, KILL, DAC_OVERRIDE, FOWNER]
+    volumes:
+      - browser-i2p-data:/data
+    deploy:
+      replicas: ${BROWSER_I2P_REPLICAS:-1}
+      restart_policy: { condition: any }
+      resources:
+        limits: { memory: 12g }   # a runaway session can OOM all sessions on this task
+    environment:
+      <<: *gateway-env
+      BACKEND: browser_i2p
+      I2P_SOCKS_BASE: ${I2P_SOCKS_BASE:-4500}
+      I2P_PROBE_HOST: ${I2P_PROBE_HOST:-stats.i2p}
+    networks: [browser-i2p-sessions, public]   # public: the gateway reaches the IdP; browsers (session uids) are firewalled to their own i2pd port
+
+  # One router per gateway replica: replica k talks to browser-i2p-router-k (hostname from the task slot, overlay DNS).
+  browser-i2p-router:
+    image: spider-hoarder-browser-i2p-router:local
+    hostname: "browser-i2p-router-{{.Task.Slot}}"
+    deploy:
+      replicas: ${BROWSER_I2P_REPLICAS:-1}
+      restart_policy: { condition: any }
+    environment:
+      MAX_SESSIONS_TOTAL: ${MAX_SESSIONS_TOTAL:-18}
+      I2P_SOCKS_BASE: ${I2P_SOCKS_BASE:-4500}
+      I2P_TUNNEL_QUANTITY: ${I2P_TUNNEL_QUANTITY:-2}
+      I2P_TUNNEL_LENGTH: ${I2P_TUNNEL_LENGTH:-3}
+      I2P_SEED_HOST: browser-i2p-seed
+    networks: [browser-i2p-egress, browser-i2p-sessions]
+
+  # Warm netDb served as snapshot.tgz so the routers above start fast; falls back to the public reseed if down.
+  browser-i2p-seed:
+    image: spider-hoarder-browser-i2p-seed:local
+    deploy: { replicas: 1, restart_policy: { condition: any } }
+    environment:
+      I2P_SNAPSHOT_INTERVAL: ${I2P_SNAPSHOT_INTERVAL:-1800}
+    volumes: [browser-i2p-seed-data:/var/lib/i2pd]
+    networks: [browser-i2p-egress]
+
+networks:
+  browser-i2p-egress: { driver: overlay }
+  browser-i2p-sessions: { driver: overlay, internal: true }   # i2p browsers: no internet, only their own router
+
+volumes:
+  browser-i2p-data: {}
+  browser-i2p-seed-data: {}

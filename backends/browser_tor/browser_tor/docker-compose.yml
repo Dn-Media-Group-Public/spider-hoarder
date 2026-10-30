@@ -1,0 +1,62 @@
+# browser_tor: Browser sessions with Tor-only egress.
+# Overlay contract (docs/architecture/backend-plugins.md): every service, network and volume is prefixed `browser-tor-`; the gateway is
+# `browser-tor-gateway`; it sets BACKEND and BACKENDS; nginx gets this backend's session network.
+version: "3.8"
+
+x-gateway-env: &gateway-env
+  PUBLIC_HOST: ${PUBLIC_HOST}
+  PUBLIC_SCHEME: ${PUBLIC_SCHEME:-https}
+  OIDC_ISSUER: ${OIDC_ISSUER}
+  MCP_SCOPE: ${MCP_SCOPE:-}
+  RESEARCH_BLOB_URL: ${RESEARCH_BLOB_URL:-file:///data}
+  BLOB_TOKEN_SECRET: ${BLOB_TOKEN_SECRET}
+  MAX_SESSIONS_TOTAL: ${MAX_SESSIONS_TOTAL:-18}
+  MAX_SESSIONS_PER_USER: ${MAX_SESSIONS_PER_USER:-3}
+  IDLE_TIMEOUT: ${IDLE_TIMEOUT:-1800}
+  DISCONNECT_TIMEOUT_MINUTES: ${DISCONNECT_TIMEOUT_MINUTES:-5}
+  GATEWAY_PORT: ${GATEWAY_PORT}
+  BACKENDS: ${BACKENDS}                 # the overlay contract: every gateway knows what else is enabled ...
+  BACKEND_SERVERS: ${BACKEND_SERVERS}   # ... and the text to tell the model about it (deploy.sh builds it from the descriptors)
+  REPLICA_SLOT: "{{.Task.Slot}}"   # expanded per task by stack deploy: this replica's slice of the router's SocksPorts
+
+services:
+  # nginx reaches the gateways over this backend's session network (list-merged into the base nginx service)
+  nginx:
+    networks: [browser-tor-sessions]
+
+  browser-tor-gateway:
+    image: spider-hoarder-browser-tor:local
+    cap_drop: [ALL]
+    # NET_ADMIN: the start script's firewall only, dropped before sessiond/gateway start.
+    # The rest is sessiond's (setuid/setgid/chown/kill, DAC_OVERRIDE+FOWNER to sweep session files).
+    cap_add: [NET_ADMIN, SETUID, SETGID, CHOWN, KILL, DAC_OVERRIDE, FOWNER]
+    volumes:
+      - browser-tor-data:/data
+    deploy:
+      replicas: ${BROWSER_TOR_REPLICAS:-1}
+      restart_policy: { condition: any }
+      resources:
+        limits: { memory: 12g }   # a runaway session can OOM all sessions on this task
+    environment:
+      <<: *gateway-env
+      BACKEND: browser_tor
+      MAX_REPLICAS: ${MAX_REPLICAS:-4}   # one SocksPort range per gateway replica (the Tor daemon below has the same)
+    networks: [browser-tor-sessions, public]   # public: the gateway reaches the IdP; browsers (session uids) are firewalled to their own Tor SocksPort only
+
+  # This backend's own Tor daemon: one SocksPort per session slot of every gateway replica, stream isolation per port.
+  browser-tor-daemon:
+    image: spider-hoarder-browser-tor-daemon:local
+    deploy: { replicas: 1, restart_policy: { condition: any } }
+    environment:
+      MAX_SESSIONS_TOTAL: ${MAX_SESSIONS_TOTAL:-18}
+      MAX_REPLICAS: ${MAX_REPLICAS:-4}
+    volumes: [browser-tor-daemon-data:/var/lib/tor]
+    networks: [browser-tor-egress, browser-tor-sessions]
+
+networks:
+  browser-tor-egress: { driver: overlay }
+  browser-tor-sessions: { driver: overlay, internal: true }   # tor browsers: no internet, only the daemon's SocksPorts
+
+volumes:
+  browser-tor-data: {}
+  browser-tor-daemon-data: {}

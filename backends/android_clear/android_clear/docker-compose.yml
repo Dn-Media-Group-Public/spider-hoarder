@@ -1,0 +1,83 @@
+# android_clear: Android emulator slots with direct internet egress.
+# Overlay contract (docs/architecture/backend-plugins.md): every service, network and volume is prefixed `android-clear-`; the gateway is
+# `android-clear-gateway`; it sets BACKEND and BACKENDS; nginx gets this backend's slot network.
+# Needs a KVM host (preflight); see docs/architecture/android.md.
+version: "3.8"
+
+x-gateway-env: &gateway-env
+  PUBLIC_HOST: ${PUBLIC_HOST}
+  PUBLIC_SCHEME: ${PUBLIC_SCHEME:-https}
+  OIDC_ISSUER: ${OIDC_ISSUER}
+  MCP_SCOPE: ${MCP_SCOPE:-}
+  RESEARCH_BLOB_URL: ${RESEARCH_BLOB_URL:-file:///data}
+  BLOB_TOKEN_SECRET: ${BLOB_TOKEN_SECRET}
+  MAX_SESSIONS_PER_USER: ${ANDROID_MAX_SESSIONS_PER_USER:-1}
+  DISCONNECT_TIMEOUT_MINUTES: ${DISCONNECT_TIMEOUT_MINUTES:-5}
+  GATEWAY_PORT: ${GATEWAY_PORT}
+  BACKENDS: ${BACKENDS}                 # the overlay contract: every gateway knows what else is enabled ...
+  BACKEND_SERVERS: ${BACKEND_SERVERS}   # ... and the text to tell the model about it (deploy.sh builds it from the descriptors)
+  REPLICA_SLOT: "{{.Task.Slot}}"   # expanded per task by stack deploy: this replica's slice of the slots
+  ANDROID_SLOTS_PER_REPLICA: ${ANDROID_SLOTS_PER_REPLICA:-2}
+  ANDROID_IDLE_TIMEOUT: ${ANDROID_IDLE_TIMEOUT:-600}   # no tool call this long: session ends, slot wiped
+  SLOT_SECRET: ${SLOT_SECRET:-}
+  SLOT_RESET_TIMEOUT: ${ANDROID_RESET_TIMEOUT:-300}   # snapshot restore + checks; slow disks need more
+  SLOT_READY_TIMEOUT: ${ANDROID_RESET_TIMEOUT:-300}
+
+services:
+  nginx:
+    networks: [android-clear-slots]   # the slots' noVNC
+
+  # Same code path as the browser gateways, but no uid pool, sessiond or firewall here (the sessions live in the slot
+  # containers the wrapper makes), so only what setpriv needs.
+  android-clear-gateway:
+    image: spider-hoarder-android-clear:local
+    cap_drop: [ALL]
+    cap_add: [SETUID, SETGID, SETPCAP]
+    volumes:
+      - android-clear-data:/data
+    deploy:
+      replicas: ${ANDROID_CLEAR_REPLICAS:-1}
+      restart_policy: { condition: any }
+      resources:
+        limits: { memory: 2g }
+    environment:
+      <<: *gateway-env
+      BACKEND: android_clear
+    networks: [android-clear-slots, public]   # public: the gateway reaches the IdP
+
+  # Creates and supervises this backend's slot containers (android-clear-N) from env alone: it holds docker.sock, so it has no ports,
+  # no network and no API (reconcile.sh header). Runs on the KVM node. Only ever touches slots with its own label value.
+  android-clear-wrapper:
+    image: spider-hoarder-android-wrapper:local
+    read_only: true
+    cap_drop: [ALL]
+    stop_grace_period: 120s   # SIGTERM removes every slot
+    environment:
+      STACK_NAME: ${STACK_NAME}
+      BACKEND: android-clear
+      ANDROID_EGRESS: clear
+      ANDROID_SLOTS: ${ANDROID_CLEAR_SLOTS:-0}   # replicas x ANDROID_SLOTS_PER_REPLICA (the descriptor's env())
+      ANDROID_SLOT_IMAGE: spider-hoarder-android-slot:local
+      ANDROID_SLOT_NETWORK: ${STACK_NAME}_android-clear-slots
+      ANDROID_SNAPSHOT_VOLUME: ${STACK_NAME}_android-clear-snapshot
+      ANDROID_SLOT_CPUS: ${ANDROID_SLOT_CPUS:-2}
+      ANDROID_SLOT_MEMORY: ${ANDROID_SLOT_MEMORY:-8g}
+      ANDROID_KVM_GID: ${ANDROID_KVM_GID:-}
+      ANDROID_BOOT_TIMEOUT: ${ANDROID_BOOT_TIMEOUT:-240}
+      SLOT_SECRET: ${SLOT_SECRET:-}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /etc/group:/host-etc-group:ro   # the kvm group's gid (Swarm cannot map devices; the wrapper does it per slot)
+    deploy:
+      replicas: 1
+      restart_policy: { condition: any }
+      placement:
+        constraints: ["${ANDROID_PLACEMENT:-node.role == manager}"]
+    networks: [android-clear-wrapper-net]
+
+networks:
+  android-clear-slots: { driver: overlay, attachable: true }   # slots are plain containers made by the wrapper, hence attachable; direct egress, the slot's uid firewall blocks private ranges
+  android-clear-wrapper-net: { driver: overlay, internal: true }   # nobody else on it: the wrapper has no network to speak of
+
+volumes:
+  android-clear-data: {}

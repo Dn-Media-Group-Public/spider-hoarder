@@ -1,0 +1,49 @@
+# browser_clear: Browser sessions with direct internet egress.
+# Overlay contract (docs/architecture/backend-plugins.md): every service, network and volume is prefixed `browser-clear-`; the gateway is
+# `browser-clear-gateway`; it sets BACKEND and BACKENDS; nginx gets this backend's session network.
+version: "3.8"
+
+x-gateway-env: &gateway-env
+  PUBLIC_HOST: ${PUBLIC_HOST}
+  PUBLIC_SCHEME: ${PUBLIC_SCHEME:-https}
+  OIDC_ISSUER: ${OIDC_ISSUER}
+  MCP_SCOPE: ${MCP_SCOPE:-}
+  RESEARCH_BLOB_URL: ${RESEARCH_BLOB_URL:-file:///data}
+  BLOB_TOKEN_SECRET: ${BLOB_TOKEN_SECRET}
+  MAX_SESSIONS_TOTAL: ${MAX_SESSIONS_TOTAL:-18}
+  MAX_SESSIONS_PER_USER: ${MAX_SESSIONS_PER_USER:-3}
+  IDLE_TIMEOUT: ${IDLE_TIMEOUT:-1800}
+  DISCONNECT_TIMEOUT_MINUTES: ${DISCONNECT_TIMEOUT_MINUTES:-5}
+  GATEWAY_PORT: ${GATEWAY_PORT}
+  BACKENDS: ${BACKENDS}                 # the overlay contract: every gateway knows what else is enabled ...
+  BACKEND_SERVERS: ${BACKEND_SERVERS}   # ... and the text to tell the model about it (deploy.sh builds it from the descriptors)
+  REPLICA_SLOT: "{{.Task.Slot}}"   # expanded per task by stack deploy: this replica's slice of the router's SocksPorts
+
+services:
+  # nginx reaches the gateways over this backend's session network (list-merged into the base nginx service)
+  nginx:
+    networks: [browser-clear-sessions]
+
+  browser-clear-gateway:
+    image: spider-hoarder-browser-clear:local
+    cap_drop: [ALL]
+    # NET_ADMIN: the start script's firewall only, dropped before sessiond/gateway start.
+    # The rest is sessiond's (setuid/setgid/chown/kill, DAC_OVERRIDE+FOWNER to sweep session files).
+    cap_add: [NET_ADMIN, SETUID, SETGID, CHOWN, KILL, DAC_OVERRIDE, FOWNER]
+    volumes:
+      - browser-clear-data:/data
+    deploy:
+      replicas: ${BROWSER_CLEAR_REPLICAS:-1}
+      restart_policy: { condition: any }
+      resources:
+        limits: { memory: 12g }   # a runaway session can OOM all sessions on this task
+    environment:
+      <<: *gateway-env
+      BACKEND: browser_clear
+    networks: [browser-clear-sessions, public]   # public: the gateway reaches the IdP; browsers (session uids) are firewalled off private ranges
+
+networks:
+  browser-clear-sessions: { driver: overlay }   # clear browsers -> internet (the uid firewall blocks private ranges)
+
+volumes:
+  browser-clear-data: {}

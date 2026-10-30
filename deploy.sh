@@ -2,10 +2,13 @@
 # Docker Swarm stack deploy (production runs on Swarm).
 #   ./deploy.sh          prod: external OIDC IdP (OIDC_ISSUER), TLS ends at the load balancer
 #   ./deploy.sh --dev    local: adds a Keycloak (docker-compose.dev.yml), http://localhost, no TLS
-# Config comes from .env (or $ENV_FILE).
-# Android emulators are opt-in (ANDROID_CLEAR_REPLICAS / ANDROID_TOR_REPLICAS > 0 in .env) and need this host to
-# have /dev/kvm: it builds the slot image and makes the golden snapshot here (docs/implemented-plans/android-hoarder.md).
+# Config comes from .env (or $ENV_FILE). What runs is BACKENDS (space-separated canonical names, e.g.
+# "browser_clear browser_tor android_tor"); every backend is a pip package that registers a descriptor under the entry-point
+# group spider_hoarder.backends. In-tree packages (sdk/, backends/*) are installed into .venv/ (made here with `virtualenv`);
+# BACKEND_PACKAGES (pip requirement specs, e.g. git+ssh://...) adds out-of-tree backends. docs/architecture/backend-plugins.md.
+# Backends removed from BACKENDS are pruned from the stack; their networks and volumes are kept (docker network/volume rm).
 set -e
+cd "$(dirname "$0")"
 
 STACK=spider-hoarder
 DEV=0
@@ -24,33 +27,16 @@ source "${ENV_FILE:-.env}"
 set +a
 
 export STACK_NAME=$STACK
-FILES=(-c docker-compose.yml)
-REQUIRED=(PUBLIC_HOST OIDC_ISSUER O2P_COOKIE_SECRET BLOB_TOKEN_SECRET GATEWAY_PORT HTTP_PORT)
+REQUIRED=(PUBLIC_HOST OIDC_ISSUER O2P_COOKIE_SECRET BLOB_TOKEN_SECRET GATEWAY_PORT HTTP_PORT BACKENDS)
 if [ "$DEV" -eq 1 ]; then
   echo "Deploying in DEV mode (local Keycloak, http://localhost, no TLS)"
   export PUBLIC_HOST=localhost:$HTTP_PORT PUBLIC_SCHEME=http
   export OIDC_ISSUER="http://localhost:${KC_DEV_PORT:-8085}/realms/${KC_REALM:-newsroom}"
   export KC_SETUP_HASH=$(md5sum keycloak/setup.sh | cut -c1-8)
-  FILES+=(-c docker-compose.dev.yml)
   REQUIRED+=(KC_USER_PASSWORD)
 fi
 export PUBLIC_SCHEME="${PUBLIC_SCHEME:-https}"
 export O2P_COOKIE_SECURE=$([ "$PUBLIC_SCHEME" = https ] && echo true || echo false)
-
-# --- Android (opt in)
-ANDROID_CLEAR_REPLICAS=${ANDROID_CLEAR_REPLICAS:-0}
-ANDROID_TOR_REPLICAS=${ANDROID_TOR_REPLICAS:-0}
-ANDROID_SLOTS_PER_REPLICA=${ANDROID_SLOTS_PER_REPLICA:-2}
-ANDROID_API=${ANDROID_API:-34}
-ANDROID=0
-if [ "$ANDROID_CLEAR_REPLICAS" -gt 0 ] || [ "$ANDROID_TOR_REPLICAS" -gt 0 ]; then
-  ANDROID=1
-  REQUIRED+=(SLOT_SECRET ANDROID_FDROID_URL ANDROID_FDROID_SHA256)
-fi
-export ANDROID_CLEAR_REPLICAS ANDROID_TOR_REPLICAS ANDROID_SLOTS_PER_REPLICA ANDROID_API
-export ANDROID_CLEAR_SLOTS=$((ANDROID_CLEAR_REPLICAS * ANDROID_SLOTS_PER_REPLICA))
-export ANDROID_TOR_SLOTS=$((ANDROID_TOR_REPLICAS * ANDROID_SLOTS_PER_REPLICA))
-export ANDROID_WRAPPER_REPLICAS=$ANDROID
 
 for v in "${REQUIRED[@]}"; do
   if [ -z "${!v:-}" ] || [ "${!v}" = "changeme" ] || [ "${!v}" = "change-me" ]; then
@@ -59,67 +45,48 @@ for v in "${REQUIRED[@]}"; do
   fi
 done
 
+# --- the virtualenv (well-known location) and the packages: wheels are built once, installed here and copied into the
+# images by the Dockerfiles (`COPY --from=wheels`). In-tree: all of them (BACKENDS decides what is enabled).
+[ -x .venv/bin/python ] || virtualenv -q .venv
+# shellcheck disable=SC1091
+source .venv/bin/activate
+rm -rf .build/wheels && mkdir -p .build/wheels
+SPECS=(./sdk ./backends/*/)
+# shellcheck disable=SC2206
+SPECS+=(${BACKEND_PACKAGES:-})
+for spec in "${SPECS[@]}"; do
+  pip wheel -q --no-deps -w .build/wheels "$spec"
+done
+pip install -q pyyaml
+pip install -q --no-deps --force-reinstall .build/wheels/*.whl
+
+TOOL="python scripts/spider_hoarder.py"
+$TOOL validate
+$TOOL preflight
+
 # Build local images (build: is ignored in stack deploy)
-docker build -t mcp-research:local mcp-research
-docker build -t spider-hoarder-tor:local tor
 docker build -t oauth2-proxy-dcr:local oauth2-proxy
-docker build -t android-wrapper:local android-wrapper
-docker build -t spider-hoarder-i2pd:local i2pd
-docker build -t spider-hoarder-i2pd-seed:local i2pd-seed
+$TOOL build "$PWD/.build/wheels"
 
 # Initialize swarm if not already active
 docker info --format '{{.Swarm.LocalNodeState}}' | grep -q active || docker swarm init
 
-if [ "$ANDROID" -eq 1 ]; then
-  [ -e /dev/kvm ] || { echo "Android needs /dev/kvm on this host (KVM-capable x86_64, nested virtualisation on a VM)" >&2; exit 1; }
-  [ "$(uname -m)" = x86_64 ] || { echo "Android slots are x86_64 only" >&2; exit 1; }
-  # build context = just what the image copies: never the repo root (.env, .git)
-  CTX=$(mktemp -d)
-  trap 'rm -rf "$CTX"' EXIT
-  cp -r android-slot android-toolserver "$CTX"/
-  rm -f "$CTX"/android-toolserver/test_*.py "$CTX"/android-toolserver/export_tools.py "$CTX"/android-slot/test_*.py
-  docker build -f "$CTX/android-slot/Dockerfile" -t android-slot:local --build-arg "ANDROID_API=$ANDROID_API" \
-    --build-arg "FDROID_URL=$ANDROID_FDROID_URL" --build-arg "FDROID_SHA256=$ANDROID_FDROID_SHA256" \
-    ${ANDROID_CMDLINE_TOOLS_SHA256:+--build-arg "CMDLINE_TOOLS_SHA256=$ANDROID_CMDLINE_TOOLS_SHA256"} "$CTX"
+$TOOL post-build
 
-  # Golden AVD + snapshot `clean`, made here because quickboot snapshots depend on the host CPU and docker build has no
-  # /dev/kvm. Skipped when the volume's stamp is this image. A new one must start from an empty volume, and the slots
-  # (overlay mounts on top of it) must be gone first: the wrapper removes them when it stops.
-  SNAP="${STACK}_android_snapshot"
-  IMAGE_ID=$(docker image inspect -f '{{.Id}}' android-slot:local)${ANDROID_RAM_MB:+ ram=$ANDROID_RAM_MB}   # the stamp: image + what is baked into the snapshot
-  STAMP=$(docker run --rm -v "$SNAP:/avd" --entrypoint cat android-slot:local /avd/.stamp 2>/dev/null || true)
-  if [ "$STAMP" != "$IMAGE_ID" ]; then
-    echo "Making the Android snapshot (a few minutes)..."
-    if docker service inspect "${STACK}_android-wrapper" >/dev/null 2>&1; then
-      docker service scale "${STACK}_android-wrapper=0" >/dev/null
-    fi
-    while [ -n "$(docker ps -q --filter label=spider-hoarder.android-slot)" ]; do sleep 2; done
-    # Built in a scratch volume: the working snapshot stays until the new one has passed init's checks. Volumes cannot be
-    # renamed, so a good one is copied over $SNAP afterwards (the only window without a snapshot, and no init is running).
-    NEWSNAP="${SNAP}-new"
-    docker volume rm -f "$NEWSNAP" >/dev/null
-    docker volume create "$NEWSNAP" >/dev/null
-    if ! docker run --rm --ulimit nofile=65536:65536 --device /dev/kvm --group-add "$(stat -c %g /dev/kvm)" \
-      --cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID --cap-add KILL --cap-add DAC_OVERRIDE --cap-add FOWNER \
-      -v "$NEWSNAP:/avd" -e "IMAGE_ID=$IMAGE_ID" -e "ANDROID_API=$ANDROID_API" ${ANDROID_RAM_MB:+-e "ANDROID_RAM_MB=$ANDROID_RAM_MB"} \
-      --entrypoint /app/init-snapshot.sh android-slot:local; then
-      echo "Android snapshot init FAILED; keeping the previous snapshot ($SNAP) and restarting the wrapper." >&2
-      docker volume rm -f "$NEWSNAP" >/dev/null
-      if docker service inspect "${STACK}_android-wrapper" >/dev/null 2>&1; then
-        docker service scale "${STACK}_android-wrapper=$ANDROID_WRAPPER_REPLICAS" >/dev/null
-      fi
-      exit 1
-    fi
-    docker volume rm -f "$SNAP" >/dev/null
-    docker volume create "$SNAP" >/dev/null
-    docker run --rm -v "$NEWSNAP:/from:ro" -v "$SNAP:/to" --entrypoint sh android-slot:local -c 'cp -a --sparse=always /from/. /to/'
-    docker volume rm -f "$NEWSNAP" >/dev/null
-  fi
+# Variables the backends derive (slot counts, ...), BACKENDS and BACKEND_SERVERS (what each gateway tells the model about the others)
+eval "$($TOOL env)"
+$TOOL landing .build/landing.html
+FILES=(-c docker-compose.yml)
+if [ "$DEV" -eq 1 ]; then
+  $TOOL dev-overlay .build/docker-compose.dev-gateways.yml
+  FILES+=(-c docker-compose.dev.yml -c .build/docker-compose.dev-gateways.yml)
 fi
+mapfile -t BACKEND_FILES < <($TOOL compose)
+FILES+=("${BACKEND_FILES[@]}")
 
-docker stack deploy --resolve-image never "${FILES[@]}" "$STACK"
+docker stack deploy --prune --resolve-image never "${FILES[@]}" "$STACK"
 
-# Force restart so freshly-built :local images (and an edited nginx.conf.template) are picked up.
-for s in nginx research-tor research-clear research-i2p research-android-clear research-android-tor android-wrapper tor i2pd i2pd-seed; do
+# Force restart so freshly-built :local images (and an edited nginx.conf.template or landing page) are picked up.
+for s in nginx $($TOOL services); do
   docker service update --force --no-resolve-image "${STACK}_$s"
 done

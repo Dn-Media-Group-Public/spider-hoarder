@@ -8,7 +8,7 @@ echo -e "time\tslot\tcid\tmem_MB\tpeak_MB\tqemu_rss_MB\ttmp_MB\tupper_MB\tprocs\
 while :; do
   vols=$(docker volume ls -q | grep -c 'android-.*-\(avd\|state\)$')
   ctrs=$(docker ps -aq --filter label=spider-hoarder.android-slot | wc -l)
-  gw=$(docker stats --no-stream --format '{{.MemUsage}}' $(docker ps -q -f name=research-android) 2>/dev/null | awk '{s+=$1} END {printf "%.0f", s}')
+  gw=$(docker stats --no-stream --format '{{.MemUsage}}' $(docker ps -q -f name=android-.*-gateway) 2>/dev/null | awk '{s+=$1} END {printf "%.0f", s}')
   for n in $(docker ps --format '{{.Names}}' --filter label=spider-hoarder.android-slot); do
     cid=$(docker inspect -f '{{printf "%.8s" .Id}}' "$n")
     oom=$(docker inspect -f '{{.State.OOMKilled}}' "$n")

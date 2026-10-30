@@ -1,12 +1,12 @@
 # Session isolation, egress and Tor
 
 Per-session isolation is **one Unix uid per session**, enforced by `sessiond`, plus a per-uid egress firewall.
-See also: [Plan: Browser sessions](../implemented-plans/browser-sessions-plan.md)
+See also: [Plan: Browser sessions](../implemented-plans/browser-sessions-plan.md), [Plan: Pluggable backends](../implemented-plans/backend-plugins.md) (egress hooks)
 
 ## The uid lifecycle
 
 The pool is `UID_BASE .. UID_BASE+N-1` (default 20000; N = `MAX_SESSIONS_TOTAL` + 2 spare for `ingest_page` and the tool-list
-probe). Display number, VNC/websockify port and tool-server port are all derived from `uid - UID_BASE` (`common/ports.py`), so nothing else
+probe). Display number, VNC/websockify port and tool-server port are all derived from `uid - UID_BASE` (`spider_hoarder_browser_sdk/ports.py`), so nothing else
 is allocated or leaked.
 
 **Invariant: a uid is in exactly one state: `free`, `busy(session)` or `quarantined`.** `sessiond` (the only root process: fixed
@@ -46,16 +46,16 @@ gateway or `sessiond` files. They share a kernel and a network namespace.
 
 ## Egress
 
-Firewall rules are installed per session uid by `entrypoint.sh` (`iptables -m owner`):
+Firewall rules are installed per session uid by the browser start script (`start.py` → `firewall.py`, run as root before sessiond and the gateway drop the capability; `iptables -m owner`), built from the backend's egress-policy object (`egress.py`; each `browser_*` backend supplies one):
 
 | Instance | Policy |
 |---|---|
-| `research-clear` | Public internet only. REJECT RFC1918, link-local, CGNAT, loopback, cloud-metadata and other stack services (this is the SSRF fix for browsers). Configured DNS resolvers stay reachable. |
-| `research-tor` | ACCEPT only the session's own Tor SocksPort on `tor`; REJECT everything else. IPv6 is rejected for all session uids. |
-| `research-i2p` | ACCEPT only the session's own SOCKS port on `i2pd-<slot>`; REJECT everything else. |
+| `browser_clear` | Public internet only. REJECT RFC1918, link-local, CGNAT, loopback, cloud-metadata and other stack services (this is the SSRF fix for browsers). Configured DNS resolvers stay reachable. |
+| `browser_tor` | ACCEPT only the session's own Tor SocksPort on `browser-tor-daemon`; REJECT everything else. IPv6 is rejected for all session uids. |
+| `browser_i2p` | ACCEPT only the session's own SOCKS port on `browser-i2p-router-<slot>`; REJECT everything else. |
 
 The gateway's own `requests` downloads (non-HTML) use `netguard.py` on clear (resolve, reject non-public, pin the IP, re-check every
-redirect) and `socks5h://<router>:<port>` on Tor and I2P (`tor` / `i2pd-<slot>`; the session's own port when `ingest_page` runs inside a
+redirect) and `socks5h://<router>:<port>` on Tor and I2P (`browser-tor-daemon` / `browser-i2p-router-<slot>`; the session's own port when `ingest_page` runs inside a
 live session, so cookies and circuit match its browser, else the gateway's own port).
 
 ## I2P
@@ -63,7 +63,7 @@ live session, so cookies and circuit match its browser, else the gateway's own p
 Each router has one `type=socks` section per session slot with `keys=transient`: its own destination, tunnel pool and leaseset
 (`tunnels.conf` is generated at start, no dynamic add/remove). No outproxy: i2pd refuses clearnet names and raw IPs (SOCKS 0x08), and
 `filter_proxy.py` (`ALLOW_SUFFIX=.i2p`) refuses everything but `*.i2p` first; `fetch.py` does the same. Browsers are on the internal
-network `sessions_i2p`, so only the routers see the internet. Before a session's first use the gateway probes an eepsite
+network `browser-i2p-sessions`, so only the routers see the internet. Before a session's first use the gateway probes an eepsite
 (`I2P_PROBE_HOST`) and returns "not ready, retry" instead of hanging; Chromium's HTTPS upgrades are off and navigation timeout is 120 s.
 **Known limitation:** sessions on one replica share the router identity, exploratory tunnels and transports, so a router-level observer
 (or a hop seeing several pools) could correlate them; tunnel isolation is per destination only. Upgrade path: one router per session
@@ -89,7 +89,7 @@ See also: [Plan: Android hoarder](../implemented-plans/android-hoarder.md), [Pla
   it is a documented property, not a hole known to be exploitable.
 - Reset is in place: processes of both uids are killed, tmpfs homes swept, the emulator booted again from snapshot `clean`; `verify` then
   compares packages, accounts and `/sdcard/` with the baselines. The overlay upper layer is only wiped by the wrapper when it recreates a slot.
-- Tor slots: the `android-wrapper` (docker.sock holder) execs one fixed command, `/app/tor-route.sh`, in each tor slot every pass and reads
+- Tor slots: the backend's `android-wrapper` (docker.sock holder; one per Android backend, touching only slots with its own label) execs one fixed command, `/app/tor-route.sh`, in each tor slot every pass and reads
   only its exit code, so a compromised slot cannot steer the wrapper.
 
 ## No-media sessions
@@ -112,7 +112,7 @@ leftover session reports `opened: true`, so an MCP client that trusts it instead
 |---|---|---|
 | A | `context.route`, by resource type | `<img>`, `srcset`, favicons, CSS backgrounds, `<video>`, `<audio>`, `<object>`, web fonts: never requested |
 | D | CDP `Fetch` at response headers, documents only | navigations and iframes whose `Content-Type` is not allowed: text allowlist + `allow`, minus `deny` (deny, then allow, then default) |
-| gateway/content/fetch.py | `requests` streaming | same Content-Type rule; connection closed before the body is read |
+| `spider_hoarder_browser_sdk/fetch.py` | `requests` streaming | same Content-Type rule; connection closed before the body is read |
 
 `allow` / `deny` only affect layer D and `fetch.py`: `allow=["image/svg+xml"]` lets you navigate to an SVG, `<img src=svg>` still does not
 load. Not done: disk-cache flags, placeholders, extension denylists, relay-level filtering. **Residual risks:** a server lying about
@@ -124,4 +124,4 @@ cross-origin iframes can bypass D; the policy is only as good as the question th
 
 `consent.js` (init script in every page) auto-clicks consent buttons. Known consent-vendor hosts (Fanboy Cookiemonster list, ~670, fetched
 at image build) are blocked: on clear egress with Chromium `--host-rules`; under Tor `--host-rules` do not apply (the proxy resolves
-names), so each Tor and I2P session runs a small SOCKS5 filtering relay (`session_server/session/filter_proxy.py`) between Chromium and its SocksPort.
+names), so each Tor and I2P session runs a small SOCKS5 filtering relay (`spider_hoarder_browser_sdk/session_server/session/filter_proxy.py`) between Chromium and its SocksPort.

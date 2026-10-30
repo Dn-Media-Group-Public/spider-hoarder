@@ -18,6 +18,7 @@ Back to the [documentation index](../index.md). Open plans: [plans](../plans/ind
 - [No-media sessions (`open_session`, block media at request and header level)](no-media-sessions.md)
 - [`browser_network_request_make`, `browser_network_request` renamed `_get`](network-request-make.md)
 - [`browser_network_request_make` request types (navigation, form, xhr)](network-request-make-types.md)
+- [Pluggable backends (`BACKENDS`, entry-point registered `browser_*` / `android_*` packages, SDK + family SDKs)](backend-plugins.md)
 - [Restructure `mcp-research/` into packages, tests to `tests/`](restructure-directories.md)
 - [Agentic research MCP (independent fetch/parse server)](agentic-research-mcp.md)
 - [Newsroom browsers (original container-per-session design, superseded)](newsroom-browsers-plan.md)

@@ -4,7 +4,7 @@ part of the host tests. Run it with host networking so nginx (127.0.0.1:7297) an
 public addresses the gateways were deployed with:
 
     docker run --rm --network host -v $PWD:/app -w /app -e KC_ALICE_PASSWORD=... -e KC_BOB_PASSWORD=... \
-        --entrypoint python mcp-research:local e2e_android.py [android-clear|android-tor]
+        --entrypoint python spider-hoarder-android-clear:local e2e_android.py [android-clear|android-tor]
 
 Two throwaway Keycloak users (alice, bob) and a client with direct grants are created by `e2e_android_setup.sh`.
 Covers the slot-independent part of docs/implemented-plans/android-kvm-bringup.md stage 4 step 5. The noVNC handoff in a browser is

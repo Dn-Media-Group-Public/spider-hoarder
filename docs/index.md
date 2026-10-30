@@ -9,6 +9,7 @@ Start with the [README](../README.md) (what it is, quick start, how to use it).
 - [Jobs, storage and links](architecture/jobs-and-storage.md) — job layout, HTML conversion, terse/simplified views, signed links
 - [Authentication and live view](architecture/auth.md) — Keycloak, DCR, oauth2-proxy, human handoff
 - [Scaling and routing](architecture/scaling.md) — nginx, replica ids, Tor port slices, I2P router pairing
+- [Pluggable backends](architecture/backend-plugins.md) — descriptor, overlay contract, driver interface, writing an out-of-tree backend
 - [Android emulators](architecture/android.md) — slots, wrapper, firewall, golden snapshot, the two Android servers
 
 ## API
@@ -34,4 +35,5 @@ Start with the [README](../README.md) (what it is, quick start, how to use it).
   [More file formats](implemented-plans/more-file-formats.md),
   [No-media sessions](implemented-plans/no-media-sessions.md),
   [network request make](implemented-plans/network-request-make.md),
-  [network request make types](implemented-plans/network-request-make-types.md)
+  [network request make types](implemented-plans/network-request-make-types.md),
+  [Pluggable backends](implemented-plans/backend-plugins.md)

@@ -1,7 +1,7 @@
 # Authentication and live view
 
 ## MCP (Claude)
-Keycloak (any OIDC) JWT on `/<egress>/mcp` (`gateway/auth.py`): issuer, signature, `exp`; the `email` claim identifies the owner; if
+Keycloak (any OIDC) JWT on `/<backend>/mcp` (e.g. `/browser-tor/mcp`) (`spider_hoarder_sdk/gateway/auth.py`): issuer, signature, `exp`; the `email` claim identifies the owner; if
 `MCP_SCOPE` is set the token's `scope` must contain it (the audience is deliberately **not** checked: Claude's dynamically
 registered clients carry arbitrary audiences). RFC 9728 protected-resource metadata advertises the scope so Claude requests it.
 Claude registers itself through anonymous Dynamic Client Registration, so there is no client id/secret to configure.
@@ -25,3 +25,5 @@ See also: [Plan: oauth2-proxy DCR](../implemented-plans/oauth2-proxy-dcr.md)
 ## TLS
 TLS ends at the Google load balancer; the stack only speaks http. `PUBLIC_SCHEME` tells services which URLs users see; the LB must
 forward `X-Forwarded-Proto`; `/healthz` answers 200.
+
+See also: [Plan: Pluggable backends](../implemented-plans/backend-plugins.md) (the same auth framework serves every backend)

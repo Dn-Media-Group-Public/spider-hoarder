@@ -4,7 +4,7 @@ docs/implemented-plans/android-kvm-bringup.md stage 6 step 1. Run (same setup as
 the "two slots at once" test):
 
     docker run --rm --network host -v $PWD:/app -w /app -e KC_ALICE_PASSWORD=... -e KC_BOB_PASSWORD=... \
-        --entrypoint python mcp-research:local soak_android.py android-clear 50
+        --entrypoint python spider-hoarder-android-clear:local soak_android.py android-clear 50
 
 Prints one line per session (TSV: n, start s, calls s, end-to-ready s, container-visible errors) and a summary. Resource
 numbers (memory, overlay, processes, volumes) come from soak_sample.sh on the host, which sees the containers."""

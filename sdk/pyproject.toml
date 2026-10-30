@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spider-hoarder-sdk"
+version = "0.1.0"
+description = "spider-hoarder gateway framework: auth, jobs/blobs, session registry, MCP plumbing, driver seam"
+requires-python = ">=3.11"
+dependencies = [
+    "uvicorn[standard]",
+    "mcp==1.29.1",
+    "httpx",
+    "PyJWT[crypto]",
+    "trafilatura",
+    "markitdown[all]",
+    "fsspec",
+    "python-multipart",
+    "lxml_html_clean",
+    "markdown-it-py",
+    "linkify-it-py",
+    "msgpack",
+    "cbor2",
+    "bson",
+    "py7zr",
+    "rarfile",
+    "blackboxprotobuf",
+]
+
+[tool.setuptools.packages.find]
+include = ["spider_hoarder_sdk*"]

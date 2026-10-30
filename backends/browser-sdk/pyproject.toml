@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spider-hoarder-browser-sdk"
+version = "0.1.0"
+description = "Browser family of spider-hoarder backends: driver, session daemon, tool server, egress-policy hooks, base image"
+requires-python = ">=3.11"
+dependencies = [
+    "spider-hoarder-sdk",
+    "playwright==1.63.0",   # keep in step with image/Dockerfile (Chromium is installed from it before the packages)
+    "requests[socks]",
+]
+
+[tool.setuptools.packages.find]
+include = ["spider_hoarder_browser_sdk*"]
+
+[tool.setuptools.package-data]
+spider_hoarder_browser_sdk = ["**/*.sh", "**/*.js", "**/*.json", "**/*.json.upstream", "image/*"]

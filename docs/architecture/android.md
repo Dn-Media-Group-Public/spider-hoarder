@@ -7,27 +7,28 @@ handoff (live view) as the browsers:
 - `$PUBLIC_SCHEME://$PUBLIC_HOST/android-tor/mcp` — egress via Tor only (TCP and DNS; everything else is dropped)
 
 See also: [Plan: Android hoarder](../implemented-plans/android-hoarder.md) (decisions, discarded options, spike results).
-Off by default: set `ANDROID_CLEAR_REPLICAS` / `ANDROID_TOR_REPLICAS` above 0 in `.env`. Needs a KVM-capable x86_64 host.
+Off by default: they are the backends `android_clear` and `android_tor`; list them in `BACKENDS` in `.env` (their preflight checks for a KVM-capable x86_64 host). Each is a self-contained backend package: its own gateway, wrapper, golden snapshot, network and (tor) Tor daemon; the shared code is `backends/android-sdk`.
+See also: [Plan: Pluggable backends](../implemented-plans/backend-plugins.md)
 
 ## Components
 
 ```
-Claude ─Bearer─▶ nginx ─▶ research-android-<egress> (gateway, MODE=android)
+Claude ─Bearer─▶ nginx ─▶ android-<egress>-gateway (BACKEND=android_<egress>)
 Human ─SSO─▶ nginx ─/authz─▶ gateway ──ok──▶ nginx ─▶ android-<egress>-<k>:6080 (noVNC)
                                 │ MCP (proxied) + control verbs, X-Slot-Secret
                                 ▼
-android-wrapper ──docker.sock──▶ creates android-<egress>-1..N (plain containers on the stack's overlay networks)
+android-<egress>-wrapper ──docker.sock──▶ creates <stack>-android-<egress>-1..N (plain containers on the backend's overlay network, alias android-<egress>-<k>)
   slot k:  Xvfb ─ emulator (uid emu, firewalled, snapshot "clean") ─ adb server (uid svc, loopback only)
            toolserver :9000 (uid svc)   slotd :9001 (root, narrow caps)   x11vnc ─ websockify :6080 (only during a session)
 ```
 
 | Piece | Role | Source |
 |---|---|---|
-| `research-android-clear/tor` | The `mcp-research` image with `MODE=android`: auth, jobs, blobs, uploads, live-view authz, replica routing, reaper. No uid pool, `sessiond` or firewall. | `mcp-research/` (`slots.py`, `sessions.py`, `app.py`) |
-| `android-wrapper` | Creates and supervises the slot containers from its env alone (counts, sizes, image, secret). Holds `docker.sock`: no ports, no API, no network. | `android-wrapper/reconcile.sh` |
-| slot `android-<egress>-<k>` | One emulator, one session at a time, wiped between sessions. `/dev/kvm` and nothing else: `cap_drop ALL`, `no-new-privileges`, default seccomp, `nofile` 65536, memory-capped (`ANDROID_SLOT_MEMORY`). | `android-slot/` |
-| Android tool server | MCP server in the slot, `uiautomator2` against the local emulator. | `android-toolserver/` |
-| `tor` | Also a transparent proxy for `android_tor`: TCP → `TransPort 9040`, DNS → `DNSPort 5353`. | `tor/entrypoint.sh` |
+| `android-clear-gateway`, `android-tor-gateway` | The SDK gateway with the Android driver (light image, no Chromium): auth, jobs, blobs, uploads, live-view authz, replica routing, reaper. No uid pool, `sessiond` or firewall. | `sdk/` (`gateway/`), `backends/android-sdk/.../driver.py`, `slots.py` |
+| `android-clear-wrapper`, `android-tor-wrapper` | One per backend. Creates and supervises that backend's slot containers from its env alone (backend name, egress, counts, sizes, image, network, snapshot volume, Tor daemon host, secret); the label value includes the backend name, so a wrapper never touches another's slots. Holds `docker.sock`: no ports, no API, no network. | `backends/android-sdk/.../wrapper/reconcile.sh` |
+| slot `<stack>-android-<egress>-<k>` | One emulator, one session at a time, wiped between sessions. `/dev/kvm` and nothing else: `cap_drop ALL`, `no-new-privileges`, default seccomp, `nofile` 65536, memory-capped (`ANDROID_SLOT_MEMORY`). | `backends/android-sdk/.../slot/` |
+| Android tool server | MCP server in the slot, `uiautomator2` against the local emulator. | `backends/android-sdk/.../slot/toolserver/` |
+| `android-tor-daemon` | `android_tor`'s own Tor daemon (not shared with `browser_tor`), a transparent proxy for its slots: TCP → `TransPort 9040`, DNS → `DNSPort 5353`; subnet `ANDROID_TOR_SUBNET`. | `backends/android_tor/android_tor/daemon/` |
 
 ## Slot lifecycle
 
@@ -60,7 +61,7 @@ slot; instead it only looks at whether its own slots run. `reset` makes `slotd` 
 stopped slot (finished session, crash, or a host reboot) is recreated by the wrapper's next pass (`RECONCILE_INTERVAL`, 3 s) with an empty
 overlay upper: the guest, the emulator uid's files and anything an escaped guest could have written under `/avd` are all gone. Cost: each new
 container needs only the snapshot restore: the userdata is a read-only base plus a ~200 KB top image (see "Userdata split"), so nothing big is copied up.
-Container logs go with the container, so before recreating a slot that ended abnormally (non-zero exit, `OOMKilled`, or `slot broken` in its log) the wrapper writes the exit code, the OOM flag and the last 60 log lines to its own log (`docker service logs spider-hoarder_android-wrapper`); a normal session end stays quiet.
+Container logs go with the container, so before recreating a slot that ended abnormally (non-zero exit, `OOMKilled`, or `slot broken` in its log) the wrapper writes the exit code, the OOM flag and the last 60 log lines to its own log (`docker service logs spider-hoarder_android-<egress>-wrapper`); a normal session end stays quiet.
 See also: [Plan: Android KVM bring-up](../implemented-plans/android-kvm-bringup.md) (fix 32).
 
 `slotd` boots the slot once, when the container starts (`boot_slot()`; `health` answers `booting` meanwhile). Steps: wipe both tmpfs homes
@@ -112,9 +113,9 @@ virtualization" dialog covers the device in every live view.
 
 ## Network and egress
 
-`android_clear` (overlay, attachable) and `android_tor` (overlay, attachable, `internal`, fixed subnet `ANDROID_TOR_SUBNET`).
+`android-clear-slots` (overlay, attachable) and `android-tor-slots` (overlay, attachable, `internal`, fixed subnet `ANDROID_TOR_SUBNET`).
 The emulator's user-mode NAT makes guest traffic leave as the emulator uid's own connections, and the guest reaches the
-container's loopback as `10.0.2.2`, so the per-uid OUTPUT rules of `android-slot/firewall.sh` are the guest's firewall:
+container's loopback as `10.0.2.2`, so the per-uid OUTPUT rules of `slot/firewall.sh` are the guest's firewall:
 
 - emulator uid: loopback rejected **entirely** (tool server, adb, VNC, console; the adb server must therefore be started
   *after* the emulator, which finds it by scanning), RFC1918 (overlay peers: other slots, gateway, tor's own address),
@@ -125,8 +126,8 @@ container's loopback as `10.0.2.2`, so the per-uid OUTPUT rules of `android-slot
 
 Spike S4 verified the Tor routing; S6 the firewall (see the plan's "Spike results").
 
-**Tor slots follow the tor task's address.** A slot's default route points at the tor *task* IP (`tasks.tor`, not the service VIP), and
-that IP changes whenever the task is replaced (every deploy). `android-slot/tor-route.sh` resolves `tasks.tor`, validates a dotted quad,
+**Tor slots follow the tor task's address.** A slot's default route points at the tor *task* IP (`tasks.android-tor-daemon`, not the service VIP), and
+that IP changes whenever the task is replaced (every deploy). `slot/tor-route.sh` resolves `tasks.$TOR_HOST` (`android-tor-daemon`, set by the wrapper), validates a dotted quad,
 runs `ip route replace default via <ip>` if it differs and exits 10 when it changed (0 otherwise, also when tor does not resolve yet).
 The slot entrypoint loops it until a default route exists; afterwards the wrapper runs
 `docker exec -u root <slot> /app/tor-route.sh` for every tor slot on every pass (10 s): a fixed command, only the exit code is read
@@ -141,9 +142,9 @@ the "`NET_ADMIN` is dropped" statement applies to `slotd` and below, not to PID 
 
 ## Image and golden snapshot
 
-`deploy.sh` builds `android-slot:local` (SDK, pinned emulator, `google_apis_playstore` API `ANDROID_API`, F-Droid APK with a
+`deploy.sh` builds `spider-hoarder-android-slot:local` (context: the package-local `slot/` directory) (SDK, pinned emulator, `google_apis_playstore` API `ANDROID_API`, F-Droid APK with a
 checksum check, tool server, noVNC) and, on the host with `/dev/kvm`, runs `init-snapshot.sh` in a one-off container (`--ulimit
-nofile=65536`) on an **empty** `android_snapshot` volume:
+nofile=65536`) on an **empty** per-backend snapshot volume (`<stack>_android-<egress>-snapshot`, made by the backend's `post_build.sh`):
 
 1. AVD `slot` (pixel_6) with a fixed adb key and `hw.ramSize=$ANDROID_RAM_MB` (default 3072) appended to `config.ini`; Xvfb 800x1000.
 2. Boot (no snapshot), install F-Droid, start uiautomator2's on-device agent (`start_uiautomator()`, up to 8 retries: a slow host misses
@@ -160,11 +161,11 @@ nofile=65536`) on an **empty** `android_snapshot` volume:
 See also: [Plan: Android KVM bring-up](../implemented-plans/android-kvm-bringup.md) (W9).
 
 **Stamp and re-snapshot.** The stamp is the image id, plus ` ram=<n>` when `ANDROID_RAM_MB` is set in `.env`; `deploy.sh` skips init
-only when it equals the current value, so any change under `android-slot/` or `android-toolserver/` (new image id) or to the guest RAM
-re-makes the snapshot. Before that it scales the wrapper to 0 and **waits until no container labelled `spider-hoarder.android-slot`
-is left** (hand-run slots included: remove them first), then runs init into a scratch volume (`<stack>_android_snapshot-new`). Only when init
+only when it equals the current value, so any change under `slot/` (scripts or `slot/toolserver/`; new image id) or to the guest RAM
+re-makes the snapshot. Before that it scales that backend's wrapper to 0 and **waits until no container labelled `spider-hoarder.android-slot=<backend>/…`
+is left** (hand-run slots included: remove them first), then runs init into a scratch volume (`<stack>_android-<egress>-snapshot-new`). Only when init
 succeeds is the working volume replaced by a copy of it; a failed init keeps the old snapshot, restarts the wrapper and aborts the deploy.
-Every `deploy.sh` run, snapshot or not, force-updates the wrapper, and a stopping wrapper removes all slots: **a redeploy ends live sessions** and the slots are back ~1-2 min later.
+Every `deploy.sh` run, snapshot or not, force-updates the wrappers, and a stopping wrapper removes all slots: **a redeploy ends live sessions** and the slots are back ~1-2 min later.
 See also: [Plan: Android KVM bring-up](../implemented-plans/android-kvm-bringup.md) (fix 31).
 
 **Guest RAM and memory.** `ANDROID_RAM_MB` is baked into the snapshot: a restore reads that much from disk, and the slot needs about
@@ -197,12 +198,12 @@ four slots (2 replicas per egress) fit on the 32 GB host with at least 8 GB free
 
 Each slot mounts an overlay volume at `/avd` (golden volume read-only below, a private upper layer; mounted by `dockerd`, so no
 `SYS_ADMIN`); the wrapper creates it fresh whenever it (re)creates a slot. The wrapper recreates a slot when its spec hash changes
-(slot image id, `ANDROID_SLOT_CPUS`, `ANDROID_SLOT_MEMORY`, `ANDROID_BOOT_TIMEOUT`, kvm gid, snapshot volume, `SLOT_SECRET`, restart policy and slot spec version);
+(slot image id, `ANDROID_SLOT_CPUS`, `ANDROID_SLOT_MEMORY`, `ANDROID_BOOT_TIMEOUT`, kvm gid, snapshot volume, egress, Tor daemon host, slot network, `SLOT_SECRET`, restart policy and slot spec version);
 a stopped slot is recreated (never restarted: see "A slot is never reset in place"), a missing one created, and slots above the wanted count are removed with their volumes.
 There is no pre-logged-in Google account: a human signs in through the live view each session.
 
 ## Tools
 
-[Tool reference](../api/tools.md#android-tools). Code map: `android-toolserver/android_ui.py` (hierarchy → outline and refs,
+[Tool reference](../api/tools.md#android-tools). Code map: `slot/toolserver/android_ui.py` (hierarchy → outline and refs,
 no device access), `android_tools.py` (tool schemas and handlers), `device.py` (the one `uiautomator2` connection),
-`android_server.py` (MCP + secret gate), `export_tools.py` (writes `mcp-research/mcp_research/gateway/android-tools.json`, checked by the tests).
+`android_server.py` (MCP + secret gate), `export_tools.py` (writes `spider_hoarder_android_sdk/android-tools.json`, checked by the tests).

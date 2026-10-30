@@ -42,17 +42,21 @@ cp .env.example .env   # fill in PUBLIC_HOST, OIDC_ISSUER and the secrets
 ./deploy.sh --dev      # local: same stack + a local Keycloak, http://localhost:7297, no TLS
 ```
 
-Three MCP endpoints appear:
+What runs is the `BACKENDS` list in `.env` (space-separated; an unknown name is an error). Each backend is a pip package with its own
+compose overlay, images and helpers, and gets one MCP endpoint, named after it with dashes. In tree:
 
-- `$PUBLIC_SCHEME://$PUBLIC_HOST/tor/mcp` — browsers egress via Tor only
-- `$PUBLIC_SCHEME://$PUBLIC_HOST/clear/mcp` — direct egress, public internet only
-- `$PUBLIC_SCHEME://$PUBLIC_HOST/i2p/mcp` — i2p only, reaches `*.i2p` sites and nothing else (first request can take a minute while tunnels build)
+- `browser_tor` → `$PUBLIC_SCHEME://$PUBLIC_HOST/browser-tor/mcp` — browsers egress via Tor only
+- `browser_clear` → `/browser-clear/mcp` — direct egress, public internet only
+- `browser_i2p` → `/browser-i2p/mcp` — i2p only, reaches `*.i2p` sites and nothing else (first request can take a minute while tunnels build)
+- `android_clear` → `/android-clear/mcp`, `android_tor` → `/android-tor/mcp` — a real Android emulator instead of a browser (see [Android](#android))
 
-Optionally (see [Android](#android)) two more, giving Claude a real Android emulator instead of a browser:
-`/android-clear/mcp` and `/android-tor/mcp`.
+A disabled backend costs nothing: no images, services, networks, routes or hints. `deploy.sh` makes a virtualenv `.venv/`, installs the in-tree
+packages and whatever `BACKEND_PACKAGES` lists (out-of-tree backends), validates everything, builds the images and runs `docker stack deploy --prune`;
+the landing page at `/` lists the enabled servers. How to write a backend: [Pluggable backends](docs/architecture/backend-plugins.md).
+See also: [Plan: Pluggable backends](docs/implemented-plans/backend-plugins.md)
 
 TLS must end in front of nginx (the stack only speaks http); auth is an external OIDC provider (Keycloak). More replicas:
-`docker service scale spider-hoarder_research-clear=3`. Details: [deploying and configuring](docs/operations/deploy-and-configure.md),
+`docker service scale spider-hoarder_browser-clear-gateway=3` (or `BROWSER_CLEAR_REPLICAS` in `.env`). Details: [deploying and configuring](docs/operations/deploy-and-configure.md),
 [scaling](docs/architecture/scaling.md).
 
 ### Dev (`./deploy.sh --dev`)
@@ -61,7 +65,7 @@ Adds a throwaway Keycloak. Ports `HTTP_PORT` (7297) and 8085 must be free.
 
 | | |
 |---|---|
-| MCP | `http://localhost:7297/clear/mcp`, `http://localhost:7297/tor/mcp` |
+| MCP | `http://localhost:7297/browser-clear/mcp`, `http://localhost:7297/browser-tor/mcp` |
 | Keycloak admin console | <http://localhost:8085> — `admin` / `admin` |
 | **User that can use spider-hoarder** | **`researcher` / `researcher-pw`** |
 
@@ -87,9 +91,9 @@ of the egress you want, then sign in as the Keycloak user above (a consent scree
 
 | | URL |
 |---|---|
-| browsers via Tor | `$PUBLIC_SCHEME://$PUBLIC_HOST/tor/mcp` |
-| browsers direct | `$PUBLIC_SCHEME://$PUBLIC_HOST/clear/mcp` |
-| browsers via i2p | `$PUBLIC_SCHEME://$PUBLIC_HOST/i2p/mcp` |
+| browsers via Tor | `$PUBLIC_SCHEME://$PUBLIC_HOST/browser-tor/mcp` |
+| browsers direct | `$PUBLIC_SCHEME://$PUBLIC_HOST/browser-clear/mcp` |
+| browsers via i2p | `$PUBLIC_SCHEME://$PUBLIC_HOST/browser-i2p/mcp` |
 
 **claude.ai / Claude Desktop:** Settings → Connectors → *Add custom connector* → paste the URL →
 *Connect* → sign in.
@@ -97,16 +101,16 @@ of the egress you want, then sign in as the Keycloak user above (a consent scree
 **Claude Code:**
 
 ```bash
-claude mcp add --transport http spider-hoarder $PUBLIC_SCHEME://$PUBLIC_HOST/clear/mcp   # dev: http://localhost:7297/clear/mcp
-# then in Claude Code: /mcp -> spider-hoarder -> Authenticate (opens the Keycloak login)
+claude mcp add --transport http spider-hoarder-browser-clear $PUBLIC_SCHEME://$PUBLIC_HOST/browser-clear/mcp   # dev: http://localhost:7297/browser-clear/mcp
+# then in Claude Code: /mcp -> spider-hoarder-browser-clear -> Authenticate (opens the Keycloak login)
 ```
 
 What to tell Claude: nothing special, the server sends its own instructions. In short: it calls `open_session` first
 (media policy, asking you about security settings), then gets a private browser per conversation (`browser_*` tools), `browser_request_human_help` gives a link
 for the user to solve a CAPTCHA/login (they sign in with the same Keycloak account),
 `browser_save_page` parses and stores the current page, `ingest_page` fetches a URL in one shot,
-and `browser_end_session` frees the browser. Use `tor` for sensitive research, `clear` when a site
-blocks Tor, `i2p` for eepsites.
+and `browser_end_session` frees the browser. Use `browser-tor` for sensitive research, `browser-clear` when a site
+blocks Tor, `browser-i2p` for eepsites. (The old `/tor/mcp`, `/clear/mcp`, `/i2p/mcp` URLs are gone: re-add the server.)
 
 ## Android
 
@@ -117,9 +121,9 @@ Google/Play (there is no pre-logged-in account; sessions are wiped when they end
 `device_end_session`). F-Droid is preinstalled. On `android-tor`, Play Store is best effort (Google tends to block Tor exits) and
 only TCP and DNS leave the device.
 
-It is opt-in and needs a **KVM-capable x86_64 host** (`/dev/kvm`; on a cloud VM, nested virtualisation): set
-`ANDROID_CLEAR_REPLICAS` / `ANDROID_TOR_REPLICAS` (and `SLOT_SECRET`, `ANDROID_FDROID_URL`, `ANDROID_FDROID_SHA256`) in `.env` and run
-`./deploy.sh` on that host: it builds the slot image and makes the golden emulator snapshot there (a few minutes the first time).
+It is opt-in and needs a **KVM-capable x86_64 host** (`/dev/kvm`; on a cloud VM, nested virtualisation): add `android_clear` and/or `android_tor` to `BACKENDS` and set
+`SLOT_SECRET`, `ANDROID_FDROID_URL`, `ANDROID_FDROID_SHA256` (and `ANDROID_CLEAR_REPLICAS` / `ANDROID_TOR_REPLICAS`, default 1) in `.env`, then run
+`./deploy.sh` on that host: its preflight checks KVM, it builds the slot image and each backend makes its own golden emulator snapshot there (a few minutes the first time).
 Each emulator ("slot") serves one session at a time, takes 2 CPUs and 8 GB RAM (guest RAM `ANDROID_RAM_MB`, default 3 GB, plus ~5 GB: the emulator heap is ~2 GB; 6 GB was OOM-killed in use) and ~5 MB of disk (all slots share one ~2.8 GB golden snapshot volume; the slot image is 5.3 GB), and a server with no free slot answers "busy" at once. A slot is recreated from scratch after every session, so the next session waits for that: **65-90 s** on a VM with a fast disk (8 vCPU / 32 GB), 2-3x that when a cloud disk throttles, and minutes on a slow one; plan for 8 vCPU and 12 GB per slot (two slots fit in 24 GB, four need the whole of a 32 GB host and not four heavy sessions at once), SSD-class disk reads, and see the [measured numbers](docs/architecture/android.md#image-and-golden-snapshot). A user gets about 1.2 GB of free storage in the guest (more would let guest writes OOM-kill the emulator). Every `./deploy.sh` restarts the wrapper, which removes all slots: a redeploy ends live sessions. Chrome's first-run dialogs are dismissed in the snapshot.
 Add it to Claude like the others: `claude mcp add --transport http spider-hoarder-android-clear $PUBLIC_SCHEME://$PUBLIC_HOST/android-clear/mcp`.
 Details: [Android emulators](docs/architecture/android.md), [tool reference](docs/api/tools.md#android-tools),
@@ -127,26 +131,30 @@ Details: [Android emulators](docs/architecture/android.md), [tool reference](doc
 
 ## Tests
 
+The gateway picks its driver at import, so each package area is its own pytest process. `scripts/test.sh` runs them all; by hand
+(after `./deploy.sh` or any run that built `.venv/`, which holds all in-tree packages):
+
 ```bash
-pip install -e mcp-research
-pytest tests                                                   # host (test_toolserver.py needs Playwright + Chromium)
+.venv/bin/pytest sdk                   # framework, job store, auth, pool, driver contract of every installed backend
+.venv/bin/pytest backends/browser-sdk  # browser driver, egress/firewall rules, toolserver (test_toolserver.py needs Playwright + Chromium)
+.venv/bin/pytest backends/android-sdk  # android driver and slot backend (no KVM needed)
+.venv/bin/pytest scripts               # deploy tool: descriptors, overlay contract, build plan, hooks
 # needs root + the image's tools; run with the deployed capability set, plain root hides permission bugs:
 docker run --rm --cap-drop ALL --cap-add NET_ADMIN --cap-add SETUID --cap-add SETGID --cap-add CHOWN --cap-add KILL \
-  --cap-add DAC_OVERRIDE --cap-add FOWNER -v $PWD/tests:/tests -w /tests --entrypoint python mcp-research:local live/test_sessiond.py
+  --cap-add DAC_OVERRIDE --cap-add FOWNER -v $PWD/tests:/tests -w /tests --entrypoint python spider-hoarder-browser-clear:local live/test_sessiond.py
 # end to end (stub Keycloak inside one container; restart it per run, the gateway caches the signing key):
-docker run -d --name e2e --add-host nginx:172.17.0.1 <same caps> -e EGRESS=clear -e GATEWAY_PORT=8000 \
+docker run -d --name e2e --add-host nginx:172.17.0.1 <same caps> -e BACKEND=browser_clear -e GATEWAY_PORT=8000 \
   -e PUBLIC_HOST=localhost:8000 -e PUBLIC_SCHEME=https -e OIDC_ISSUER=http://127.0.0.1:9999/realms/r \
-  -e BLOB_TOKEN_SECRET=x -v $PWD/tests:/tests mcp-research:local
+  -e BLOB_TOKEN_SECRET=x -v $PWD/tests:/tests spider-hoarder-browser-clear:local
 docker exec -u 1000 -w /tests e2e python live/e2e_auth.py
 ```
 
-Android (host, no KVM needed; `test_android.py` must run on its own because it sets `MODE=android`):
+Android (host, no KVM needed):
 
 ```bash
-(cd mcp-research && python test_android.py)
-(cd android-toolserver && python test_android_toolserver.py)   # if you change the tools: python export_tools.py first
-(cd android-slot && python test_slot.py) && (cd android-wrapper && python test_reconcile.py)
-# on a KVM host, inside a research-android-* container as uid 1000: python smoke_android.py
+(cd backends/android-sdk/spider_hoarder_android_sdk/slot/toolserver && python test_android_toolserver.py)   # if you change the tools: python export_tools.py first
+(cd backends/android-sdk/spider_hoarder_android_sdk/slot && python test_slot.py) && (cd ../wrapper && python test_reconcile.py)
+# on a KVM host, inside an android-*-gateway container as uid 1000: python smoke_android.py
 # on a KVM host, against the deployed --dev stack through nginx (real Keycloak tokens; see the docstrings for the docker run line):
 #   tests/live/e2e_android_setup.sh; python e2e_android.py [android-clear|android-tor]; python e2e_android_view.py; python e2e_android_lifecycle.py <phase>
 ```

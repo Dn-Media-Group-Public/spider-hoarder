@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "browser_i2p"
+version = "0.1.0"
+description = "Browser sessions that reach only *.i2p through i2pd"
+requires-python = ">=3.11"
+dependencies = ["spider-hoarder-browser-sdk"]
+
+[project.entry-points."spider_hoarder.backends"]
+browser_i2p = "browser_i2p.descriptor:descriptor"
+
+[tool.setuptools.packages.find]
+include = ["browser_i2p*"]
+
+[tool.setuptools.package-data]
+browser_i2p = ["docker-compose.yml", "image/*", "*/Dockerfile", "*/*.sh", "*/*.conf"]

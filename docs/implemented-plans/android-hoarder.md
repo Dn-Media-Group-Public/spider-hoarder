@@ -1,6 +1,6 @@
 # Plan: Android hoarder (`spider-hoarder-android-clear` / `-tor`)
 
-Status: implemented (see "Implementation notes" at the end for where the build differs from the text above, and what was
+Status: implemented, and since refactored into the pluggable `android_clear` / `android_tor` backends ([Plan: Pluggable backends](backend-plugins.md): the text below describes the original layout with `research-android-*`, `android-wrapper`, `MODE=android`; current names and paths are in [Android emulators](../architecture/android.md)). (see "Implementation notes" at the end for where the build differs from the text above, and what was
 not run on a real emulator). All spikes S1-S6 done (see "Spike results"); several design points were corrected by them. Builds on [Browser sessions](../implemented-plans/browser-sessions-plan.md),
 [Scale research containers](../implemented-plans/research-replicas.md) and
 [Tool file outputs become jobs](../implemented-plans/file-outputs-as-jobs.md).
