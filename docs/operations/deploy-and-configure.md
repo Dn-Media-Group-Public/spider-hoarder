@@ -12,7 +12,7 @@ unknown or not-installed name is a hard error. `deploy.sh` then, in order:
 2. builds a wheel of every in-tree package (`sdk/`, `backends/*`) and of every spec in `BACKEND_PACKAGES` (space-separated pip requirement specs, e.g. `git+ssh://...`, for
    out-of-tree backends) into `.build/wheels`, and installs them `--no-deps` (plus `pyyaml`, which the overlay check uses);
 3. `scripts/spider_hoarder.py validate` (descriptors well formed, overlays obey the [overlay contract](../architecture/backend-plugins.md)), then `preflight` (each backend's host checks, e.g. `/dev/kvm`);
-4. builds `oauth2-proxy-dcr:local` and every image of the enabled backends, once per tag (`docker build --build-context wheels=.build/wheels`: the Dockerfiles `COPY --from=wheels`; a Dockerfile `ARG` is fed from the environment variable of the same name);
+4. builds `oauth2-proxy-dcr:local`, `spider-hoarder-nginx:local` (config, aliases and landing page baked in, `nginx/Dockerfile`) and every image of the enabled backends, once per tag (`docker build --build-context wheels=.build/wheels`: the Dockerfiles `COPY --from=wheels`; a Dockerfile `ARG` is fed from the environment variable of the same name);
 5. inits Swarm, runs each backend's `post_build` hook, merges the variables the backends derive (`ANDROID_<X>_SLOTS`, ...) and builds `BACKEND_SERVERS`
    (a JSON list of every enabled backend's title and description: each gateway container has only its own backend installed, so this is how it learns the others);
 6. generates the static landing page `.build/landing.html` (`claude mcp add` lines and each backend's title and description), and in `--dev` the dev overlay;

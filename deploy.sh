@@ -99,6 +99,10 @@ for a in ${ALIASES:-}; do
   [[ "$a" =~ ^[A-Za-z0-9_-]+=[A-Za-z0-9_-]+$ ]] || { echo "bad ALIASES entry: $a (want old=new)" >&2; exit 1; }
   printf '%s %s;\n' "${a%%=*}" "${a#*=}" | tr _ - >> .build/aliases.map
 done
+# nginx image with the config baked in: not pinned to a node
+rm -rf .build/nginx && mkdir -p .build/nginx
+cp nginx/Dockerfile nginx.conf.template .build/aliases.map .build/landing.html .build/nginx/
+$TOOL build-image spider-hoarder-nginx:local .build/nginx
 FILES=(-c docker-compose.yml)
 if [ "$DEV_KC" -eq 1 ]; then
   FILES+=(-c docker-compose.keycloak.yml)

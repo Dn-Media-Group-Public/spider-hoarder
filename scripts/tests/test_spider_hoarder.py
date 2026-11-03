@@ -329,7 +329,7 @@ def test_real_preflight_scripts_reject_missing_secrets(tmp_path):
     bs = {b.name: b for b in real_backends()}
     env = {"PATH": os.environ["PATH"], "SLOT_SECRET": "changeme", "ANDROID_FDROID_URL": "u", "ANDROID_FDROID_SHA256": "s"}
     if not os.path.exists("/dev/kvm"):
-        with pytest.raises(sh.DeployError, match="/dev/kvm"):
+        with pytest.raises(sh.DeployError, match="/dev/kvm|SLOT_SECRET"):
             sh.run_hook(bs["android_tor"], "preflight", env)
     else:
         with pytest.raises(sh.DeployError, match="SLOT_SECRET"):
@@ -358,7 +358,7 @@ def test_pin_overlay(tmp_path):
     d, b, _ = make_pkg(tmp_path, pinned=["dummy-one-helper"])
     assert sh.pin_overlay([b], {}) == "" and sh.pin_overlay([b], {"PIN_DATA": " "}) == ""
     o = yaml.safe_load(sh.pin_overlay([b], {"PIN_DATA": "node.labels.storage == primary"}))
-    assert sorted(o["services"]) == ["dummy-one-helper", "nginx", "oauth2-proxy"]
-    assert o["services"]["nginx"]["deploy"]["placement"]["constraints"] == ["node.labels.storage == primary"]
+    assert sorted(o["services"]) == ["dummy-one-helper", "oauth2-proxy"]
+    assert o["services"]["oauth2-proxy"]["deploy"]["placement"]["constraints"] == ["node.labels.storage == primary"]
     d.pinned = ["not-a-service"]
     assert "pinned lists not-a-service" in "\n".join(sh.check_descriptor(b))

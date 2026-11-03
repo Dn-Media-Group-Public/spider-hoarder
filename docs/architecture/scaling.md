@@ -21,7 +21,7 @@ files and jobs stay per replica; Swarm only (`tasks.<service>` DNS, `{{.Task.Slo
   router's IP; if `browser-i2p-router-k` gets a new IP the replica exits and Swarm restarts it, rebuilding the rules (sessions on it are lost).
   See also: [Plan: I2P egress](../implemented-plans/i2p-egress.md)
 - **Consequences**: a `job_id` from another replica is not readable ("lives on another replica"); a restarted/rescheduled replica loses
-  its sessions and links (new IP); `nginx.conf.template` and the generated landing page are bind-mounted, so nginx must stay on the node that has them (`PIN_DATA`, below).
+  its sessions and links (new IP); nginx has no node-local state: `deploy.sh` builds `spider-hoarder-nginx` with `nginx.conf.template`, the aliases map and the landing page baked in (`nginx/Dockerfile`), so it runs on any node.
   Upgrade path for shared files: shared blob storage (`RESEARCH_BLOB_URL` is already a URL).
 
 ## Android replicas
@@ -38,7 +38,7 @@ Capacity is bounded by the KVM node, not by Swarm: each slot is a 2-CPU / 6 GB c
 All opt-in through `.env`; unset keeps the single-node behaviour (`:local` images, no constraints).
 
 - **Registry**: `IMAGE_PREFIX` (e.g. `localhost:5000/`) makes every locally built image `${IMAGE_PREFIX}<name>:${IMAGE_TAG}` (tag defaults to the git revision), pushed after the build; deploys then resolve images and skip the forced restart.
-- **Pinning**: `PIN_DATA` (e.g. `node.labels.storage == primary`) constrains the services with node-local state: base `nginx`, `oauth2-proxy`, and each backend's descriptor `pinned` services (none by default: the Tor/I2P daemons only cache, they cold-start fine elsewhere). `deploy.sh` generates `.build/docker-compose.pin.yml` only when it is set. Gateway replicas stay schedulable anywhere (routing by task IP over the overlay; blobs are lost on reschedule, as before).
+- **Pinning**: `PIN_DATA` (e.g. `node.labels.storage == primary`) constrains the services with node-local state: base `oauth2-proxy` (its DCR registration volume), and each backend's descriptor `pinned` services (none by default: the Tor/I2P daemons only cache, they cold-start fine elsewhere). `deploy.sh` generates `.build/docker-compose.pin.yml` only when it is set. Gateway replicas stay schedulable anywhere (routing by task IP over the overlay; blobs are lost on reschedule, as before).
 - **Android**: wrappers go to the nodes matching `PIN_KVM`, one per node (`ANDROID_KVM_NODES`); see [Android](android.md).
 
 See also: [Plan: Multi-node swarm support](../implemented-plans/multi-node.md)

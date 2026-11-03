@@ -9,7 +9,7 @@ descriptors with importlib.metadata and uses PyYAML for the overlay check; see d
   preflight          run each backend's preflight script (non-zero = abort, with its stderr)
   build WHEELS       docker build (and push, when IMAGE_PREFIX is set) every image of the enabled backends, once per tag
   build-image TAG CTX  the same for one image outside the descriptors (deploy.sh's oauth2-proxy-dcr)
-  pin FILE           placement overlay: base nginx/oauth2-proxy and every enabled backend's `pinned` services on $PIN_DATA
+  pin FILE           placement overlay: base oauth2-proxy and every enabled backend's `pinned` services on $PIN_DATA
                      (writes nothing when PIN_DATA is empty)
   post-build         run each backend's post_build script
   env                `export K=V` lines: every backend's env(environ) result, BACKENDS and BACKEND_SERVERS
@@ -34,7 +34,7 @@ GROUP = "spider_hoarder.backends"
 NAME_RE = re.compile(r"^[a-z][a-z0-9]*(_[a-z0-9]+)+$")
 MEMBERS = ("name", "title", "description", "compose", "builds", "services", "runtime")  # required; the rest are optional
 OPTIONAL = ("preflight", "post_build", "env")  # and `pinned`: services with node-local state, a subset of `services`
-BASE_PINNED = ("nginx", "oauth2-proxy")  # the base compose file's services with local state
+BASE_PINNED = ("oauth2-proxy",)  # the base compose file's services with local state
 SHARED_NETWORKS = ("public", "auth")  # the base compose file's networks, usable by overlays
 
 
