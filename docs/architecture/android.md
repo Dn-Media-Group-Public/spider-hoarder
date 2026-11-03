@@ -143,8 +143,8 @@ the "`NET_ADMIN` is dropped" statement applies to `slotd` and below, not to PID 
 ## Image and golden snapshot
 
 `deploy.sh` builds `spider-hoarder-android-slot:local` (context: the package-local `slot/` directory) (SDK, pinned emulator, `google_apis_playstore` API `ANDROID_API`, F-Droid APK with a
-checksum check, tool server, noVNC) and, on the host with `/dev/kvm`, runs `init-snapshot.sh` in a one-off container (`--ulimit
-nofile=65536`) on an **empty** per-backend snapshot volume (`<stack>_android-<egress>-snapshot`, made by the backend's `post_build.sh`):
+checksum check, tool server, noVNC) and, each **wrapper**, on its own KVM node at start, runs `init-snapshot.sh` in a one-off container (`--ulimit
+nofile=65536`) on an **empty** per-backend snapshot volume (`<stack>_android-<egress>-snapshot`) when the volume's stamp is not the slot image id (+ `ANDROID_RAM_MB`); its slots are removed first, and a failed init keeps the old snapshot (the task restarts):
 
 1. AVD `slot` (pixel_6) with a fixed adb key and `hw.ramSize=$ANDROID_RAM_MB` (default 3072) appended to `config.ini`; Xvfb 800x1000.
 2. Boot (no snapshot), install F-Droid, start uiautomator2's on-device agent (`start_uiautomator()`, up to 8 retries: a slow host misses
@@ -207,3 +207,9 @@ There is no pre-logged-in Google account: a human signs in through the live view
 [Tool reference](../api/tools.md#android-tools). Code map: `slot/toolserver/android_ui.py` (hierarchy → outline and refs,
 no device access), `android_tools.py` (tool schemas and handlers), `device.py` (the one `uiautomator2` connection),
 `android_server.py` (MCP + secret gate), `export_tools.py` (writes `spider_hoarder_android_sdk/android-tools.json`, checked by the tests).
+
+## Several KVM nodes
+
+`PIN_KVM` (default `node.role == manager`) selects the KVM nodes (label them: `docker node update --label-add kvm=true <node>`; each needs `/dev/kvm`, x86_64, the `kvm` group or `ANDROID_KVM_GID`). Each backend's wrapper runs with `replicas: ANDROID_KVM_NODES`, one per node. Wrapper `w` (`WRAPPER_SLOT`, the task slot) owns slots `(w-1)*P+1 .. min(total, w*P)`, `P = ceil(total / ANDROID_KVM_NODES)` (descriptor `env()` -> `ANDROID_*_SLOTS_PER_WRAPPER`), the same slicing the gateways use for `REPLICA_SLOT`; it removes slots outside its range on its own node. Slots are reached by overlay alias `<backend>-<k>` on the attachable slot network, from any node. The snapshot (host-CPU dependent, node-local volume) is made by each wrapper, and the `/dev/kvm` and x86_64 checks run in the wrapper (through its node's docker); a failure is in its log. Slot and wrapper images come from the registry (`IMAGE_PREFIX`) on every KVM node. `android_tor` slots on other nodes than the daemon need VXLAN to carry `ANDROID_TOR_SUBNET`.
+
+See also: [Plan: Multi-node swarm support](../implemented-plans/multi-node.md)

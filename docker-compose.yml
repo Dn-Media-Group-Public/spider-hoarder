@@ -25,7 +25,7 @@ services:
 
   # Human SSO for the live view (MCP bearer tokens are verified by the gateways)
   oauth2-proxy:
-    image: oauth2-proxy-dcr:local   # built by deploy.sh; registers itself via DCR (oauth2-proxy/entrypoint.sh)
+    image: ${IMAGE_PREFIX:-}oauth2-proxy-dcr:${IMAGE_TAG:-local}   # built by deploy.sh; registers itself via DCR (oauth2-proxy/entrypoint.sh)
     deploy: { replicas: 1, restart_policy: { condition: any } }
     environment:
       OAUTH2_PROXY_PROVIDER: keycloak-oidc

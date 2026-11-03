@@ -1,7 +1,7 @@
 # android_tor: Android emulator slots whose egress is Tor only.
 # Overlay contract (docs/architecture/backend-plugins.md): every service, network and volume is prefixed `android-tor-`; the gateway is
 # `android-tor-gateway`; it sets BACKEND and BACKENDS; nginx gets this backend's slot network.
-# Needs a KVM host (preflight); see docs/architecture/android.md.
+# Needs KVM hosts (PIN_KVM; the wrapper checks); see docs/architecture/android.md.
 version: "3.8"
 
 x-gateway-env: &gateway-env
@@ -30,7 +30,7 @@ services:
   # Same code path as the browser gateways, but no uid pool, sessiond or firewall here (the sessions live in the slot
   # containers the wrapper makes), so only what setpriv needs.
   android-tor-gateway:
-    image: spider-hoarder-android-tor:local
+    image: ${IMAGE_PREFIX:-}spider-hoarder-android-tor:${IMAGE_TAG:-local}
     cap_drop: [ALL]
     cap_add: [SETUID, SETGID, SETPCAP]
     volumes:
@@ -48,7 +48,7 @@ services:
   # Creates and supervises this backend's slot containers (android-tor-N) from env alone: it holds docker.sock, so it has no ports,
   # no network and no API (reconcile.sh header). Runs on the KVM node. Only ever touches slots with its own label value.
   android-tor-wrapper:
-    image: spider-hoarder-android-wrapper:local
+    image: ${IMAGE_PREFIX:-}spider-hoarder-android-wrapper:${IMAGE_TAG:-local}
     read_only: true
     cap_drop: [ALL]
     stop_grace_period: 120s   # SIGTERM removes every slot
@@ -56,8 +56,12 @@ services:
       STACK_NAME: ${STACK_NAME}
       BACKEND: android-tor
       ANDROID_EGRESS: tor
-      ANDROID_SLOTS: ${ANDROID_TOR_SLOTS:-0}   # replicas x ANDROID_SLOTS_PER_REPLICA (the descriptor's env())
-      ANDROID_SLOT_IMAGE: spider-hoarder-android-slot:local
+      ANDROID_SLOTS: ${ANDROID_TOR_SLOTS:-0}   # replicas x ANDROID_SLOTS_PER_REPLICA (the descriptor's env()): all wrappers together
+      ANDROID_SLOTS_PER_WRAPPER: ${ANDROID_TOR_SLOTS_PER_WRAPPER:-0}   # ceil(slots / ANDROID_KVM_NODES); wrapper w owns the w-th slice
+      WRAPPER_SLOT: "{{.Task.Slot}}"   # expanded per task by stack deploy
+      ANDROID_API: ${ANDROID_API:-34}   # the golden snapshot is made by the wrapper (reconcile.sh)
+      ANDROID_RAM_MB: ${ANDROID_RAM_MB:-}
+      ANDROID_SLOT_IMAGE: ${IMAGE_PREFIX:-}spider-hoarder-android-slot:${IMAGE_TAG:-local}
       ANDROID_SLOT_NETWORK: ${STACK_NAME}_android-tor-slots
       ANDROID_SNAPSHOT_VOLUME: ${STACK_NAME}_android-tor-snapshot
       ANDROID_TOR_HOST: android-tor-daemon
@@ -70,16 +74,17 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - /etc/group:/host-etc-group:ro   # the kvm group's gid (Swarm cannot map devices; the wrapper does it per slot)
     deploy:
-      replicas: 1
+      replicas: ${ANDROID_KVM_NODES:-1}   # one per KVM node (PIN_KVM matches them all)
       restart_policy: { condition: any }
       placement:
-        constraints: ["${ANDROID_PLACEMENT:-node.role == manager}"]
+        constraints: ["${PIN_KVM:-node.role == manager}"]
+        max_replicas_per_node: 1
     networks: [android-tor-wrapper-net]
 
   # This backend's own Tor daemon, as a transparent proxy for the slots (no SocksPorts: nothing else uses it): on the slot
   # network every TCP connection is redirected to TransPort and DNS to DNSPort; nothing else is forwarded.
   android-tor-daemon:
-    image: spider-hoarder-android-tor-daemon:local
+    image: ${IMAGE_PREFIX:-}spider-hoarder-android-tor-daemon:${IMAGE_TAG:-local}
     deploy: { replicas: 1, restart_policy: { condition: any } }
     # NET_ADMIN: the entrypoint's redirect rules for the slots (then setpriv drops everything for tor)
     cap_drop: [ALL]

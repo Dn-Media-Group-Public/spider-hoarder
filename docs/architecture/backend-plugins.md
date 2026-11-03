@@ -59,13 +59,16 @@ browser_tor = "browser_tor.descriptor:descriptor"
 | `builds` | ordered `(image tag, context dir)` pairs; deduped by tag, first wins, so a family base image builds once. The context needs a `Dockerfile` |
 | `services` | services force-restarted after deploy (prefixed names, they must exist in the overlay) |
 | `preflight` | optional shell script; host checks (`/dev/kvm`, x86_64, required variables); non-zero exit aborts the deploy with its stderr |
-| `post_build` | optional shell script; after the images are built, before the stack is deployed (the Android golden snapshot) |
+| `post_build` | optional shell script; after the images are built, before the stack is deployed (none in-tree now: the Android snapshot is made by the wrapper) |
+| `pinned` | optional list of `services` with node-local state; placed on `PIN_DATA` when set (`pin` command). Not the Android wrappers: `PIN_KVM` places those |
 | `env(environ)` | optional pure function returning derived variables as `str -> str` (Android slot totals from replicas) |
 | `runtime` | `module:Object` import string of the driver; imported lazily, inside the container only |
 
 Hooks run with `sh` and get the deploy environment plus `BACKEND` (canonical), `BACKEND_HYPHEN` and `STACK_NAME`.
 
 ### Images
+
+Descriptors name `builds` tags as `<name>:local`; the deploy tool builds and pushes `${IMAGE_PREFIX}<name>:${IMAGE_TAG}` (prefix empty, tag `local` by default), which is what the compose files say. See also: [Plan: Multi-node swarm support](../implemented-plans/multi-node.md)
 
 Every backend has a thin image on a **family base**: `FROM` the family base tag, install only the backend's own package. The
 browser base holds Chromium, Xvfb/VNC, the session daemon, the SDK and the browser-sdk. The Android gateway image is light (SDK and
@@ -104,10 +107,10 @@ themselves never name a sibling.
 1. load `.env`; create `.venv/` with `virtualenv` if missing; build wheels (`sdk/`, `backends/*`, `BACKEND_PACKAGES`) and `pip install --no-deps` them
 2. `validate`: every name in `BACKENDS` is installed (unknown is a hard error), descriptors and overlays are well formed
 3. `preflight` of each backend, then the `docker build` of every image (deduped)
-4. `post_build` of each backend
+4. `post_build` of each backend (and, with `IMAGE_PREFIX`, the images are pushed as they are built)
 5. `env`: merge every `env()` result, `BACKENDS` and `BACKEND_SERVERS` into the deploy environment
 6. generate the landing page (`.build/landing.html`, a static file bind-mounted into nginx: the `claude mcp add` lines and each title and description) and the `-c` list
-7. `docker stack deploy --prune`, then force-restart `nginx` and every descriptor's `services`
+7. `docker stack deploy --prune` (with `.build/docker-compose.pin.yml` when `PIN_DATA` is set), then, without `IMAGE_PREFIX`, force-restart `nginx` and every descriptor's `services`
 
 `--prune` removes the services of a backend that left `BACKENDS`. Its networks and volumes are not deleted (remove them by hand when
 you are sure). nginx has no backend list: the location regexes capture `[a-z0-9-]+` and proxy to `tasks.<prefix>-gateway`, so an unknown

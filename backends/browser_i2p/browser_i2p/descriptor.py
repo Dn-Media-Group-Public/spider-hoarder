@@ -27,6 +27,7 @@ descriptor = SimpleNamespace(
     services=['browser-i2p-gateway', 'browser-i2p-router', 'browser-i2p-seed'],
     preflight=None,
     post_build=None,
+    pinned=['browser-i2p-router', 'browser-i2p-seed'],
     env=None,
     runtime="browser_i2p.runtime:driver",
 )

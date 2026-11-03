@@ -13,7 +13,7 @@ unknown or not-installed name is a hard error. `deploy.sh` then, in order:
    out-of-tree backends) into `.build/wheels`, and installs them `--no-deps` (plus `pyyaml`, which the overlay check uses);
 3. `scripts/spider_hoarder.py validate` (descriptors well formed, overlays obey the [overlay contract](../architecture/backend-plugins.md)), then `preflight` (each backend's host checks, e.g. `/dev/kvm`);
 4. builds `oauth2-proxy-dcr:local` and every image of the enabled backends, once per tag (`docker build --build-context wheels=.build/wheels`: the Dockerfiles `COPY --from=wheels`; a Dockerfile `ARG` is fed from the environment variable of the same name);
-5. inits Swarm, runs each backend's `post_build` (Android: the golden snapshot), merges the variables the backends derive (`ANDROID_<X>_SLOTS`, ...) and builds `BACKEND_SERVERS`
+5. inits Swarm, runs each backend's `post_build` hook, merges the variables the backends derive (`ANDROID_<X>_SLOTS`, ...) and builds `BACKEND_SERVERS`
    (a JSON list of every enabled backend's title and description: each gateway container has only its own backend installed, so this is how it learns the others);
 6. generates the static landing page `.build/landing.html` (`claude mcp add` lines and each backend's title and description), and in `--dev` the dev overlay;
 7. `docker stack deploy --prune` of the base `docker-compose.yml` plus each backend's overlay, then force-updates `nginx` and every backend's listed services so fresh `:local` images, an edited
@@ -45,10 +45,9 @@ The size/time limits `MAX_PARSE_BYTES`, `MAX_ARCHIVE_BYTES`, `MAX_ARCHIVE_MEMBER
 through; add them to the `x-gateway-env` block of the backend's overlay (`backends/<name>/<name>/docker-compose.yml`) to change the defaults.
 
 ## Android
-Put `android_clear` and/or `android_tor` in `BACKENDS`. Their preflight then requires `/dev/kvm`, an x86_64 host and `SLOT_SECRET`, `ANDROID_FDROID_URL`,
+Put `android_clear` and/or `android_tor` in `BACKENDS`. Their preflight requires `SLOT_SECRET`, `ANDROID_FDROID_URL`,
 `ANDROID_FDROID_SHA256` (placeholders refused); `deploy.sh` builds `spider-hoarder-android-wrapper:local`, `spider-hoarder-android-slot:local` (its `ARG`s `ANDROID_API`, `ANDROID_FDROID_URL`, ... come from `.env`) and the light gateway
-base; each backend's `post_build` makes **its own** golden snapshot on this host (volume `<stack>_android-<egress>-snapshot`; skipped while the volume's stamp matches the image; a new image stops that backend's wrapper,
-so its slots go, and starts from an empty volume); and each backend's own wrapper creates its slots on this node (`ANDROID_PLACEMENT`): containers `<stack>-android-<egress>-<k>` on the network
+base; each backend's own wrapper checks `/dev/kvm` and x86_64 on its node, makes **its own** golden snapshot there at start (volume `<stack>_android-<egress>-snapshot`; skipped while the stamp matches the image; a few minutes the first time) and creates its slots on the `PIN_KVM` nodes (`ANDROID_KVM_NODES` wrappers, one per node): containers `<stack>-android-<egress>-<k>` on the network
 `<stack>_android-<egress>-slots`. Slot capacity per backend is replicas (`ANDROID_CLEAR_REPLICAS` / `ANDROID_TOR_REPLICAS`, 1 when unset) × `ANDROID_SLOTS_PER_REPLICA`
 (the descriptor derives `ANDROID_CLEAR_SLOTS` / `ANDROID_TOR_SLOTS`); each slot takes `ANDROID_SLOT_CPUS` (2) and `ANDROID_SLOT_MEMORY` (8g). With both backends enabled there are two wrappers (two holders of the container socket) and two snapshots.
 See also: [Android emulators](../architecture/android.md), [Plan: Android hoarder](../implemented-plans/android-hoarder.md),
@@ -72,7 +71,7 @@ gets the emulator OOM-killed; 5g worked. The device `/dev/kvm` must be readable 
 | `ANDROID_HELP_TIMEOUT` (3600 s) | max time a pending `device_request_human_help` suspends the idle timer (not in `.env.example`; read by the gateway) |
 | `SLOT_SECRET` | shared by the gateways and the slots |
 | `ANDROID_FDROID_URL`, `ANDROID_FDROID_SHA256`, `ANDROID_CMDLINE_TOOLS_SHA256` | pinned downloads, verified at build |
-| `ANDROID_PLACEMENT`, `ANDROID_SLOT_CPUS`, `ANDROID_SLOT_MEMORY`, `ANDROID_KVM_GID`, `ANDROID_TOR_SUBNET` | wrapper placement, slot size, kvm gid override, subnet of `android_tor`'s Tor-only slot network (also used by its own `android-tor-daemon`) |
+| `ANDROID_SLOT_CPUS`, `ANDROID_SLOT_MEMORY`, `ANDROID_KVM_GID`, `ANDROID_TOR_SUBNET` | slot size, kvm gid override, subnet of `android_tor`'s Tor-only slot network (also used by its own `android-tor-daemon`) |
 
 ## Dev mode
 `./deploy.sh --dev` adds `docker-compose.dev.yml`: a throwaway Keycloak (`start-dev`), a `keycloak-init` job running
@@ -111,3 +110,9 @@ See also: [Plan: Android KVM bring-up](../implemented-plans/android-kvm-bringup.
 Slot internals not configurable from `.env`: `TOOLSERVER_TIMEOUT` (180 s, `slotd` waiting for the tool server), `--ulimit nofile=65536:65536`
 (required: with Docker's default the emulator stalls), pids limit 4096, tmpfs sizes. Tor slots: the wrapper re-points each slot's
 default route to the current `android-tor-daemon` task every pass (10 s), see [Android emulators](../architecture/android.md).
+
+## Multi-node swarm
+
+Optional, all unset by default (see `.env.example`): `IMAGE_PREFIX` / `IMAGE_TAG` (registry; images pushed, tag defaults to the git revision), `PIN_DATA` (placement constraint for services with local state), `PIN_KVM` (constraint selecting the Android nodes, replaces `ANDROID_PLACEMENT`) and `ANDROID_KVM_NODES` (how many match). Label nodes with `docker node update --label-add <k>=<v> <node>`. Node join, NAT, load balancer and the registry: `eai-docs/adding-a-second-node.md`. Design: [scaling](../architecture/scaling.md#multi-node-swarm), [Android](../architecture/android.md#several-kvm-nodes).
+
+See also: [Plan: Multi-node swarm support](../implemented-plans/multi-node.md)

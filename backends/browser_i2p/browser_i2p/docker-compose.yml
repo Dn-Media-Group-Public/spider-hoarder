@@ -25,7 +25,7 @@ services:
     networks: [browser-i2p-sessions]
 
   browser-i2p-gateway:
-    image: spider-hoarder-browser-i2p:local
+    image: ${IMAGE_PREFIX:-}spider-hoarder-browser-i2p:${IMAGE_TAG:-local}
     cap_drop: [ALL]
     # NET_ADMIN: the start script's firewall only, dropped before sessiond/gateway start.
     # The rest is sessiond's (setuid/setgid/chown/kill, DAC_OVERRIDE+FOWNER to sweep session files).
@@ -46,7 +46,7 @@ services:
 
   # One router per gateway replica: replica k talks to browser-i2p-router-k (hostname from the task slot, overlay DNS).
   browser-i2p-router:
-    image: spider-hoarder-browser-i2p-router:local
+    image: ${IMAGE_PREFIX:-}spider-hoarder-browser-i2p-router:${IMAGE_TAG:-local}
     hostname: "browser-i2p-router-{{.Task.Slot}}"
     deploy:
       replicas: ${BROWSER_I2P_REPLICAS:-1}
@@ -61,7 +61,7 @@ services:
 
   # Warm netDb served as snapshot.tgz so the routers above start fast; falls back to the public reseed if down.
   browser-i2p-seed:
-    image: spider-hoarder-browser-i2p-seed:local
+    image: ${IMAGE_PREFIX:-}spider-hoarder-browser-i2p-seed:${IMAGE_TAG:-local}
     deploy: { replicas: 1, restart_policy: { condition: any } }
     environment:
       I2P_SNAPSHOT_INTERVAL: ${I2P_SNAPSHOT_INTERVAL:-1800}

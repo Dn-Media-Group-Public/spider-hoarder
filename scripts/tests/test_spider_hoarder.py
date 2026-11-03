@@ -334,3 +334,31 @@ def test_real_preflight_scripts_reject_missing_secrets(tmp_path):
     else:
         with pytest.raises(sh.DeployError, match="SLOT_SECRET"):
             sh.run_hook(bs["android_tor"], "preflight", env)
+
+
+def test_image_ref_and_push(tmp_path):
+    assert sh.image_ref("a-b:local", {}) == "a-b:local"
+    assert sh.image_ref("a-b:local", {"IMAGE_PREFIX": "localhost:5000/", "IMAGE_TAG": "abc"}) == "localhost:5000/a-b:abc"
+    d, b, _ = make_pkg(tmp_path)
+    calls = []
+
+    def run(cmd, **kw):
+        calls.append(cmd)
+        return types.SimpleNamespace(returncode=0)
+
+    sh.build([b], "/w", {}, run)
+    assert [c[1] for c in calls] == ["build"]  # no registry: no push
+    calls.clear()
+    sh.build([b], "/w", {"IMAGE_PREFIX": "r/", "IMAGE_TAG": "t1"}, run)
+    assert calls[0][calls[0].index("-t") + 1] == "r/img-a:t1" and calls[1] == ["docker", "push", "r/img-a:t1"]
+
+
+def test_pin_overlay(tmp_path):
+    import yaml
+    d, b, _ = make_pkg(tmp_path, pinned=["dummy-one-helper"])
+    assert sh.pin_overlay([b], {}) == "" and sh.pin_overlay([b], {"PIN_DATA": " "}) == ""
+    o = yaml.safe_load(sh.pin_overlay([b], {"PIN_DATA": "node.labels.storage == primary"}))
+    assert sorted(o["services"]) == ["dummy-one-helper", "nginx", "oauth2-proxy"]
+    assert o["services"]["nginx"]["deploy"]["placement"]["constraints"] == ["node.labels.storage == primary"]
+    d.pinned = ["not-a-service"]
+    assert "pinned lists not-a-service" in "\n".join(sh.check_descriptor(b))

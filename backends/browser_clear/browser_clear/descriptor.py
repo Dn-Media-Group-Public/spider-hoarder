@@ -25,6 +25,7 @@ descriptor = SimpleNamespace(
     services=['browser-clear-gateway'],
     preflight=None,
     post_build=None,
+    pinned=[],
     env=None,
     runtime="browser_clear.runtime:driver",
 )

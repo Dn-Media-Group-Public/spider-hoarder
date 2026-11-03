@@ -7,7 +7,10 @@ descriptors with importlib.metadata and uses PyYAML for the overlay check; see d
 
   validate           every name in BACKENDS is installed, descriptors are well formed, overlays obey the contract
   preflight          run each backend's preflight script (non-zero = abort, with its stderr)
-  build WHEELS       docker build every image of the enabled backends, once per tag (first descriptor wins)
+  build WHEELS       docker build (and push, when IMAGE_PREFIX is set) every image of the enabled backends, once per tag
+  build-image TAG CTX  the same for one image outside the descriptors (deploy.sh's oauth2-proxy-dcr)
+  pin FILE           placement overlay: base nginx/oauth2-proxy and every enabled backend's `pinned` services on $PIN_DATA
+                     (writes nothing when PIN_DATA is empty)
   post-build         run each backend's post_build script
   env                `export K=V` lines: every backend's env(environ) result, BACKENDS and BACKEND_SERVERS
   landing FILE       the static landing page (claude mcp add lines + each backend's title and description)
@@ -30,7 +33,8 @@ import sys
 GROUP = "spider_hoarder.backends"
 NAME_RE = re.compile(r"^[a-z][a-z0-9]*(_[a-z0-9]+)+$")
 MEMBERS = ("name", "title", "description", "compose", "builds", "services", "runtime")  # required; the rest are optional
-OPTIONAL = ("preflight", "post_build", "env")
+OPTIONAL = ("preflight", "post_build", "env")  # and `pinned`: services with node-local state, a subset of `services`
+BASE_PINNED = ("nginx", "oauth2-proxy")  # the base compose file's services with local state
 SHARED_NETWORKS = ("public", "auth")  # the base compose file's networks, usable by overlays
 
 
@@ -118,6 +122,9 @@ def check_descriptor(b: Backend) -> list[str]:
     for hook in OPTIONAL[:2]:
         if b.optional(hook) and not os.path.isfile(b.path(b.optional(hook))):
             errs.append(f"{b.name}: {hook} script {b.path(b.optional(hook))} does not exist")
+    extra = set(b.optional("pinned") or []) - set(d.services)
+    if extra:
+        errs.append(f"{b.name}: pinned lists {', '.join(sorted(extra))}, which are not in services")
     if b.optional("env") is not None and not callable(b.optional("env")):
         errs.append(f"{b.name}: env must be a function of the environment")
     return errs
@@ -228,21 +235,45 @@ def dockerfile_args(ctx: str) -> list[str]:
         return re.findall(r"^ARG\s+([A-Za-z_][A-Za-z0-9_]*)", f.read(), re.M)
 
 
-def build_command(tag: str, ctx: str, wheels: str, environ) -> list[str]:
+def image_ref(tag: str, environ) -> str:
+    """The real image name of a descriptor tag `<name>:local`: `${IMAGE_PREFIX}<name>:${IMAGE_TAG}` (what the compose files say)."""
+    return f"{environ.get('IMAGE_PREFIX') or ''}{tag.removesuffix(':local')}:{environ.get('IMAGE_TAG') or 'local'}"
+
+
+def build_command(tag: str, ctx: str, wheels: str | None, environ) -> list[str]:
     """docker build with the wheels as the named context `wheels` (Dockerfiles `COPY --from=wheels`), and every ARG the
     Dockerfile declares fed from the environment variable of the same name when it is set."""
-    cmd = ["docker", "build", "--build-context", f"wheels={wheels}", "-t", tag]
+    cmd = ["docker", "build"] + (["--build-context", f"wheels={wheels}"] if wheels else []) + ["-t", image_ref(tag, environ)]
     for a in dockerfile_args(ctx):
         if environ.get(a):
             cmd += ["--build-arg", f"{a}={environ[a]}"]
     return cmd + [ctx]
 
 
+def build_one(tag: str, ctx: str, wheels: str | None, environ, owner="deploy", run=subprocess.run) -> None:
+    ref = image_ref(tag, environ)
+    print(f"==> building {ref} ({owner})", file=sys.stderr, flush=True)
+    if run(build_command(tag, ctx, wheels, environ), env=environ).returncode != 0:
+        raise DeployError(f"docker build of {ref} failed")
+    if environ.get("IMAGE_PREFIX") and run(["docker", "push", ref], env=environ).returncode != 0:
+        raise DeployError(f"docker push of {ref} failed")
+
+
 def build(backends: list[Backend], wheels: str, environ, run=subprocess.run) -> None:
     for tag, ctx, owner in build_plan(backends):
-        print(f"==> building {tag} ({owner})", file=sys.stderr, flush=True)
-        if run(build_command(tag, ctx, wheels, environ), env=environ).returncode != 0:
-            raise DeployError(f"docker build of {tag} failed")
+        build_one(tag, ctx, wheels, environ, owner, run)
+
+
+def pin_overlay(backends: list[Backend], environ) -> str:
+    """Placement constraint $PIN_DATA on the services with node-local state; empty string (no overlay) when PIN_DATA is unset."""
+    constraint = (environ.get("PIN_DATA") or "").strip()
+    if not constraint:
+        return ""
+    names = list(BASE_PINNED)
+    for b in backends:
+        names += [s for s in b.optional("pinned") or [] if s not in names]
+    return 'version: "3.8"\nservices:\n' + "".join(
+        f"  {s}:\n    deploy:\n      placement:\n        constraints: [{json.dumps(constraint)}]\n" for s in names)
 
 
 def backend_servers(backends: list[Backend]) -> str:
@@ -299,6 +330,14 @@ def main(argv=None, environ=None) -> int:
                 run_hook(b, "preflight", environ)
         elif cmd == "build":
             build(backends, args[0], environ)
+        elif cmd == "build-image":
+            build_one(args[0], args[1], None, environ)
+        elif cmd == "pin":
+            overlay = pin_overlay(backends, environ)
+            if overlay:
+                os.makedirs(os.path.dirname(os.path.abspath(args[0])), exist_ok=True)
+                with open(args[0], "w") as f:
+                    f.write(overlay)
         elif cmd == "post-build":
             for b in backends:
                 run_hook(b, "post_build", environ)

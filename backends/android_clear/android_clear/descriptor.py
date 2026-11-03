@@ -11,9 +11,11 @@ def _family(sub):
 
 
 def _env(environ):
-    """Slot total of this backend: gateway replicas x slots per replica (the wrapper makes that many slots)."""
+    """Slot total of this backend (gateway replicas x slots per replica) and each wrapper's slice of it (one wrapper per KVM node)."""
     replicas = int(environ.get("ANDROID_CLEAR_REPLICAS") or 1)
-    return {"ANDROID_CLEAR_SLOTS": str(replicas * int(environ.get("ANDROID_SLOTS_PER_REPLICA") or 2))}
+    total = replicas * int(environ.get("ANDROID_SLOTS_PER_REPLICA") or 2)
+    nodes = int(environ.get("ANDROID_KVM_NODES") or 1)
+    return {"ANDROID_CLEAR_SLOTS": str(total), "ANDROID_CLEAR_SLOTS_PER_WRAPPER": str(-(-total // nodes))}
 
 
 descriptor = SimpleNamespace(
@@ -32,7 +34,8 @@ descriptor = SimpleNamespace(
     ],
     services=['android-clear-gateway', 'android-clear-wrapper'],
     preflight=_family("preflight.sh"),
-    post_build=_family("post_build.sh"),
+    post_build=None,   # the golden snapshot is made by each wrapper on its own node
+    pinned=[],   # the wrapper is placed by PIN_KVM
     env=_env,
     runtime="android_clear.runtime:driver",
 )

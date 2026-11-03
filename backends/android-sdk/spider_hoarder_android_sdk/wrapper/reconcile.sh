@@ -7,8 +7,12 @@
 # no ports, no API, no network (its service sits on an internal network with nobody else on it). The slot spec
 # below is hardcoded, and the one command it execs inside a slot (/app/tor-route.sh) is fixed; the env only sets counts, sizes, the image and the secret. Never add a verb to it.
 #
+# One wrapper per KVM node (swarm replicas, one per node): wrapper WRAPPER_SLOT (the task slot, 1..) owns slots
+# (w-1)*P+1 .. min(ANDROID_SLOTS, w*P), P = ANDROID_SLOTS_PER_WRAPPER (the same slicing the gateways use for REPLICA_SLOT).
+# It also makes this node's golden snapshot (quickboot snapshots depend on the host CPU) when the volume's stamp is not the slot image.
+#
 # Env: STACK_NAME BACKEND (hyphenated backend name: slot names, DNS aliases, label value) ANDROID_EGRESS (clear|tor)
-#      ANDROID_SLOTS (count) ANDROID_SLOT_IMAGE ANDROID_SLOT_CPUS ANDROID_SLOT_MEMORY SLOT_SECRET
+#      ANDROID_SLOTS (total count) ANDROID_SLOTS_PER_WRAPPER WRAPPER_SLOT ANDROID_API ANDROID_RAM_MB ANDROID_SLOT_IMAGE ANDROID_SLOT_CPUS ANDROID_SLOT_MEMORY SLOT_SECRET
 #      ANDROID_SLOT_NETWORK (default <stack>_<backend>-slots) ANDROID_SNAPSHOT_VOLUME (default <stack>_<backend>-snapshot)
 #      ANDROID_TOR_HOST (tor only: the backend's own Tor daemon service) ANDROID_BOOT_TIMEOUT
 #      ANDROID_KVM_GID (else looked up in /host-etc-group) RECONCILE_INTERVAL
@@ -18,6 +22,9 @@ set -eu
 DOCKER=${DOCKER:-docker}
 EGRESS=$ANDROID_EGRESS
 WANT=${ANDROID_SLOTS:-0}
+PER=${ANDROID_SLOTS_PER_WRAPPER:-0}; [ "$PER" -gt 0 ] || PER=$WANT   # unset: this wrapper owns them all
+LO=$(( (${WRAPPER_SLOT:-1} - 1) * PER + 1 ))
+HI=$(( ${WRAPPER_SLOT:-1} * PER )); [ "$HI" -le "$WANT" ] || HI=$WANT
 TOR_HOST=${ANDROID_TOR_HOST:-}
 NET=${ANDROID_SLOT_NETWORK:-${STACK_NAME}_${BACKEND}-slots}
 CPUS=${ANDROID_SLOT_CPUS:-2}
@@ -33,6 +40,13 @@ KVM_GID=${ANDROID_KVM_GID:-$(awk -F: '$1=="kvm"{print $3}' /host-etc-group 2>/de
 [ -n "$KVM_GID" ] || { echo "no kvm group: set ANDROID_KVM_GID or mount the host's /etc/group at /host-etc-group" >&2; exit 1; }
 
 log() { echo "android-wrapper: $*" >&2; }
+
+# What the old deploy-host preflight checked, now on this node, through its docker (the wrapper itself has no devices)
+check_host() {
+  [ "$($DOCKER info --format '{{.Architecture}}')" = x86_64 ] || { log "Android slots are x86_64 only"; exit 1; }
+  $DOCKER run --rm --device /dev/kvm --entrypoint true "$ANDROID_SLOT_IMAGE" >/dev/null 2>&1 \
+    || { log "no usable /dev/kvm on this node (KVM-capable x86_64, nested virtualisation on a VM): is it labelled for PIN_KVM by mistake?"; exit 1; }
+}
 
 # name of slot k, and everything derived from it
 cname() { echo "${STACK_NAME}-${BACKEND}-$1"; }
@@ -100,9 +114,9 @@ fix_tor_route() {  # $1 slot. Fixed command, only the exit code is looked at (10
 }
 
 reconcile() {
-  want=$WANT; hash=$(spec_hash)
-  k=1
-  while [ "$k" -le "$want" ]; do
+  hash=$(spec_hash)
+  k=$LO
+  while [ "$k" -le "$HI" ]; do
     n=$(cname "$k")
     cur=$($DOCKER inspect -f '{{index .Config.Labels "spider-hoarder.spec"}} {{.State.Running}}' "$n" 2>/dev/null) || cur=missing
     case "$cur" in
@@ -117,12 +131,37 @@ reconcile() {
     if [ "$EGRESS" = tor ]; then fix_tor_route "$n"; fi
     k=$((k + 1))
   done
-  # extra slots (count lowered)
-  for l in $($DOCKER ps -a --filter "label=$LABEL" --filter "label=$STACK_LABEL=$STACK_NAME" --format '{{.Names}} {{.Label "'$LABEL'"}}' | awk -v e="$BACKEND" -v w="$want" '{split($2,a,"/"); if (a[1]==e && a[2]+0>w) print $1}'); do
+  # extra slots (count lowered, or outside this wrapper's range): only this node's containers are seen
+  for l in $($DOCKER ps -a --filter "label=$LABEL" --filter "label=$STACK_LABEL=$STACK_NAME" --format '{{.Names}} {{.Label "'$LABEL'"}}' | awk -v e="$BACKEND" -v lo="$LO" -v hi="$HI" '{split($2,a,"/"); if (a[1]==e && (a[2]+0<lo || a[2]+0>hi)) print $1}'); do
     log "removing extra $l"
     remove_slot "$l"
     $DOCKER volume rm "$l-avd" "$l-state" >/dev/null 2>&1 || true
   done
+}
+
+ensure_snapshot() {  # the golden AVD + snapshot `clean` in $SNAP, remade when the slot image (or the RAM size baked in) changed
+  image_id=$($DOCKER image inspect -f '{{.Id}}' "$ANDROID_SLOT_IMAGE")${ANDROID_RAM_MB:+ ram=$ANDROID_RAM_MB}
+  stamp=$($DOCKER run --rm -v "$SNAP:/avd" --entrypoint cat "$ANDROID_SLOT_IMAGE" /avd/.stamp 2>/dev/null || true)
+  [ "$stamp" != "$image_id" ] || return 0
+  log "making the Android snapshot (a few minutes)"
+  remove_all   # the slots' overlays sit on top of the old snapshot
+  # Built in a scratch volume: the working snapshot stays until the new one has passed init's checks. Volumes cannot be
+  # renamed, so a good one is copied over $SNAP afterwards.
+  new="${SNAP}-new"
+  $DOCKER volume rm -f "$new" >/dev/null
+  $DOCKER volume create "$new" >/dev/null
+  if ! $DOCKER run --rm --ulimit nofile=65536:65536 --device /dev/kvm --group-add "$KVM_GID" \
+    --cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID --cap-add KILL --cap-add DAC_OVERRIDE --cap-add FOWNER \
+    -v "$new:/avd" -e "IMAGE_ID=$image_id" -e "ANDROID_API=${ANDROID_API:-34}" ${ANDROID_RAM_MB:+-e "ANDROID_RAM_MB=$ANDROID_RAM_MB"} \
+    --entrypoint /app/init-snapshot.sh "$ANDROID_SLOT_IMAGE"; then
+    log "snapshot init FAILED; keeping the previous snapshot"
+    $DOCKER volume rm -f "$new" >/dev/null
+    exit 1   # the task restarts and tries again
+  fi
+  $DOCKER volume rm -f "$SNAP" >/dev/null
+  $DOCKER volume create "$SNAP" >/dev/null
+  $DOCKER run --rm -v "$new:/from:ro" -v "$SNAP:/to" --entrypoint sh "$ANDROID_SLOT_IMAGE" -c 'cp -a --sparse=always /from/. /to/'
+  $DOCKER volume rm -f "$new" >/dev/null
 }
 
 remove_all() {
@@ -132,9 +171,11 @@ remove_all() {
   done
 }
 
+check_host
 if [ -z "${RECONCILE_ONCE:-}" ]; then
   trap 'log "stopping: removing all slots"; remove_all; exit 0' TERM INT
 fi
+ensure_snapshot
 while :; do
   reconcile || log "reconcile failed"
   [ -z "${RECONCILE_ONCE:-}" ] || break

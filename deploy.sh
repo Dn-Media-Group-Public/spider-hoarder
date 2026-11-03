@@ -30,6 +30,15 @@ set -a
 source "${ENV_FILE:-.env}"
 set +a
 
+# Multi-node (docs/architecture/scaling.md): IMAGE_PREFIX (a registry, with trailing slash) makes images pushed and deploys resolve them;
+# unset = images stay :local on this node. IMAGE_TAG defaults to the git revision then. PIN_DATA: see `pin` below.
+export IMAGE_PREFIX="${IMAGE_PREFIX:-}"
+if [ -n "$IMAGE_PREFIX" ]; then
+  export IMAGE_TAG="${IMAGE_TAG:-$(git rev-parse --short HEAD)}"
+else
+  export IMAGE_TAG="${IMAGE_TAG:-local}"
+fi
+
 export STACK_NAME=$STACK
 REQUIRED=(PUBLIC_HOST OIDC_ISSUER O2P_COOKIE_SECRET BLOB_TOKEN_SECRET GATEWAY_PORT HTTP_PORT BACKENDS)
 if [ "$DEV" -eq 1 ]; then
@@ -73,7 +82,7 @@ $TOOL validate
 $TOOL preflight
 
 # Build local images (build: is ignored in stack deploy)
-docker build -t oauth2-proxy-dcr:local oauth2-proxy
+$TOOL build-image oauth2-proxy-dcr:local oauth2-proxy
 $TOOL build "$PWD/.build/wheels"
 
 # Initialize swarm if not already active
@@ -94,10 +103,17 @@ if [ "$DEV" -eq 1 ]; then
 fi
 mapfile -t BACKEND_FILES < <($TOOL compose)
 FILES+=("${BACKEND_FILES[@]}")
+if [ -n "${PIN_DATA:-}" ]; then
+  $TOOL pin .build/docker-compose.pin.yml
+  FILES+=(-c .build/docker-compose.pin.yml)
+fi
 
-docker stack deploy --prune --resolve-image never "${FILES[@]}" "$STACK"
-
-# Force restart so freshly-built :local images (and an edited nginx.conf.template or landing page) are picked up.
-for s in nginx $($TOOL services); do
-  docker service update --force --no-resolve-image "${STACK}_$s"
-done
+if [ -n "$IMAGE_PREFIX" ]; then
+  docker stack deploy --prune "${FILES[@]}" "$STACK"   # tags are unique per revision: nothing to force
+else
+  docker stack deploy --prune --resolve-image never "${FILES[@]}" "$STACK"
+  # Force restart so freshly-built :local images (and an edited nginx.conf.template or landing page) are picked up.
+  for s in nginx $($TOOL services); do
+    docker service update --force --no-resolve-image "${STACK}_$s"
+  done
+fi

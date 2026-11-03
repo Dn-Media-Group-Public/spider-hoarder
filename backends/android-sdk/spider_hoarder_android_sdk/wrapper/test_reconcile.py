@@ -14,6 +14,7 @@ echo "$*" >> "$S/log"
 cmd=$1; shift
 case "$cmd" in
   image) echo "sha256:img-$IMG" ;;
+  info) echo x86_64 ;;
   volume)
     sub=$1; shift
     case "$sub" in
@@ -22,6 +23,7 @@ case "$cmd" in
       rm) ;;
     esac ;;
   run)
+    case "$*" in *"/avd/.stamp"*) echo "sha256:img-$IMG"; exit 0 ;; esac   # the snapshot is current
     name=""; spec=""; lab=""; stk=""
     while [ $# -gt 0 ]; do
       case "$1" in
@@ -107,6 +109,27 @@ def test_reconcile():
     assert e.containers() == []
 
 
+def test_wrappers_own_slices_and_remove_only_their_own_extras():
+    """Two KVM nodes, 3 slots, 2 per wrapper: wrapper 1 owns 1-2, wrapper 2 owns 3. Each node sees only its own containers."""
+    w1 = Env(ANDROID_SLOTS="3", ANDROID_SLOTS_PER_WRAPPER="2", WRAPPER_SLOT="1")
+    w2 = Env(ANDROID_SLOTS="3", ANDROID_SLOTS_PER_WRAPPER="2", WRAPPER_SLOT="2")
+    w1.run(); w2.run()
+    assert w1.containers() == ["st-android-clear-1", "st-android-clear-2"]
+    assert w2.containers() == ["st-android-clear-3"]
+    open(f"{w2.d}/c/st-android-clear-1", "w").write("x true\n"); open(f"{w2.d}/l/st-android-clear-1", "w").write("android-clear/1\n")
+    open(f"{w2.d}/s/st-android-clear-1", "w").write("st\n")
+    assert "removing extra st-android-clear-1" in subprocess.run(["sh", f"{HERE}/reconcile.sh"], env=w2.env, capture_output=True, text=True).stderr
+
+
+def test_snapshot_is_made_by_the_wrapper_when_the_stamp_is_stale():
+    e = Env(ANDROID_SLOTS="1")
+    assert "init-snapshot.sh" not in e.run()
+    stale = FAKE.replace('echo "sha256:img-$IMG"; exit 0', 'exit 0')
+    open(f"{e.d}/docker", "w").write(stale)
+    log = e.run()
+    assert "--entrypoint /app/init-snapshot.sh" in log and "-v st_android-clear-snapshot-new:/avd" in log and "--group-add 993" in log
+
+
 def test_wrapper_only_touches_its_own_slots():
     a = Env(ANDROID_SLOTS="1")
     a.run()
@@ -180,6 +203,8 @@ def test_an_abnormal_slot_end_is_logged_before_the_container_goes():
 if __name__ == "__main__":
     test_reconcile()
     test_wrapper_only_touches_its_own_slots()
+    test_wrappers_own_slices_and_remove_only_their_own_extras()
+    test_snapshot_is_made_by_the_wrapper_when_the_stamp_is_stale()
     test_tor_backend_slots_use_their_own_daemon_and_network()
     test_tor_route_is_fixed_by_exec_into_tor_slots_only()
     test_needs_kvm_group_and_secret()

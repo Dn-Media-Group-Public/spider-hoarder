@@ -25,7 +25,7 @@ services:
     networks: [browser-clear-sessions]
 
   browser-clear-gateway:
-    image: spider-hoarder-browser-clear:local
+    image: ${IMAGE_PREFIX:-}spider-hoarder-browser-clear:${IMAGE_TAG:-local}
     cap_drop: [ALL]
     # NET_ADMIN: the start script's firewall only, dropped before sessiond/gateway start.
     # The rest is sessiond's (setuid/setgid/chown/kill, DAC_OVERRIDE+FOWNER to sweep session files).
