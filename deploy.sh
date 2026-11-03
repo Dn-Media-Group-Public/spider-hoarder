@@ -93,6 +93,12 @@ $TOOL post-build
 # Variables the backends derive (slot counts, ...), BACKENDS and BACKEND_SERVERS (what each gateway tells the model about the others)
 eval "$($TOOL env)"
 $TOOL landing .build/landing.html
+# ALIASES="old=new ..." -> nginx map of URL prefixes (underscores or dashes accepted); always written, empty = no aliases
+: > .build/aliases.map
+for a in ${ALIASES:-}; do
+  [[ "$a" =~ ^[A-Za-z0-9_-]+=[A-Za-z0-9_-]+$ ]] || { echo "bad ALIASES entry: $a (want old=new)" >&2; exit 1; }
+  printf '%s %s;\n' "${a%%=*}" "${a#*=}" | tr _ - >> .build/aliases.map
+done
 FILES=(-c docker-compose.yml)
 if [ "$DEV_KC" -eq 1 ]; then
   FILES+=(-c docker-compose.keycloak.yml)
