@@ -38,7 +38,7 @@ Capacity is bounded by the KVM node, not by Swarm: each slot is a 2-CPU / 6 GB c
 All opt-in through `.env`; unset keeps the single-node behaviour (`:local` images, no constraints).
 
 - **Registry**: `IMAGE_PREFIX` (e.g. `localhost:5000/`) makes every locally built image `${IMAGE_PREFIX}<name>:${IMAGE_TAG}` (tag defaults to the git revision), pushed after the build; deploys then resolve images and skip the forced restart.
-- **Pinning**: `PIN_DATA` (e.g. `node.labels.storage == primary`) constrains the services with node-local state: base `nginx`, `oauth2-proxy`, and each backend's descriptor `pinned` services (Tor/I2P daemons). `deploy.sh` generates `.build/docker-compose.pin.yml` only when it is set. Gateway replicas stay schedulable anywhere (routing by task IP over the overlay; blobs are lost on reschedule, as before).
+- **Pinning**: `PIN_DATA` (e.g. `node.labels.storage == primary`) constrains the services with node-local state: base `nginx`, `oauth2-proxy`, and each backend's descriptor `pinned` services (none by default: the Tor/I2P daemons only cache, they cold-start fine elsewhere). `deploy.sh` generates `.build/docker-compose.pin.yml` only when it is set. Gateway replicas stay schedulable anywhere (routing by task IP over the overlay; blobs are lost on reschedule, as before).
 - **Android**: wrappers go to the nodes matching `PIN_KVM`, one per node (`ANDROID_KVM_NODES`); see [Android](android.md).
 
 See also: [Plan: Multi-node swarm support](../implemented-plans/multi-node.md)

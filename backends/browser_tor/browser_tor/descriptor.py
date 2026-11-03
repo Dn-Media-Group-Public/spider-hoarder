@@ -26,7 +26,7 @@ descriptor = SimpleNamespace(
     services=['browser-tor-gateway', 'browser-tor-daemon'],
     preflight=None,
     post_build=None,
-    pinned=['browser-tor-daemon'],
+    pinned=[],
     env=None,
     runtime="browser_tor.runtime:driver",
 )

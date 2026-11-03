@@ -36,7 +36,7 @@ from spider_hoarder_sdk.gateway import blobtoken
 from spider_hoarder_sdk.gateway import sessions
 from spider_hoarder_sdk.gateway.driver import driver, hyphen
 from spider_hoarder_sdk.gateway.jobs import (DEFAULT_TEXT_LENGTH, FILE_TOOLS_NOTE, INLINE_LIMIT, RID, UPLOAD_MARK, _check_rel_path,
-                                             _key, _new_job_id, _schema, _text)
+                                             _key, _new_job_id, _schema, _store_and_parse, _text)
 
 PREFIX = sessions.PREFIX  # the URL prefix nginx routes on
 logging.basicConfig(level="INFO", format="%(name)s %(levelname)s %(message)s")

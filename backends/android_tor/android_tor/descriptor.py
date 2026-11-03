@@ -36,7 +36,7 @@ descriptor = SimpleNamespace(
     services=['android-tor-gateway', 'android-tor-wrapper', 'android-tor-daemon'],
     preflight=_family("preflight.sh"),
     post_build=None,   # the golden snapshot is made by each wrapper on its own node
-    pinned=['android-tor-daemon'],   # the wrapper is placed by PIN_KVM
+    pinned=[],   # the wrapper is placed by PIN_KVM
     env=_env,
     runtime="android_tor.runtime:driver",
 )

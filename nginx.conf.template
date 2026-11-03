@@ -80,9 +80,10 @@ server {
     location ~ ^/(?<egress>[a-z0-9-]+)/mcp {
         if ($sid_ip = invalid) { return 400; }
         set $real $backend;   # before the rewrite below resets the regex captures $backend is computed from
-        rewrite ^/[a-z0-9-]+/(mcp.*)$ /$real/$1 break;   # alias -> real name (the gateway only serves its own)
         set $target $sid_ip;
         if ($sid_ip = "") { set $target tasks.$real-gateway; }   # <backend>-gateway: the overlay contract
+        # last: `break` ends the rewrite-module directives (set, if) that follow it
+        rewrite ^/[a-z0-9-]+/(mcp.*)$ /$real/$1 break;   # alias -> real name (the gateway only serves its own)
         proxy_pass http://$target:${GATEWAY_PORT};
         proxy_buffering off;
         proxy_read_timeout 1h;   # SSE

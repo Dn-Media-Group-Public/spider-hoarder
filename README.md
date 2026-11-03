@@ -149,6 +149,12 @@ docker run -d --name e2e --add-host nginx:172.17.0.1 <same caps> -e BACKEND=brow
 docker exec -u 1000 -w /tests e2e python live/e2e_auth.py
 ```
 
+Full stack, browsers (deployed `./deploy.sh --dev` stack, real Keycloak tokens, everything through nginx; the docstring has the run line):
+
+```bash
+tests/live/e2e_android_setup.sh   # throwaway users alice/bob; then tests/live/e2e_browser_stack.py [browser-clear browser-tor browser-i2p]
+```
+
 Android (host, no KVM needed):
 
 ```bash
