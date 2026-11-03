@@ -2,6 +2,7 @@
 
 Plans awaiting implementation or kept as background. Implemented plans move to [implemented-plans](../implemented-plans/index.md).
 
+- [Multi-node swarm support](multi-node.md) — registry push, `PIN_DATA` pinning; unset = single-node as today
 - [gVisor runtime](gvisor-runtime.md) — stub
 - [Metrics and structured logs](metrics-and-logging.md) — stub
 - [`mcp` 2.x SDK port](mcp-sdk-2-migration.md) — stub
