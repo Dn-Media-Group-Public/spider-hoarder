@@ -39,8 +39,8 @@ def test_parse_eval_result():
 
 
 def test_host_rules(tmp_path="/tmp/cmp_test.txt"):
-    open(tmp_path, "w").write("! c\n||cmp.example^\n@@||ok.example^\n||x.example^$third-party\n##.banner\n")
-    assert cmp_rules.hosts(tmp_path) == ["cmp.example", "x.example"]  # $options kept, @@ and ## dropped
+    open(tmp_path, "w").write("! c\n||cmp.example^\n@@||ok.example^\n||x.example^$third-party\n||big.example/consent-sdk/\n||gtm.example/gtm.js$script,domain=a.fr\n##.banner\n")
+    assert cmp_rules.hosts(tmp_path) == ["cmp.example", "x.example"]  # $options kept; @@, ##, path- and domain=-scoped dropped
     assert cmp_rules.host_rules(tmp_path).startswith("MAP cmp.example ~NOTFOUND, MAP *.cmp.example ~NOTFOUND")
 
 

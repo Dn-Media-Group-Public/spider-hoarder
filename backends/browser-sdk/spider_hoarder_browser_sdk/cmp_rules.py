@@ -1,6 +1,6 @@
 """Chromium --host-rules value that blackholes known cookie-consent (CMP)
 vendors, from Fanboy's Cookiemonster list fetched at image build time
-(cmp_blocklist.txt). Only network rules (``||host^``) matter here."""
+(cmp_blocklist.txt). Only host-wide network rules (``||host^``) are kept; path- or domain=-scoped ones are skipped."""
 
 import os
 
@@ -17,8 +17,10 @@ def hosts(path: str = PATH) -> list[str]:
     for line in lines:
         line = line.strip()
         if line.startswith("||") and "#" not in line:
-            host = line[2:].split("^", 1)[0].split("$", 1)[0].split("/", 1)[0]
-            if host and "*" not in host:
+            host = line[2:].split("^", 1)[0].split("$", 1)[0]
+            # host-wide rules only: a path (||alicdn.com/cookie-consent-sdk/) or domain= scope can't be
+            # expressed as a host block, and would blackhole the whole site (alicdn.com, googletagmanager.com)
+            if host and "*" not in host and "/" not in host and "domain=" not in line:
                 out.add(host.lower())
     return sorted(out)
 
