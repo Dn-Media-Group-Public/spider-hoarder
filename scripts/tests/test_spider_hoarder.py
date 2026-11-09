@@ -43,15 +43,15 @@ class FakeEP:
         return self._d
 
 
-def make_pkg(tmp_path, name="dummy_one", overlay=GOOD_OVERLAY, builds=(("img-a:local", "ctx_a"),), dockerfile="FROM scratch\n", **over):
+def make_pkg(tmp_path, name="dummy_one", overlay=GOOD_OVERLAY, builds=(("img-a:local", "ctx_a/Dockerfile"),), dockerfile="FROM scratch\n", **over):
     """A package dir with a Dockerfile per build context and an overlay; returns (descriptor, Backend, EP)."""
     pkg = tmp_path / name
     pkg.mkdir(exist_ok=True)
     (pkg / "__init__.py").write_text("")
     (pkg / "docker-compose.yml").write_text(overlay)
-    for _, ctx in builds:
-        (pkg / ctx).mkdir(exist_ok=True)
-        (pkg / ctx / "Dockerfile").write_text(dockerfile)
+    for _, df in builds:
+        (pkg / df).parent.mkdir(exist_ok=True)
+        (pkg / df).write_text(dockerfile)
     d = types.SimpleNamespace(name=name, title="Dummy", description="Does dummy things", compose="docker-compose.yml",
                               builds=list(builds), services=["dummy-one-gateway"], runtime=f"{name}.runtime:driver", **over)
     return d, sh.Backend(name, d, str(pkg)), FakeEP(name, d)
@@ -102,8 +102,8 @@ def test_descriptor_ok_and_shape_errors(tmp_path):
     errs = "\n".join(sh.check_descriptor(b))
     assert "non-empty text" in errs and "module:Object" in errs and "missing.yml" in errs
     d.description, d.runtime, d.compose = "x", "a:b", "docker-compose.yml"
-    d.builds = [("t:local", "nodir")]
-    assert any("no Dockerfile" in e for e in sh.check_descriptor(b))
+    d.builds = [("t:local", "nodir/Dockerfile")]
+    assert any("Dockerfile" in e and "does not exist" in e for e in sh.check_descriptor(b))
     d.builds = []
     d.preflight, d.post_build, d.env = "nope.sh", "nope2.sh", "notcallable"
     errs = "\n".join(sh.check_descriptor(b))
@@ -162,11 +162,11 @@ def test_validate_reports_all_errors(tmp_path):
 
 # ---------------------------------------------------------------- builds ------------------------------------------
 def test_build_plan_dedupes_by_tag_first_wins(tmp_path):
-    _, a, _ = make_pkg(tmp_path, name="dummy_one", builds=(("base:local", "base"), ("a:local", "img")))
-    _, b, _ = make_pkg(tmp_path, name="dummy_two", builds=(("base:local", "base"), ("b:local", "img")))
+    _, a, _ = make_pkg(tmp_path, name="dummy_one", builds=(("base:local", "base/Dockerfile"), ("a:local", "img/Dockerfile")))
+    _, b, _ = make_pkg(tmp_path, name="dummy_two", builds=(("base:local", "base/Dockerfile"), ("b:local", "img/Dockerfile")))
     plan = sh.build_plan([a, b])
     assert [(t, o) for t, _, o in plan] == [("base:local", "dummy_one"), ("a:local", "dummy_one"), ("b:local", "dummy_two")]
-    assert plan[0][1] == str(tmp_path / "dummy_one" / "base")
+    assert plan[0][1] == str(tmp_path / "dummy_one" / "base" / "Dockerfile")
 
 
 def test_absolute_context_paths_win(tmp_path):
@@ -174,30 +174,29 @@ def test_absolute_context_paths_win(tmp_path):
     fam = tmp_path / "family"
     fam.mkdir()
     (fam / "Dockerfile").write_text("FROM scratch\n")
-    a.d.builds = [("fam:local", str(fam))]
-    assert sh.build_plan([a]) == [("fam:local", str(fam), "dummy_one")]
+    a.d.builds = [("fam:local", str(fam / "Dockerfile"))]
+    assert sh.build_plan([a]) == [("fam:local", str(fam / "Dockerfile"), "dummy_one")]
 
 
 def test_build_command_feeds_only_declared_args_that_are_set(tmp_path):
-    ctx = tmp_path / "c"
-    ctx.mkdir()
-    (ctx / "Dockerfile").write_text("FROM x\nARG ANDROID_API=34\n  ARG NOT_A_DECL\nARG ANDROID_FDROID_URL\nARG UNSET_ONE\nRUN echo\n")
-    cmd = sh.build_command("t:local", str(ctx), "/w", {"ANDROID_FDROID_URL": "u", "ANDROID_API": "", "OTHER": "z", "UNSET_ONE": ""})
-    assert cmd == ["docker", "build", "--build-context", "wheels=/w", "-t", "t:local", "--build-arg", "ANDROID_FDROID_URL=u", str(ctx)]
+    df = tmp_path / "Dockerfile"
+    df.write_text("FROM x\nARG ANDROID_API=34\n  ARG NOT_A_DECL\nARG ANDROID_FDROID_URL\nARG UNSET_ONE\nRUN echo\n")
+    cmd = sh.build_command("t:local", str(df), "/repo", {"ANDROID_FDROID_URL": "u", "ANDROID_API": "", "OTHER": "z", "UNSET_ONE": ""})
+    assert cmd == ["docker", "build", "-f", str(df), "-t", "t:local", "--build-arg", "ANDROID_FDROID_URL=u", "/repo"]
 
 
 def test_build_runs_each_tag_once_and_fails_loudly(tmp_path):
-    _, a, _ = make_pkg(tmp_path, name="dummy_one", builds=(("base:local", "base"), ("a:local", "img")))
-    _, b, _ = make_pkg(tmp_path, name="dummy_two", builds=(("base:local", "base"),))
+    _, a, _ = make_pkg(tmp_path, name="dummy_one", builds=(("base:local", "base/Dockerfile"), ("a:local", "img/Dockerfile")))
+    _, b, _ = make_pkg(tmp_path, name="dummy_two", builds=(("base:local", "base/Dockerfile"),))
     calls = []
 
     def run(cmd, env=None):
         calls.append(cmd)
         return types.SimpleNamespace(returncode=0)
-    sh.build([a, b], "/w", {}, run=run)
+    sh.build([a, b], {}, run=run)
     assert [c[c.index("-t") + 1] for c in calls] == ["base:local", "a:local"]
     with pytest.raises(sh.DeployError, match="docker build of base:local failed"):
-        sh.build([a], "/w", {}, run=lambda cmd, env=None: types.SimpleNamespace(returncode=1))
+        sh.build([a], {}, run=lambda cmd, env=None: types.SimpleNamespace(returncode=1))
 
 
 # ---------------------------------------------------------------- hooks -------------------------------------------
@@ -346,10 +345,10 @@ def test_image_ref_and_push(tmp_path):
         calls.append(cmd)
         return types.SimpleNamespace(returncode=0)
 
-    sh.build([b], "/w", {}, run)
+    sh.build([b], {}, run)
     assert [c[1] for c in calls] == ["build"]  # no registry: no push
     calls.clear()
-    sh.build([b], "/w", {"IMAGE_PREFIX": "r/", "IMAGE_TAG": "t1"}, run)
+    sh.build([b], {"IMAGE_PREFIX": "r/", "IMAGE_TAG": "t1"}, run)
     assert calls[0][calls[0].index("-t") + 1] == "r/img-a:t1" and calls[1] == ["docker", "push", "r/img-a:t1"]
 
 
@@ -362,3 +361,21 @@ def test_pin_overlay(tmp_path):
     assert o["services"]["oauth2-proxy"]["deploy"]["placement"]["constraints"] == ["node.labels.storage == primary"]
     d.pinned = ["not-a-service"]
     assert "pinned lists not-a-service" in "\n".join(sh.check_descriptor(b))
+
+
+def test_in_tree_dockerfiles_copy_only_existing_unignored_paths():
+    """Every image builds from the repo root: each COPY source exists there and is not excluded by .dockerignore."""
+    import fnmatch
+    import glob
+    root = sh.REPO_ROOT
+    ignore = [l.strip() for l in open(os.path.join(root, ".dockerignore")) if l.strip() and not l.startswith("#")]
+    dockerfiles = [f for f in glob.glob(os.path.join(root, "backends", "*", "*", "*", "Dockerfile"))]
+    assert dockerfiles
+    for df in dockerfiles:
+        for line in open(df):
+            if line.startswith("COPY ") and "--from" not in line:
+                *srcs, _dst = line.split()[1:]
+                for src in srcs:
+                    assert os.path.exists(os.path.join(root, src)), f"{df}: COPY {src} not found"
+                    parts = src.rstrip("/").split("/")
+                    assert not any(fnmatch.fnmatch(p, pat.removeprefix("**/")) for p in parts for pat in ignore), f"{df}: {src} is in .dockerignore"

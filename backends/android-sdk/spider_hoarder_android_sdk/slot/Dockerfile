@@ -1,5 +1,5 @@
 # Android slot: emulator (x86_64, KVM), Xvfb, x11vnc + noVNC, the Android tool server and slotd.
-# The build context is this directory (toolserver/ is inside it): scripts/ builds it, then the backend's post_build makes the
+# Build context: the repo root. scripts/ builds it, then the backend's post_build makes the
 # golden snapshot with init-snapshot.sh on the host that has /dev/kvm.
 FROM debian:bookworm-slim
 
@@ -49,8 +49,8 @@ RUN useradd -u 2000 -m -d /home/emu -s /usr/sbin/nologin emu \
 RUN python3 -m venv /venv \
  && /venv/bin/pip install --no-cache-dir "mcp==1.29.1" "uiautomator2>=3,<4" uvicorn
 
-COPY toolserver/android_ui.py toolserver/android_tools.py toolserver/device.py toolserver/android_server.py /opt/toolserver/
-COPY entrypoint.sh tor-route.sh firewall.sh prep-homes.sh init-snapshot.sh slotd.py console.py /app/
+COPY backends/android-sdk/spider_hoarder_android_sdk/slot/toolserver/android_ui.py backends/android-sdk/spider_hoarder_android_sdk/slot/toolserver/android_tools.py backends/android-sdk/spider_hoarder_android_sdk/slot/toolserver/device.py backends/android-sdk/spider_hoarder_android_sdk/slot/toolserver/android_server.py /opt/toolserver/
+COPY backends/android-sdk/spider_hoarder_android_sdk/slot/entrypoint.sh backends/android-sdk/spider_hoarder_android_sdk/slot/tor-route.sh backends/android-sdk/spider_hoarder_android_sdk/slot/firewall.sh backends/android-sdk/spider_hoarder_android_sdk/slot/prep-homes.sh backends/android-sdk/spider_hoarder_android_sdk/slot/init-snapshot.sh backends/android-sdk/spider_hoarder_android_sdk/slot/slotd.py backends/android-sdk/spider_hoarder_android_sdk/slot/console.py /app/
 RUN chmod +x /app/*.sh
 
 EXPOSE 9000 9001 6080

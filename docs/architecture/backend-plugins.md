@@ -6,6 +6,7 @@ so backends can live **out of tree**. A sysadmin chooses what runs with one list
 costs nothing (no images, services, networks, routes or hints).
 
 See also: [Plan: Pluggable backends](../implemented-plans/backend-plugins.md)
+See also: [Plan: Build everything inside `docker build`](../implemented-plans/build-in-docker.md)
 
 In tree: `browser_clear`, `browser_tor`, `browser_i2p` (family `browser`), `android_clear`, `android_tor` (family `android`).
 
@@ -56,7 +57,7 @@ browser_tor = "browser_tor.descriptor:descriptor"
 | `name` | canonical id; must equal the entry-point name |
 | `title`, `description` | LLM-readable text; the landing page and the "other servers" entries in every other gateway's instructions |
 | `compose` | stack overlay, merged with `-c` |
-| `builds` | ordered `(image tag, context dir)` pairs; deduped by tag, first wins, so a family base image builds once. The context needs a `Dockerfile` |
+| `builds` | ordered `(image tag, Dockerfile)` pairs (Dockerfile path relative to the package); deduped by tag, first wins, so a family base image builds once. Every image is built with the repo root as context |
 | `services` | services force-restarted after deploy (prefixed names, they must exist in the overlay) |
 | `preflight` | optional shell script; host checks (`/dev/kvm`, x86_64, required variables); non-zero exit aborts the deploy with its stderr |
 | `post_build` | optional shell script; after the images are built, before the stack is deployed (none in-tree now: the Android snapshot is made by the wrapper) |
@@ -72,11 +73,12 @@ Descriptors name `builds` tags as `<name>:local`; the deploy tool builds and pus
 
 Every backend has a thin image on a **family base**: `FROM` the family base tag, install only the backend's own package. The
 browser base holds Chromium, Xvfb/VNC, the session daemon, the SDK and the browser-sdk. The Android gateway image is light (SDK and
-android-sdk, no Chromium); the slot image is its own base and its context is package-local.
+android-sdk, no Chromium); the slot image is its own base.
 
-`deploy.sh` builds a wheel of every in-tree package and of every `BACKEND_PACKAGES` entry into `.build/wheels`, installs them
-into `.venv/` and hands the directory to every `docker build` as the named context `wheels`. Dockerfiles take our packages
-from there (`COPY --from=wheels / /tmp/wheels`, then `pip install`), third-party dependencies come from PyPI. Every
+Every image is a plain `docker build -f <Dockerfile> <repo root>` (no buildx, no pre-built artifacts); `.dockerignore` narrows the
+context. Dockerfiles `COPY` our packages by repo-relative path (`COPY sdk/ /src/sdk/`) and `pip install` them in the image,
+third-party dependencies come from PyPI. Out-of-tree Dockerfiles are built the same way, so the SDK can be installed from the context;
+their own package is installed with `RUN pip install --no-deps git+https://...@<ref>`. Every
 `ARG NAME` a Dockerfile declares is fed from the environment variable `NAME` when it is set (that is how `ANDROID_FDROID_URL`
 reaches the slot image).
 
@@ -104,7 +106,7 @@ themselves never name a sibling.
 
 `./deploy.sh` (see [deploy and configure](../operations/deploy-and-configure.md)):
 
-1. load `.env`; create `.venv/` with `virtualenv` if missing; build wheels (`sdk/`, `backends/*`, `BACKEND_PACKAGES`) and `pip install --no-deps` them
+1. load `.env`; create `.venv/` with `virtualenv` if missing; `pip install --no-deps` the packages (`sdk/`, `backends/*`, `BACKEND_PACKAGES`) so their descriptors can be read
 2. `validate`: every name in `BACKENDS` is installed (unknown is a hard error), descriptors and overlays are well formed
 3. `preflight` of each backend, then the `docker build` of every image (deduped)
 4. `post_build` of each backend (and, with `IMAGE_PREFIX`, the images are pushed as they are built)
@@ -152,7 +154,7 @@ value, network and snapshot volume names, the Tor daemon's hostname.
 2. `descriptor.py`: a `SimpleNamespace` with the members above, stdlib only. Register it in `pyproject.toml` under the entry-point group.
 3. `docker-compose.yml`: the overlay, obeying the contract (every service, network and volume `backend-gopher-*`, a `backend-gopher-gateway`
    with `BACKEND: backend_gopher`, `BACKENDS` and `BACKEND_SERVERS`; add its network to `nginx`).
-4. `image/Dockerfile`: a thin image (`FROM` a family base, or your own) that installs the package from `COPY --from=wheels`.
+4. `image/Dockerfile`: a thin image (`FROM` a family base, or your own) that installs the package (`COPY` it from the repo root, or `pip install` its git URL). The descriptor's `builds` names this file; it is built with the repo root as context.
 5. `runtime.py`: `driver = YourDriver(...)`.
 6. In `.env`: `BACKEND_PACKAGES="git+ssh://.../backend_gopher.git"` (and, if it is not already installed, its dependencies) and add
    `backend_gopher` to `BACKENDS`. `./deploy.sh` builds and installs it, validates the overlay and deploys it; its server answers on

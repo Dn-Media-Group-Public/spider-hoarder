@@ -1,5 +1,5 @@
 """Descriptor of browser_clear: plain data and stdlib only (it is loaded by deploy.sh in the deploy host's virtualenv, which has no
-gateway dependencies). File paths are relative to this package; family build contexts are found with importlib.resources.
+gateway dependencies). File paths are relative to this package; family Dockerfiles are found with importlib.resources.
 See docs/architecture/backend-plugins.md."""
 
 from importlib import resources
@@ -19,8 +19,8 @@ descriptor = SimpleNamespace(
         'a real browser.'),
     compose="docker-compose.yml",
     builds=[
-        ("spider-hoarder-browser-base:local", _family("image")),
-        ("spider-hoarder-browser-clear:local", "image"),
+        ("spider-hoarder-browser-base:local", _family("image/Dockerfile")),
+        ("spider-hoarder-browser-clear:local", "image/Dockerfile"),
     ],
     services=['browser-clear-gateway'],
     preflight=None,

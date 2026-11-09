@@ -1,5 +1,5 @@
 """Descriptor of browser_i2p: plain data and stdlib only (it is loaded by deploy.sh in the deploy host's virtualenv, which has no
-gateway dependencies). File paths are relative to this package; family build contexts are found with importlib.resources.
+gateway dependencies). File paths are relative to this package; family Dockerfiles are found with importlib.resources.
 See docs/architecture/backend-plugins.md."""
 
 from importlib import resources
@@ -19,10 +19,10 @@ descriptor = SimpleNamespace(
         'tunnels are built, and eepsites are often offline.'),
     compose="docker-compose.yml",
     builds=[
-        ("spider-hoarder-browser-base:local", _family("image")),
-        ("spider-hoarder-browser-i2p-router:local", "router"),
-        ("spider-hoarder-browser-i2p-seed:local", "seed"),
-        ("spider-hoarder-browser-i2p:local", "image"),
+        ("spider-hoarder-browser-base:local", _family("image/Dockerfile")),
+        ("spider-hoarder-browser-i2p-router:local", "router/Dockerfile"),
+        ("spider-hoarder-browser-i2p-seed:local", "seed/Dockerfile"),
+        ("spider-hoarder-browser-i2p:local", "image/Dockerfile"),
     ],
     services=['browser-i2p-gateway', 'browser-i2p-router', 'browser-i2p-seed'],
     preflight=None,

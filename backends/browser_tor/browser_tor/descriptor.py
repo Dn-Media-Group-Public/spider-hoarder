@@ -1,5 +1,5 @@
 """Descriptor of browser_tor: plain data and stdlib only (it is loaded by deploy.sh in the deploy host's virtualenv, which has no
-gateway dependencies). File paths are relative to this package; family build contexts are found with importlib.resources.
+gateway dependencies). File paths are relative to this package; family Dockerfiles are found with importlib.resources.
 See docs/architecture/backend-plugins.md."""
 
 from importlib import resources
@@ -19,9 +19,9 @@ descriptor = SimpleNamespace(
         'many sites show CAPTCHAs or block Tor exits.'),
     compose="docker-compose.yml",
     builds=[
-        ("spider-hoarder-browser-base:local", _family("image")),
-        ("spider-hoarder-browser-tor-daemon:local", "daemon"),
-        ("spider-hoarder-browser-tor:local", "image"),
+        ("spider-hoarder-browser-base:local", _family("image/Dockerfile")),
+        ("spider-hoarder-browser-tor-daemon:local", "daemon/Dockerfile"),
+        ("spider-hoarder-browser-tor:local", "image/Dockerfile"),
     ],
     services=['browser-tor-gateway', 'browser-tor-daemon'],
     preflight=None,

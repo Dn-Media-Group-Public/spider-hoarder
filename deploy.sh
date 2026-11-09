@@ -62,20 +62,14 @@ for v in "${REQUIRED[@]}"; do
   fi
 done
 
-# --- the virtualenv (well-known location) and the packages: wheels are built once, installed here and copied into the
-# images by the Dockerfiles (`COPY --from=wheels`). In-tree: all of them (BACKENDS decides what is enabled).
+# --- the virtualenv (well-known location): only reads the descriptors (entry points); the images build from source in docker build.
+# In-tree: all packages (BACKENDS decides what is enabled). --no-deps: descriptors are stdlib-only.
 [ -x .venv/bin/python ] || virtualenv -q .venv
 # shellcheck disable=SC1091
 source .venv/bin/activate
-rm -rf .build/wheels && mkdir -p .build/wheels
-SPECS=(./sdk ./backends/*/)
-# shellcheck disable=SC2206
-SPECS+=(${BACKEND_PACKAGES:-})
-for spec in "${SPECS[@]}"; do
-  pip wheel -q --no-deps -w .build/wheels "$spec"
-done
 pip install -q pyyaml
-pip install -q --no-deps --force-reinstall .build/wheels/*.whl
+# shellcheck disable=SC2086
+pip install -q --no-deps --force-reinstall ./sdk ./backends/*/ ${BACKEND_PACKAGES:-}
 
 TOOL="python scripts/spider_hoarder.py"
 $TOOL validate
@@ -83,7 +77,7 @@ $TOOL preflight
 
 # Build local images (build: is ignored in stack deploy)
 $TOOL build-image oauth2-proxy-dcr:local oauth2-proxy
-$TOOL build "$PWD/.build/wheels"
+$TOOL build
 
 # Initialize swarm if not already active
 docker info --format '{{.Swarm.LocalNodeState}}' | grep -q active || docker swarm init

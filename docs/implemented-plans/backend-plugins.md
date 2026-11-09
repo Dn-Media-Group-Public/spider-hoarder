@@ -5,7 +5,7 @@ never by file or line. Reference: [Pluggable backends](../architecture/backend-p
 
 Deviations from this text, made while implementing: `BACKEND_SERVERS` (a JSON list of title and description, built by the deploy tool) is part of the overlay
 contract next to `BACKENDS`, because a container only has its own backend installed and could not read the other descriptors for the "other servers" list;
-`deploy.sh` builds wheels (`pip wheel`) and installs those, and Dockerfiles `COPY --from=wheels` (a named build context) instead of copying sources;
+`deploy.sh` built wheels and Dockerfiles `COPY --from=wheels` (reversed by [Build everything inside `docker build`](build-in-docker.md));
 the deploy tool reads overlays with PyYAML, which `deploy.sh` installs into `.venv/`; the slot image context is the package-local `slot/` directory
 (toolserver inside it); Dockerfile `ARG`s are fed from environment variables of the same name; `deploy.sh` generates the dev-only gateway settings
 (`.build/docker-compose.dev-gateways.yml`) for the enabled backends.

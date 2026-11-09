@@ -1,0 +1,13 @@
+# Build context of every image is the repo root (docs/plans/build-in-docker.md); keep secrets and junk out of it.
+.git
+.venv
+.build
+.env*
+.claude
+data
+docs
+**/tests
+**/build
+**/*.egg-info
+**/__pycache__
+*.md

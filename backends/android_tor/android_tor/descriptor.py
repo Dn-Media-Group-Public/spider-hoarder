@@ -1,5 +1,5 @@
 """Descriptor of android_tor: plain data and stdlib only (it is loaded by deploy.sh in the deploy host's virtualenv, which has no
-gateway dependencies). File paths are relative to this package; family files are found with importlib.resources.
+gateway dependencies). File paths are relative to this package; family Dockerfiles are found with importlib.resources.
 See docs/architecture/backend-plugins.md."""
 
 from importlib import resources
@@ -27,11 +27,11 @@ descriptor = SimpleNamespace(
         'services block Tor exits, and Google sign-in / Play Store are often refused.'),
     compose="docker-compose.yml",
     builds=[
-        ("spider-hoarder-android-base:local", _family("image")),
-        ("spider-hoarder-android-slot:local", _family("slot")),   # ARGs of its Dockerfile are fed from the environment
-        ("spider-hoarder-android-wrapper:local", _family("wrapper")),
-        ("spider-hoarder-android-tor-daemon:local", "daemon"),
-        ("spider-hoarder-android-tor:local", "image"),
+        ("spider-hoarder-android-base:local", _family("image/Dockerfile")),
+        ("spider-hoarder-android-slot:local", _family("slot/Dockerfile")),   # ARGs of its Dockerfile are fed from the environment
+        ("spider-hoarder-android-wrapper:local", _family("wrapper/Dockerfile")),
+        ("spider-hoarder-android-tor-daemon:local", "daemon/Dockerfile"),
+        ("spider-hoarder-android-tor:local", "image/Dockerfile"),
     ],
     services=['android-tor-gateway', 'android-tor-wrapper', 'android-tor-daemon'],
     preflight=_family("preflight.sh"),

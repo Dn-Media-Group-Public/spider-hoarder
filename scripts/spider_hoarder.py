@@ -7,7 +7,7 @@ descriptors with importlib.metadata and uses PyYAML for the overlay check; see d
 
   validate           every name in BACKENDS is installed, descriptors are well formed, overlays obey the contract
   preflight          run each backend's preflight script (non-zero = abort, with its stderr)
-  build WHEELS       docker build (and push, when IMAGE_PREFIX is set) every image of the enabled backends, once per tag
+  build              docker build -f <Dockerfile> <repo root> (and push, when IMAGE_PREFIX is set) every image of the enabled backends, once per tag
   build-image TAG CTX  the same for one image outside the descriptors (deploy.sh's oauth2-proxy-dcr)
   pin FILE           placement overlay: base oauth2-proxy and every enabled backend's `pinned` services on $PIN_DATA
                      (writes nothing when PIN_DATA is empty)
@@ -30,6 +30,7 @@ import shlex
 import subprocess
 import sys
 
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # the build context of every backend image
 GROUP = "spider_hoarder.backends"
 NAME_RE = re.compile(r"^[a-z][a-z0-9]*(_[a-z0-9]+)+$")
 MEMBERS = ("name", "title", "description", "compose", "builds", "services", "runtime")  # required; the rest are optional
@@ -116,9 +117,9 @@ def check_descriptor(b: Backend) -> list[str]:
         errs.append(f"{b.name}: runtime must be a `module:Object` import string")
     if not os.path.isfile(b.path(d.compose)):
         errs.append(f"{b.name}: stack overlay {b.path(d.compose)} does not exist")
-    for tag, ctx in d.builds:
-        if not os.path.isfile(os.path.join(b.path(ctx), "Dockerfile")):
-            errs.append(f"{b.name}: build {tag}: no Dockerfile in {b.path(ctx)}")
+    for tag, dockerfile in d.builds:
+        if not os.path.isfile(b.path(dockerfile)):
+            errs.append(f"{b.name}: build {tag}: Dockerfile {b.path(dockerfile)} does not exist")
     for hook in OPTIONAL[:2]:
         if b.optional(hook) and not os.path.isfile(b.path(b.optional(hook))):
             errs.append(f"{b.name}: {hook} script {b.path(b.optional(hook))} does not exist")
@@ -220,18 +221,18 @@ def run_hook(b: Backend, member: str, environ, run=subprocess.run) -> None:
 
 
 def build_plan(backends: list[Backend]) -> list[tuple[str, str, str]]:
-    """(tag, context dir, owner) in order, deduped by tag, the first descriptor to name a tag wins."""
+    """(tag, Dockerfile, owner) in order, deduped by tag, the first descriptor to name a tag wins."""
     plan, seen = [], set()
     for b in backends:
-        for tag, ctx in b.d.builds:
+        for tag, dockerfile in b.d.builds:
             if tag not in seen:
                 seen.add(tag)
-                plan.append((tag, b.path(ctx), b.name))
+                plan.append((tag, b.path(dockerfile), b.name))
     return plan
 
 
-def dockerfile_args(ctx: str) -> list[str]:
-    with open(os.path.join(ctx, "Dockerfile")) as f:
+def dockerfile_args(dockerfile: str) -> list[str]:
+    with open(dockerfile) as f:
         return re.findall(r"^ARG\s+([A-Za-z_][A-Za-z0-9_]*)", f.read(), re.M)
 
 
@@ -240,28 +241,28 @@ def image_ref(tag: str, environ) -> str:
     return f"{environ.get('IMAGE_PREFIX') or ''}{tag.removesuffix(':local')}:{environ.get('IMAGE_TAG') or 'local'}"
 
 
-def build_command(tag: str, ctx: str, wheels: str | None, environ) -> list[str]:
-    """docker build with the wheels as the named context `wheels` (Dockerfiles `COPY --from=wheels`), and every ARG the
-    Dockerfile declares fed from the environment variable of the same name when it is set."""
-    cmd = ["docker", "build"] + (["--build-context", f"wheels={wheels}"] if wheels else []) + ["-t", image_ref(tag, environ)]
-    for a in dockerfile_args(ctx):
+def build_command(tag: str, dockerfile: str, context: str, environ) -> list[str]:
+    """Plain `docker build -f <dockerfile> <context>`, and every ARG the Dockerfile declares fed from the environment
+    variable of the same name when it is set."""
+    cmd = ["docker", "build", "-f", dockerfile, "-t", image_ref(tag, environ)]
+    for a in dockerfile_args(dockerfile):
         if environ.get(a):
             cmd += ["--build-arg", f"{a}={environ[a]}"]
-    return cmd + [ctx]
+    return cmd + [context]
 
 
-def build_one(tag: str, ctx: str, wheels: str | None, environ, owner="deploy", run=subprocess.run) -> None:
+def build_one(tag: str, dockerfile: str, context: str, environ, owner="deploy", run=subprocess.run) -> None:
     ref = image_ref(tag, environ)
     print(f"==> building {ref} ({owner})", file=sys.stderr, flush=True)
-    if run(build_command(tag, ctx, wheels, environ), env=environ).returncode != 0:
+    if run(build_command(tag, dockerfile, context, environ), env=environ).returncode != 0:
         raise DeployError(f"docker build of {ref} failed")
     if environ.get("IMAGE_PREFIX") and run(["docker", "push", ref], env=environ).returncode != 0:
         raise DeployError(f"docker push of {ref} failed")
 
 
-def build(backends: list[Backend], wheels: str, environ, run=subprocess.run) -> None:
-    for tag, ctx, owner in build_plan(backends):
-        build_one(tag, ctx, wheels, environ, owner, run)
+def build(backends: list[Backend], environ, run=subprocess.run) -> None:
+    for tag, dockerfile, owner in build_plan(backends):
+        build_one(tag, dockerfile, REPO_ROOT, environ, owner, run)
 
 
 def pin_overlay(backends: list[Backend], environ) -> str:
@@ -329,9 +330,9 @@ def main(argv=None, environ=None) -> int:
             for b in backends:
                 run_hook(b, "preflight", environ)
         elif cmd == "build":
-            build(backends, args[0], environ)
+            build(backends, environ)
         elif cmd == "build-image":
-            build_one(args[0], args[1], None, environ)
+            build_one(args[0], os.path.join(args[1], "Dockerfile"), args[1], environ)
         elif cmd == "pin":
             overlay = pin_overlay(backends, environ)
             if overlay:

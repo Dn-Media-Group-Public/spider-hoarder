@@ -1,5 +1,5 @@
-# browser_tor: the browser base image plus this backend's package. Built by scripts/ with
-# `--build-context wheels=<dir of the wheels deploy.sh built>`.
+# browser_tor: the browser gateway base image plus this backend's package. Build context: the repo root
+# (docker build -f backends/browser_tor/browser_tor/image/Dockerfile .).
 FROM spider-hoarder-browser-base:local
-COPY --from=wheels / /tmp/wheels
-RUN pip install --no-cache-dir --no-deps /tmp/wheels/browser_tor-*.whl && rm -rf /tmp/wheels && chmod -R a+rX /venv/lib
+COPY backends/browser_tor/ /src/browser_tor/
+RUN pip install --no-cache-dir --no-deps /src/browser_tor && rm -rf /src && chmod -R a+rX /venv/lib

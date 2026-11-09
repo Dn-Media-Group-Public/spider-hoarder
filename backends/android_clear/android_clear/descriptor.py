@@ -1,5 +1,5 @@
 """Descriptor of android_clear: plain data and stdlib only (it is loaded by deploy.sh in the deploy host's virtualenv, which has no
-gateway dependencies). File paths are relative to this package; family files are found with importlib.resources.
+gateway dependencies). File paths are relative to this package; family Dockerfiles are found with importlib.resources.
 See docs/architecture/backend-plugins.md."""
 
 from importlib import resources
@@ -27,10 +27,10 @@ descriptor = SimpleNamespace(
         'tools (tap, type, swipe, screenshots, APK install).'),
     compose="docker-compose.yml",
     builds=[
-        ("spider-hoarder-android-base:local", _family("image")),
-        ("spider-hoarder-android-slot:local", _family("slot")),   # ARGs of its Dockerfile are fed from the environment
-        ("spider-hoarder-android-wrapper:local", _family("wrapper")),
-        ("spider-hoarder-android-clear:local", "image"),
+        ("spider-hoarder-android-base:local", _family("image/Dockerfile")),
+        ("spider-hoarder-android-slot:local", _family("slot/Dockerfile")),   # ARGs of its Dockerfile are fed from the environment
+        ("spider-hoarder-android-wrapper:local", _family("wrapper/Dockerfile")),
+        ("spider-hoarder-android-clear:local", "image/Dockerfile"),
     ],
     services=['android-clear-gateway', 'android-clear-wrapper'],
     preflight=_family("preflight.sh"),

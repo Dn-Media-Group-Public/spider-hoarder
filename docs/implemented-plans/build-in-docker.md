@@ -1,6 +1,6 @@
 # Plan: Build everything inside `docker build`
 
-Status: plan, awaiting review. Supersedes the "wheels" build described in
+Status: implemented. Supersedes the "wheels" build described in
 [Pluggable backends](../implemented-plans/backend-plugins.md) and [Backend plugins](../architecture/backend-plugins.md).
 
 ## Problem / Goal
@@ -36,8 +36,9 @@ Decisions (agreed in the planning discussion):
    (deduped by tag, first wins, as now) and pushes when `IMAGE_PREFIX` is set. `ARG`s a Dockerfile declares are still fed from the environment
    variable of the same name.
 3. **Out-of-tree backends** stay what they are: a git repo, installable by pip URL, registering the descriptor as a setuptools entry point.
-   Its descriptor lists its Dockerfile, and that Dockerfile `pip install`s the backend's git URL into the virtualenv inside the image it builds
-   (`FROM` the family base image, `RUN /venv/bin/pip install --no-deps git+https://...@<ref>`).
+   Its descriptor lists its Dockerfile, which is built with the same repo-root context as in-tree images (so the SDK install works). The
+   Dockerfile is `FROM` the family base image and may `pip install` GitHub URLs in any way it wants (e.g.
+   `RUN /venv/bin/pip install --no-deps git+https://...@<ref>`).
 4. **The host keeps a `.venv/` only to read descriptors** (entry points), as today. `deploy.sh` installs the packages into it from their
    source dirs and `BACKEND_PACKAGES` URLs with `pip install --no-deps` (descriptors are stdlib-only; the gateway dependencies live in the images, not on the host). No wheel directory exists any more. Running the tool in a throwaway
    container was discussed and is not part of this plan.
@@ -54,8 +55,8 @@ Concrete shape:
 - Helper images (tor and i2p daemons, i2p router and seed, android slot and wrapper): same Dockerfiles, `COPY` paths get the package-relative
   prefix, e.g. `COPY backends/browser_tor/browser_tor/daemon/entrypoint.sh /entrypoint.sh`.
 - `scripts/spider_hoarder.py`: `build_command` becomes `docker build -f <dockerfile> -t <ref> [--build-arg ...] <context>`; the wheel
-  argument, `.wheels` copying and `dockerfile_args(ctx)` (now reads the named Dockerfile) are removed. Context is the repo root for in-tree
-  backends and the Dockerfile's own package directory for out-of-tree ones, whose helper files live there.
+  argument, `.wheels` copying and `dockerfile_args(ctx)` (now reads the named Dockerfile) are removed. The context is always the repo root,
+  for in-tree and out-of-tree backends alike.
 - `oauth2-proxy` and `nginx` images keep their own small contexts (`build-image`), unchanged.
 
 Behaviour change for out-of-tree backends: the descriptor member `builds` changes shape and their Dockerfiles can no longer
@@ -108,4 +109,4 @@ Behaviour change for out-of-tree backends: the descriptor member `builds` change
 ## Migration note for out-of-tree backends
 
 Change `builds` entries from `(tag, context_dir)` to `(tag, dockerfile)`. Replace `COPY --from=wheels / /tmp/wheels` and its `pip install`
-with `RUN /venv/bin/pip install --no-deps <your git URL>@<ref>`. Keep helper-image `COPY`s relative to your package directory.
+with `RUN /venv/bin/pip install --no-deps <your git URL>@<ref>`. Your Dockerfile is built with the repo root as context, not your package directory.

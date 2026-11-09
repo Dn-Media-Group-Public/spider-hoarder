@@ -85,7 +85,7 @@ The MCP client is whatever drives the tools over MCP (Claude); the user is the h
 
 ## Code map
 
-Separate pip distributions in one repository, installed into `.venv/` by `deploy.sh` and into the images from the same wheels. Tests live next to each package (run per package: [Deploying](../operations/deploy-and-configure.md#tests)).
+Separate pip distributions in one repository, installed into `.venv/` by `deploy.sh` (descriptors only) and built into the images from source by `docker build`. Tests live next to each package (run per package: [Deploying](../operations/deploy-and-configure.md#tests)). See also: [Plan: Build everything inside `docker build`](../implemented-plans/build-in-docker.md)
 
 | Path | Responsibility |
 |---|---|
