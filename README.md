@@ -43,7 +43,7 @@ cp .env.example .env   # fill in PUBLIC_HOST, OIDC_ISSUER and the secrets
 ```
 
 What runs is the `BACKENDS` list in `.env` (space-separated; an unknown name is an error). Each backend is a pip package with its own
-compose overlay, images and helpers, and gets one MCP endpoint, named after it with dashes. In tree:
+stack overlay, images and helpers, and gets one MCP endpoint, named after it with dashes. In tree:
 
 - `browser_tor` → `$PUBLIC_SCHEME://$PUBLIC_HOST/browser-tor/mcp` — browsers egress via Tor only
 - `browser_clear` → `/browser-clear/mcp` — direct egress, public internet only

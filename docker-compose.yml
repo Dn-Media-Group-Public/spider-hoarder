@@ -1,6 +1,6 @@
 # spider-hoarder base stack: nginx (routing), oauth2-proxy (live-view login) and the shared networks. The backends (what browses,
 # what emulates: browser_clear, browser_tor, browser_i2p, android_clear, android_tor, or any out-of-tree backend) each bring
-# their own compose overlay, merged by deploy.sh for the names in BACKENDS (docs/architecture/backend-plugins.md):
+# their own stack overlay, merged by deploy.sh for the names in BACKENDS (docs/architecture/backend-plugins.md):
 #   $PUBLIC_SCHEME://$PUBLIC_HOST/<backend-with-dashes>/mcp     e.g. /browser-tor/mcp, /android-clear/mcp
 # Auth: an external OIDC IdP (OIDC_ISSUER, Keycloak); `./deploy.sh --dev` adds a local one
 # (docker-compose.dev.yml). Set it up with keycloak/setup.sh (realm, scopes, DCR for Claude, a user).

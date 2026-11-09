@@ -1,7 +1,7 @@
 # Pluggable backends
 
 A **backend** is a self-contained, pip-installable Python package that brings everything one MCP server needs: its gateway
-driver, its compose overlay, its Dockerfiles and its helper services. It registers itself through a setuptools entry point,
+driver, its stack overlay, its Dockerfiles and its helper services. It registers itself through a setuptools entry point,
 so backends can live **out of tree**. A sysadmin chooses what runs with one list, `BACKENDS` in `.env`; a disabled backend
 costs nothing (no images, services, networks, routes or hints).
 
@@ -55,7 +55,7 @@ browser_tor = "browser_tor.descriptor:descriptor"
 |---|---|
 | `name` | canonical id; must equal the entry-point name |
 | `title`, `description` | LLM-readable text; the landing page and the "other servers" entries in every other gateway's instructions |
-| `compose` | compose overlay, merged with `-c` |
+| `compose` | stack overlay, merged with `-c` |
 | `builds` | ordered `(image tag, context dir)` pairs; deduped by tag, first wins, so a family base image builds once. The context needs a `Dockerfile` |
 | `services` | services force-restarted after deploy (prefixed names, they must exist in the overlay) |
 | `preflight` | optional shell script; host checks (`/dev/kvm`, x86_64, required variables); non-zero exit aborts the deploy with its stderr |
@@ -68,7 +68,7 @@ Hooks run with `sh` and get the deploy environment plus `BACKEND` (canonical), `
 
 ### Images
 
-Descriptors name `builds` tags as `<name>:local`; the deploy tool builds and pushes `${IMAGE_PREFIX}<name>:${IMAGE_TAG}` (prefix empty, tag `local` by default), which is what the compose files say. See also: [Plan: Multi-node swarm support](../implemented-plans/multi-node.md)
+Descriptors name `builds` tags as `<name>:local`; the deploy tool builds and pushes `${IMAGE_PREFIX}<name>:${IMAGE_TAG}` (prefix empty, tag `local` by default), which is what the stack files say. See also: [Plan: Multi-node swarm support](../implemented-plans/multi-node.md)
 
 Every backend has a thin image on a **family base**: `FROM` the family base tag, install only the backend's own package. The
 browser base holds Chromium, Xvfb/VNC, the session daemon, the SDK and the browser-sdk. The Android gateway image is light (SDK and
@@ -85,7 +85,7 @@ reaches the slot image).
 The base `docker-compose.yml` keeps only nginx, oauth2-proxy and the shared `public` / `auth` networks. A backend's overlay:
 
 - prefixes **every** service, network and volume with the hyphenated backend name; the gateway service is `<name>-gateway`;
-- adds its own session network(s) to the base `nginx` service (the compose list merge appends); that is the only thing an overlay
+- adds its own session network(s) to the base `nginx` service (the stack-file list merge appends); that is the only thing an overlay
   may set on `nginx`;
 - sets `BACKEND=<canonical name>`, `BACKENDS: ${BACKENDS}` and `BACKEND_SERVERS: ${BACKEND_SERVERS}` in its gateway's environment;
 - uses per-backend variable names (`<NAME>_REPLICAS`, `ANDROID_TOR_SLOTS`, ...).

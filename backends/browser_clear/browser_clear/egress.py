@@ -24,7 +24,7 @@ class ClearEgress(Egress):
         for n in ns:
             for proto in ("udp", "tcp"):
                 rules.append(["-A", "OUTPUT", "-m", "owner", "--uid-owner", uid_range, "-d", n, "-p", proto, "--dport", "53", "-j", "ACCEPT"])
-        # public internet only; no RFC1918/link-local/CGNAT/metadata/other compose services
+        # public internet only; no RFC1918/link-local/CGNAT/metadata/other stack services
         for net in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "169.254.0.0/16", "100.64.0.0/10", "127.0.0.0/8"):
             rules.append(["-A", "OUTPUT", "-m", "owner", "--uid-owner", uid_range, "-d", net, "-j", "REJECT"])
         rules.append(["-A", "OUTPUT", "-m", "owner", "--uid-owner", uid_range, "-j", "ACCEPT"])

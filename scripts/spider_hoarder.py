@@ -16,7 +16,7 @@ descriptors with importlib.metadata and uses PyYAML for the overlay check; see d
   landing FILE       the static landing page (claude mcp add lines + each backend's title and description)
   compose            one `-c <overlay>` argument per line
   services           the services to force-restart after deploy, one per line (unprefixed)
-  dev-overlay FILE   compose overlay with the dev-only settings of every enabled gateway
+  dev-overlay FILE   stack overlay with the dev-only settings of every enabled gateway
 
 Hooks (preflight, post_build, build contexts) get BACKEND, BACKEND_HYPHEN and STACK_NAME in their environment."""
 
@@ -34,8 +34,8 @@ GROUP = "spider_hoarder.backends"
 NAME_RE = re.compile(r"^[a-z][a-z0-9]*(_[a-z0-9]+)+$")
 MEMBERS = ("name", "title", "description", "compose", "builds", "services", "runtime")  # required; the rest are optional
 OPTIONAL = ("preflight", "post_build", "env")  # and `pinned`: services with node-local state, a subset of `services`
-BASE_PINNED = ("oauth2-proxy",)  # the base compose file's services with local state
-SHARED_NETWORKS = ("public", "auth")  # the base compose file's networks, usable by overlays
+BASE_PINNED = ("oauth2-proxy",)  # the base stack file's services with local state
+SHARED_NETWORKS = ("public", "auth")  # the base stack file's networks, usable by overlays
 
 
 class DeployError(Exception):
@@ -115,7 +115,7 @@ def check_descriptor(b: Backend) -> list[str]:
     if ":" not in d.runtime:
         errs.append(f"{b.name}: runtime must be a `module:Object` import string")
     if not os.path.isfile(b.path(d.compose)):
-        errs.append(f"{b.name}: compose overlay {b.path(d.compose)} does not exist")
+        errs.append(f"{b.name}: stack overlay {b.path(d.compose)} does not exist")
     for tag, ctx in d.builds:
         if not os.path.isfile(os.path.join(b.path(ctx), "Dockerfile")):
             errs.append(f"{b.name}: build {tag}: no Dockerfile in {b.path(ctx)}")
@@ -236,7 +236,7 @@ def dockerfile_args(ctx: str) -> list[str]:
 
 
 def image_ref(tag: str, environ) -> str:
-    """The real image name of a descriptor tag `<name>:local`: `${IMAGE_PREFIX}<name>:${IMAGE_TAG}` (what the compose files say)."""
+    """The real image name of a descriptor tag `<name>:local`: `${IMAGE_PREFIX}<name>:${IMAGE_TAG}` (what the stack files say)."""
     return f"{environ.get('IMAGE_PREFIX') or ''}{tag.removesuffix(':local')}:{environ.get('IMAGE_TAG') or 'local'}"
 
 

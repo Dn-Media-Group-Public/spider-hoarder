@@ -13,7 +13,7 @@ See also: [Plan: Android hoarder](../implemented-plans/android-hoarder.md), [Pla
 
 ## Components (Docker Swarm stack)
 
-What runs is the `BACKENDS` list in `.env`: every backend is a pip package that registers a descriptor and brings its own compose
+What runs is the `BACKENDS` list in `.env`: every backend is a pip package that registers a descriptor and brings its own stack
 overlay, images and helpers ([Pluggable backends](backend-plugins.md)). Names are canonical (`browser_tor`); URLs, services and DNS use the
 hyphenated form (`/browser-tor/mcp`, service `browser-tor-gateway`). A disabled backend has no images, services, networks, routes or hints.
 See also: [Plan: Pluggable backends](../implemented-plans/backend-plugins.md)
@@ -71,7 +71,7 @@ See [Scaling and routing](scaling.md). Authentication: [Authentication and live 
 
 | Name | Meaning |
 |---|---|
-| **Backend** | A pip package registered under the entry-point group `spider_hoarder.backends` (`browser_tor`, `android_clear`, ...): descriptor, compose overlay, images, helpers, driver. |
+| **Backend** | A pip package registered under the entry-point group `spider_hoarder.backends` (`browser_tor`, `android_clear`, ...): descriptor, stack overlay, images, helpers, driver. |
 | **Driver** | The backend's gateway-side object (`$BACKEND`): pool backend, upstream MCP URL, tool hooks. |
 | **Gateway** | The shared MCP server in each `<backend>-gateway` container (uid 1000). |
 | **Content pipeline** | extract / store / fetch of bytes -> Markdown; part of the gateway. |

@@ -2,7 +2,7 @@
 sessiond and the gateway drop the capability). Per session uid: only its own loopback ports (so sessions cannot reach the
 gateway or each other), replies on accepted connections, the Docker resolver, its own SocksPort of the router, and
 whatever the egress policy adds; everything else is rejected. ponytail: IPv6 is rejected outright for session uids; add
-rules if the compose networks ever get v6."""
+rules if the stack networks ever get v6."""
 
 import subprocess
 

@@ -7,5 +7,6 @@ Plans awaiting implementation or kept as background. Implemented plans move to [
 - [`mcp` 2.x SDK port](mcp-sdk-2-migration.md) — stub
 - [Persistent profile and Playwright traces](optional-session-features.md) — stub
 - [Kubernetes variant](kubernetes-variant.md) — stub
+- [Build everything inside `docker build`](build-in-docker.md) — drop the host-side wheel step; one repo-root context, a Dockerfile per image
 - [Android manual test](android-manual-test.md) — **todo, needs a human**: Google sign-in and real apps on both Android servers, the
   one part of the [Android bring-up](../implemented-plans/android-kvm-bringup.md) that could not be run unattended.
