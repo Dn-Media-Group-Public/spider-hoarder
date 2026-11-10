@@ -21,6 +21,8 @@ See also: [Plan: Browser sessions](../implemented-plans/browser-sessions-plan.md
 | `grep_file(job_id, path, pattern, context=2, max_matches=50)` | Regex search in a stored text file (`/pat/i` accepted). |
 | `get_file_url(job_id, path)` | Short-lived (15 min) signed download link. |
 
+Every job `files` list may also contain `metadata/<path>.yaml` (EXIF/GPS, Office authors and tracked changes, CRS/bounding box, media streams, PDF save history), readable with `get_file_text` / `grep_file`; only files that have metadata get one. See also: [Plan: file metadata](../implemented-plans/file-metadata.md)
+
 ## Browser tools (tool server)
 Every one takes optional `browser` (default `main`).
 - Navigation/interaction: `browser_navigate`, `_navigate_back`, `_click`, `_type`, `_fill_form`, `_press_key`, `_select_option`,

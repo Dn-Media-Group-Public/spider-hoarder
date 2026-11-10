@@ -3,7 +3,7 @@
 Plans awaiting implementation or kept as background. Implemented plans move to [implemented-plans](../implemented-plans/index.md).
 
 - [OCR: Tesseract first, remote multimodal model fallback](ocr-hybrid.md) — needs the lightllm plan `ocr-vision-models.md` for the default remote model
-- [File metadata extraction (YAML)](file-metadata.md) — `metadata/<path>.yaml`: ExifTool + raster/vector/Office/PDF/media extractors
+- [Parser service](parser-service.md) — all parsing and metadata extraction in a separate egress-less container with one HTTP endpoint; supersedes the child-process isolation of the file-metadata plan, amends the OCR plan
 - [gVisor runtime](gvisor-runtime.md) — stub
 - [Metrics and structured logs](metrics-and-logging.md) — stub
 - [`mcp` 2.x SDK port](mcp-sdk-2-migration.md) — stub

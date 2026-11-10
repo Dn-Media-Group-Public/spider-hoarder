@@ -6,7 +6,7 @@ FROM debian:bookworm-slim
 ENV PATH=/venv/bin:$PATH
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends python3 python3-venv python3-pip ca-certificates tini util-linux unar \
+ && apt-get install -y --no-install-recommends python3 python3-venv python3-pip ca-certificates tini util-linux unar libimage-exiftool-perl ffmpeg \
  && rm -rf /var/lib/apt/lists/*
 
 COPY sdk/ /src/sdk/

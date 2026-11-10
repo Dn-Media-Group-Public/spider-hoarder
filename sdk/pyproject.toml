@@ -25,6 +25,11 @@ dependencies = [
     "py7zr",
     "rarfile",
     "blackboxprotobuf",
+    "pyyaml",
+    "rasterio",
+    "pyogrio",
+    "lxml",
+    "pypdf",
 ]
 
 [tool.setuptools.packages.find]

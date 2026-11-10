@@ -4,6 +4,8 @@ and parsing it into Markdown, the {files, text?} job result. Nothing here knows 
 import mimetypes
 import os
 import re
+import shutil
+import tempfile
 import uuid
 import json
 from typing import Any
@@ -11,6 +13,7 @@ from typing import Any
 from mcp import types
 
 from spider_hoarder_sdk.content import extract
+from spider_hoarder_sdk.content import metadata
 from spider_hoarder_sdk.content import storage
 from spider_hoarder_sdk.gateway import ident
 
@@ -87,6 +90,23 @@ def _parse_one(key: str, path: str, raw: bytes, ctype: str, base_url: str, notes
     return text, f"parsed/{path}.md", _write_terse(key, f"{path}.md", text), f"terse/{path}.md"
 
 
+def _write_metadata(key: str, path: str, ctype: str, notes: list) -> None:
+    """Stage original/<path> to a temp file, extract its metadata and store metadata/<path>.yaml (if any)."""
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            staged = os.path.join(tmp, "f" + re.sub(r"[^a-z0-9.]", "", os.path.splitext(path.lower())[1])[:12])
+            with storage.open_read(key, f"original/{path}") as s, open(staged, "wb") as d:
+                shutil.copyfileobj(s, d)
+            meta = metadata.extract_metadata(staged, ctype, path, notes)
+        if meta:
+            text, truncated = metadata.dump_yaml(meta)
+            if truncated:
+                notes.append(f"{path}: metadata truncated (> METADATA_MAX_BYTES)")
+            storage.write_bytes(key, f"metadata/{path}.yaml", text.encode(), "application/yaml")
+    except Exception as e:  # noqa: BLE001  metadata never fails the job
+        notes.append(f"{path}: metadata failed ({type(e).__name__})")
+
+
 def _store_one(key: str, path: str, src, ctype: str, base_url: str = "", notes: list | None = None,
                unzip: bool = True) -> tuple | None:
     """Store `src` (bytes or a file object) as original/<path> and parse it by the one rule for every file;
@@ -97,6 +117,7 @@ def _store_one(key: str, path: str, src, ctype: str, base_url: str = "", notes: 
         size = len(src)
     else:
         size = storage.write_stream(key, f"original/{path}", src, ctype)
+    _write_metadata(key, path, ctype, notes)  # before the size check: these tools read headers, not whole files
     if size > MAX_PARSE_BYTES:
         notes.append(f"{path} not parsed ({size} bytes > MAX_PARSE_BYTES)")
         return None

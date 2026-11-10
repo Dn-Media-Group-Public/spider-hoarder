@@ -33,12 +33,38 @@ original/<path>      the bytes as received (for HTML: the converted HTML, i.e. t
 parsed/<path>.md     markitdown output (<path> may be nested, e.g. response/body.html)
 simplified/<name>.md trafilatura main-content guess (HTML only, may silently omit text; never returned inline)
 terse/<name>.md      outline: headings, links, images of parsed/ (or of a Markdown original)
+metadata/<path>.yaml file metadata (EXIF/GPS, Office revisions, CRS, media streams, PDF history); absent if there is none
 index.json           {files: [...], url?, target?, text_cap?, depth?, query?, method?, status?, and for
                      browser_network_request_make: type, origin?, body?, redirects?, blocked?}
 ```
 `text` is inline if the parsed/original text is under `INLINE_LIMIT` (50,000 chars); else the terse outline if that fits (with
 `text_path` naming it); else omitted, and the MCP client pages with `get_file_text` or searches with `grep_file`.
 See also: [Plan: Terse outline view](../implemented-plans/terse-view.md)
+
+### File metadata
+Every stored file (archive members too, and files over `MAX_PARSE_BYTES`: the extractors read headers) gets `metadata/<path>.yaml`
+(`application/yaml`, listed in `files` like `terse/`; `text` and the tool signatures are unchanged). No metadata → no file; a file
+whose only finding is its type (ExifTool's `File` group) counts as none.
+
+Top-level keys are groups. ExifTool's own (`exiftool -json -g1 -struct`: `EXIF`, `XMP-dc`, `QuickTime`, `File`, ...) pass through as
+produced, minus the filesystem facts of the staged copy (`System`, `ExifTool`, file name/size/times); binary tags are not embedded.
+Our extensions are further groups named `SpiderHoarder-<Format>`, values arbitrarily nested:
+
+| Group | Files | Content | Tool |
+|---|---|---|---|
+| `SpiderHoarder-Raster` | GeoTIFF/GDAL rasters | `CRS` (`EPSG`, `WKT`), `BBox`, `BBoxWGS84` (only with a CRS), `Resolution`, `Size`, `Bands`, `NoData`, `Tags` | `rasterio` |
+| `SpiderHoarder-Vector` | GPX, KML, GeoJSON, GeoPackage, shapefile zip | `CRS`, `BBox`, `BBoxWGS84`, `Layers` (name, geometry type, features) | `pyogrio` |
+| `SpiderHoarder-Office` | docx/xlsx/pptx | `Revisions` (docx tracked changes: author, date, insert/delete, text), `Comments`, `LastModifiedBy`, `RevisionCount` | `zipfile` + `lxml` (no entity expansion, size/ratio limits) |
+| `SpiderHoarder-PDF` | pdf | `IncrementalUpdates` (`%%EOF` count − 1; a linearized PDF reads one too high), XMP `History`, `Producer`, `Creator`, `CreatorTool` | `pypdf` + raw scan |
+| `SpiderHoarder-Media` | audio/video | `Duration`, `Streams`, `Chapters`, `Tags` | `ffprobe` |
+
+Code: `sdk/spider_hoarder_sdk/content/metadata.py`, called from `jobs._store_one` on a temp copy of `original/<path>` (so big or
+streamed files work). Each extractor runs in its own child process (`prlimit` address space `METADATA_MAX_MEM` = 1 GiB, CPU and
+output-size limits; wall clock `METADATA_TIMEOUT` = 30 s, killed on overrun; scrubbed environment; no network via `unshare -rn` where
+the kernel allows it, otherwise not enforced). A failing extractor is a note (`"<path>: metadata <extractor> failed (<error>)"`),
+never a failed job; the other extractors' output is still written. The YAML is capped at `METADATA_MAX_BYTES` (1 MiB): the longest
+list of an extension group is halved until it fits, with `Truncated: true` in the group and a note.
+See also: [Plan: file metadata](../implemented-plans/file-metadata.md)
 
 ## HTML conversion
 markitdown converts the whole page or the `target` element losslessly; trafilatura runs on the same HTML into `simplified/`.

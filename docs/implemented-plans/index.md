@@ -22,4 +22,6 @@ Back to the [documentation index](../index.md). Open plans: [plans](../plans/ind
 - [Restructure `mcp-research/` into packages, tests to `tests/`](restructure-directories.md)
 - [Agentic research MCP (independent fetch/parse server)](agentic-research-mcp.md)
 - [Newsroom browsers (original container-per-session design, superseded)](newsroom-browsers-plan.md)
-- [Multi-node swarm support (registry, `PIN_DATA`, several KVM nodes)](multi-node.md)- [Build everything inside `docker build` (repo-root context, a Dockerfile per image, no wheels)](build-in-docker.md)
+- [Multi-node swarm support (registry, `PIN_DATA`, several KVM nodes)](multi-node.md)
+- [Build everything inside `docker build` (repo-root context, a Dockerfile per image, no wheels)](build-in-docker.md)
+- [File metadata extraction (`metadata/<path>.yaml`)](file-metadata.md)

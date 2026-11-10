@@ -8,3 +8,5 @@ cmp_blocklist.txt
 build/
 *.egg-info/
 .pytest_cache/
+*~
+.claude

@@ -8,7 +8,7 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      python3 python3-venv python3-pip ca-certificates curl tini iptables util-linux unar \
+      python3 python3-venv python3-pip ca-certificates curl tini iptables util-linux unar libimage-exiftool-perl ffmpeg \
       xvfb x11vnc novnc websockify fonts-noto fonts-noto-cjk fonts-noto-color-emoji \
  && rm -rf /var/lib/apt/lists/*
 
