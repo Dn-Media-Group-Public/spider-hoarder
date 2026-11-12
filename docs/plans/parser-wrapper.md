@@ -1,8 +1,6 @@
 # Plan: parser service with a storage wrapper, a no-secret parser uid, an OCR sidecar and an authenticated egress proxy
 
-See also [Plan: parser service](parser-service.md) (the earlier design: this plan **replaces its topology and wire protocol** and keeps its "What moves",
-its limits and its latency measurements; of its open decisions only its 8 (parser unavailable, see Gateway side) and its 9 (`_describe_file`, now decision 8 below, decided) carry over, the
-rest are replaced, see the numbering note under "Decisions and open decisions"),
+See also [Plan: file metadata](../implemented-plans/file-metadata.md) (its child-process isolation is superseded by this plan),
 [Jobs, storage and links](../architecture/jobs-and-storage.md), [Session isolation](../architecture/session-isolation.md) (the uid lifecycle and the
 `browser_clear` egress rules this plan copies), [Backend plugins](../architecture/backend-plugins.md) (overlay contract),
 [Plan: OCR hybrid](ocr-hybrid.md) (its remote step moves to the OCR sidecar below).
@@ -11,14 +9,20 @@ reference, the shared bucket and the per-job scoped credentials are defined ther
 
 ## Problem / Goal
 
-Same problem as the parser-service plan: everything that interprets an untrusted file runs next to the gateway's secrets, storage credentials and
-networks. That plan removed parsing from the gateway but gave the parser **no storage access at all**, so every file (and every artefact) travels
-gateway → parser → gateway, and the gateway holds the whole data path.
+Everything that interprets an untrusted file runs inside the gateway container as the gateway's own uid (1000): markitdown, trafilatura, archive
+unpacking (`py7zr`, `rarfile`/`unar`), the binary decoders, and now ExifTool, `ffprobe`, GDAL, `lxml` and `pypdf`. A parser bug (memory corruption in a
+C library, ExifTool-style eval bugs) or a feature (an `.m3u8` that makes `ffprobe` fetch URLs, a `.vrt` pointing at `/vsicurl/`) then runs next to
+`BLOB_TOKEN_SECRET`, `/data`, the storage credentials, `sessiond`'s socket and the internal networks. The file-metadata plan contained this with
+`prlimit` + `unshare -rn`, but `unshare` is blocked by Docker's default seccomp profile, so in the shipped images there is no network isolation, and the
+child still shares the uid and filesystem view of the gateway.
+
+The obvious fix is a parser container with no egress and no storage access that takes a file over HTTP and streams the artefacts back. That makes the
+gateway carry every file and every artefact both ways (gateway → parser → gateway) and keeps it the whole data path, which does not scale with a blob store.
 
 Goal here: with a real blob store (GCS, S3, in dev SeaweedFS) parsing runs in a separate, **shared and horizontally scalable** service whose **parser process
 can read nothing, reach nothing and authenticate to nothing (except, when a job asks for remote OCR, the OCR sidecar with that one profile's token)**, while a
 small trusted **wrapper** in the same container moves the bytes between the blob store and the parser.
-The gateway only says "parse job X" and later reads the result from the blob store. Non-goal: removing the gateway's own direct storage access (uploads,
+The gateway only says "parse job X" and later reads the result from the blob store, and stops importing any parser. Non-goal: removing the gateway's own direct storage access (uploads,
 `get_file_text`, `get_file_url`, `/blob/` all stay as they are).
 
 ## Design
@@ -94,7 +98,8 @@ part of this plan.
 reads `index.json`; the **inline-text logic moves here** (`INLINE_LIMIT`, terse fallback): it reads `parsed/…` (or, for a file the manifest marks as text, `original/…`) or `terse/…` only if the size in the
 manifest is under the limit. `get_file_text`, `grep_file`, `get_file_url` and the tool signatures do not change. Parser unavailable, 503 after retries,
 `failed`, or a poll timeout stores nothing more, adds `"<path> not parsed (…)"` to the notes and **never fails the job or loses the original**
-(the parser-service rule). No in-process fallback. The gateway decides per job whether to send `features.ocr` (a per-backend setting in the overlay,
+(parsing never fails a job). A single retry is made on 503 or a refused connection. No in-process fallback: that would keep the parsers and their
+dependencies in the gateway. The gateway decides per job whether to send `features.ocr` (a per-backend setting in the overlay,
 replacing the `OCR_BASE_URL_<BACKEND>` variables of the OCR plan).
 
 ### The proxy
@@ -145,6 +150,53 @@ on; the parser container is not.
 
 `sdk/pyproject.toml` gets optional extras `gcs = ["gcsfs"]` and `s3 = ["s3fs"]`; the images install the one the deployment uses (build `ARG`).
 
+### Inside the parser
+
+The parser process runs today's whole per-file logic as a pure function `parse_file(path, ctype, base_url, unzip, features)`: it yields
+`(relpath, file, ctype)` artefacts plus notes, with no storage access. That covers detection by extension, archive unpack (members are parsed in the same
+process; `unzip=0` for members so archives are not unpacked again), markitdown/trafilatura, the binary decoders, `terse`, and the metadata extractors of
+the file-metadata plan. The extractors still run as their own child processes (one bad extractor does not lose the parse) with their `prlimit`s as a second
+layer. `unshare -rn` is dropped: the container's networks and the uid separation are the isolation. A per-job process: **no warm worker pool** in this
+plan (cold imports are small, see Latency); add one only if the benchmark in step 8 says so.
+
+### What moves
+
+`content/extract.py` and `content/metadata.py` and the parse half of `gateway/jobs.py` (`_parse_one`, the archive branch of `_store_one`, `_write_metadata`,
+`_write_terse`, `_describe_file`'s conversion) move into a new package `parser/` (`spider_hoarder_parser`: `wrapper`, `worker`, `parse`, `extract`,
+`metadata`, `ocr`). The gateway keeps `grep_text`, `textcap`, storage and `_job_result`, and gains `gateway/parse_client.py`, which `_store_one` calls where
+it now calls `_parse_one`. The `sdk/pyproject.toml` dependencies of the parsers (`markitdown[all]`, `trafilatura`, `py7zr`, `rarfile`, `msgpack`, `cbor2`,
+`bson`, `blackboxprotobuf`, `lxml_html_clean`, `rasterio`, `pyogrio`, `pypdf`, `pyyaml`, ...) move to `parser/pyproject.toml`; the gateway images drop them
+and `unar`, `libimage-exiftool-perl`, `ffmpeg` (smaller, faster to build). `get_file_text` / `grep_file` and the tool signatures do not change.
+
+Errors and size/time limits stay as they are today, now enforced in the parser: `MAX_ARCHIVE_BYTES`, `MAX_ARCHIVE_MEMBERS`, `MAX_PARSE_BYTES` (a bigger file
+gets metadata only), `METADATA_*`. Parsing never fails a job and never loses the original.
+
+### Latency
+
+Per file, the new cost is the wrapper's pull of the original from the store, the upload of the artefacts, the parser start and the gateway's poll
+(50 ms growing to 1 s); the old gateway-side costs that disappear are the in-process call and, for large files, `storage.read_bytes` into memory. Parse time
+itself is unchanged. Unlike the earlier gateway-streaming design, no file or artefact passes through the gateway, so large archives and oversize files cost the
+gateway nothing; their transfer is store ↔ parser.
+
+Measured on a 27-core arm64 host, venv with the SDK, no Docker network (CPU-side numbers only):
+
+| Item | Measured |
+|---|---|
+| Cold import in a fresh process: markitdown 0.32 s, pyogrio 0.17 s, rasterio 0.09 s, trafilatura 0.05 s, pypdf 0.03 s, lxml 0.01 s | ≈ 0.4–0.6 s for a process that needs the lot, ≈ 0.1–0.2 s for typical files |
+| First `markitdown` call (csv, docx) after import | 0.01–0.02 s |
+| 117 KB HTML page: `absolutize` 7 ms, `html_to_markdown` 83 ms, `html_to_simplified` 54 ms, `terse` 66 ms | ≈ 0.21 s of parsing |
+| A python metadata extractor as a child process (geojson) | 0.17 s |
+| HTTP streaming on loopback (uvicorn + httpx), 1 GB up + 1 GB back | 0.4 s (~5 GB/s, not a bottleneck); small request round trip 0.2 ms |
+
+Not measured, assumed: swarm overlay throughput ~300 MB/s on the same host and ~110 MB/s between nodes on 1 GbE (VXLAN overhead), VIP/IPVS latency ≈ 1 ms.
+The proxy hop (squid) and the store's own latency are not in any number here. Expectations: the common job (a ~120 KB saved page) pays one POST, one pull, a
+cold-import start of ≈ 0.1–0.5 s, a few small uploads and up to one poll interval; a tree of N small files can be parsed in parallel across the uid pool and
+replicas, so wall time can go down; large archives are bounded by `max(unpack, transfer, store write)` because artefacts upload while the parser still runs.
+Acceptance criterion for step 8: median job latency for the 120 KB page ≤ today + 100 ms on one host.
+
+Side effects, not counted: the gateway spends no CPU on parsing (other sessions' MCP latency improves, and `markitdown` stops blocking the event loop), and a
+crashed parser costs one job instead of a gateway worker.
+
 ## Risks and residual exposure
 
 - The parser can connect to the gateways' listening ports (same Docker network as the wrapper API) and to the proxy and the sidecar. None accepts it without a
@@ -171,9 +223,8 @@ on; the parser container is not.
 
 ## Decisions and open decisions
 
-Numbers are this plan's own. Mapping from [parser-service](parser-service.md)'s open decisions: its 1 → 2 here, its 2 → 4, its 3 → 5, its 7 → 5 (scratch);
-its 4 (tar), 5 (no auth) and 6 (per-request worker) are void (no gateway→parser upload, tokens everywhere, wrapper forks per job); its 8 is in Gateway side;
-its 9 → 8 here.
+Wire format is not a decision here: there is no gateway → parser upload (the wrapper pulls from the store), records go over a pipe, and every endpoint is
+authenticated by token. One parser per job, forked by the wrapper, no warm pool (see Inside the parser).
 
 1. ~~**Privilege mechanism.**~~ **Decided:** the wrapper keeps `CAP_SETUID`/`CAP_SETGID` (see Components).
 2. ~~**Per backend or shared.**~~ **Decided:** one shared parser service, one proxy, one sidecar, scaled by replicas (see Components, Risks).
@@ -225,10 +276,11 @@ concurrency cap (values to set when implementing).
 ## Implementation order
 
 0. The [project access model](../implemented-plans/project-access-model.md) steps 1 to 6 first (layout, credentials, SeaweedFS in dev); this plan assumes them.
+   Independent bugfixes that can land first on the current code: `ffprobe -protocol_whitelist file`, drop `.vrt` from the raster extensions.
 1. Verify the unknowns. **Done:** `s3fs` through an HTTP proxy with credentials and a session token (see decision 3). **Still to verify:** SeaweedFS
    behind the proxy rules with the exception in place (the test ran squid without the firewall rules), STS-issued scoped credentials from the project access
    model, `gcsfs` through the proxy, and the `os.dup2` and `PYTHONUNBUFFERED` behaviour with markitdown, `ffprobe` and `exiftool`.
-2. Create the `parser/` package as in the parser-service plan (`extract.py`, `metadata.py`, `parse.py` as a pure `parse_file` returning artefacts), plus
+2. Create the `parser/` package (see "What moves"; `extract.py`, `metadata.py`, `parse.py` as a pure `parse_file` returning artefacts), plus
    `worker.py` for the stdout record protocol and `ocr.py` (Tesseract, rasterising, sidecar client; from the OCR plan); port the existing tests.
 3. The wrapper: API (POST/GET, tokens, `features` validation and OCR profile lookup), key computation, pull, uid launch (with its own capabilities), record
    validation, concurrent upload, `index.json` and `status.json`, heartbeat, limits. Tests: key escape attempts, hostile records (bad JSON, long lines,
@@ -241,7 +293,8 @@ concurrency cap (values to set when implementing).
 7. Deployment: services, networks, tokens in `.env`/`deploy.sh`/`scripts/spider_hoarder.py validate`, `docker-compose.dev.yml` with SeaweedFS. Verify
    on a real swarm: the parser uid gets 407 from the proxy and 401 from the sidecar without a token, cannot read the wrapper's `/proc/<pid>/environ` or files,
    cannot reach the metadata server or private addresses through the proxy, a hostile `.m3u8` and a `.vrt` with `/vsicurl/` produce no connection.
-8. `scripts/bench_parse.py` from the earlier plan, extended: latency with the poll loop and the uploads, against SeaweedFS and one real bucket.
+8. `scripts/bench_parse.py`: job latency in-process (git baseline) vs service, same host and cross-node, with the poll loop and the uploads, against
+   SeaweedFS and one real bucket; fill the real overlay throughput numbers into the Latency section; decide on a warm pool.
 9. Docs; move the plan.
 
 ## Files to change
@@ -254,9 +307,10 @@ concurrency cap (values to set when implementing).
 | `sdk/spider_hoarder_sdk/content/extract.py`, `content/metadata.py` | moved to `parser/` (`grep_text` stays) |
 | `sdk/spider_hoarder_sdk/gateway/jobs.py` | parse half removed; `_store_one` calls `parse_client`; inline-text logic from the manifest |
 | `sdk/spider_hoarder_sdk/gateway/parse_client.py` | new: POST (with `features`), poll, notes, result building |
-| `sdk/pyproject.toml` | parser dependencies removed (the `gcs`/`s3` extras and `storage.py` changes are in the project access model plan) |
+| `sdk/pyproject.toml`, gateway Dockerfiles (browser-sdk, android-sdk) | parser dependencies and `unar`/`exiftool`/`ffmpeg` removed (the `gcs`/`s3` extras and `storage.py` changes are in the project access model plan) |
 | each backend's `docker-compose.yml` overlay, `docker-compose.dev.yml`, `deploy.sh`, `scripts/spider_hoarder.py`, `.env.example` | parse/OCR service wiring, per-backend networks, tokens, `PARSE_PROXY_ALLOW`, per-backend OCR feature setting (the SeaweedFS service itself is in the project access model plan) |
-| `docs/plans/parser-service.md`, `docs/plans/ocr-hybrid.md` | reconcile with this plan (superseded parts; the OCR plan's remote step, per-backend `OCR_*` variables and `content/ocr.py` location change) |
+| `scripts/bench_parse.py` | new: latency benchmark |
+| `docs/plans/ocr-hybrid.md` | reconcile with this plan (the OCR plan's remote step, per-backend `OCR_*` variables and `content/ocr.py` location change) |
 
 ## Docs to update
 
