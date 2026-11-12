@@ -115,7 +115,7 @@ _REF_KEYS = {"job_id", "path", "filename", "content_type"}
 
 
 def _request_body(owner: str, uid: int, arguments: dict, routed: bool = False) -> tuple[dict, list[str]]:
-    """browser_network_request_make: validate type/body, resolve every {job_id, path} (owner-scoped) and stage it in the session's
+    """browser_network_request_make: validate type/body, resolve every {job_id, path} (needs the read role in its project) and stage it in the session's
     in/. Returns the arguments for the toolserver (job references replaced by staged names; the hidden `body_file` is ours alone)
     and the staged names. Everything is checked, sizes included, before the first byte is copied. `routed`: the session's
     layer A pauses every request, which kills Chromium on big uploads."""

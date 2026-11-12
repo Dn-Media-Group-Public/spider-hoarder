@@ -23,6 +23,7 @@ from spider_hoarder_sdk.gateway import jobs
 from spider_hoarder_sdk.gateway import pool
 from spider_hoarder_sdk.gateway import sessions
 from spider_hoarder_android_sdk import slots
+from spider_hoarder_sdk import testing
 from spider_hoarder_sdk.content import storage
 
 driver = app.driver
@@ -254,7 +255,7 @@ def test_authz_points_nginx_at_the_slot():
 
 def _fake_session(client, owner="a@b.c"):
     sessions.by_view.clear()
-    bs = types.SimpleNamespace(client=client, owner=owner, id="vid", uid=3, last_used=0, waiting_human=None)
+    bs = types.SimpleNamespace(client=client, owner=owner, id="vid", uid=3, last_used=0, waiting_human=None, sid=None)
 
     async def get_session(*a, **k):
         return bs
@@ -266,7 +267,7 @@ def _fake_session(client, owner="a@b.c"):
 def test_file_tool_fetches_from_slot_into_a_job():
     from mcp import types as mt
     srv = serve()
-    storage.BLOB_URL = "file://" + tempfile.mkdtemp()
+    testing.fresh_store()
     try:
         class Client:
             calls = []
@@ -280,6 +281,7 @@ def test_file_tool_fetches_from_slot_into_a_job():
                 return mt.CallToolResult(content=[mt.TextContent(type="text", text="### Result\nSaved")])
 
         _fake_session(Client())
+        testing.bind_project(None)
         r = asyncio.run(app.call_tool("device_take_screenshot", {"filename": "../../my shot.png"}))
         out = json.loads(r.content[0].text)
         assert out["files"][0]["path"] == "original/my shot.png" and "text" not in out, out
@@ -340,6 +342,21 @@ def test_known_rejects_unknown_tools():
     assert not driver.known("browser_navigate") and not driver.known("nope")
 
 
+def test_open_session_binds_a_project_and_books_no_device():
+    from spider_hoarder_sdk.gateway import projects
+    testing.fresh_store()
+    p = projects.create("a@b.c", "P")
+    called = []
+
+    async def get_session(*a, **k):
+        called.append(1)
+    sessions.get_session = get_session
+    app._caller = lambda: (None, "a@b.c", "sid-a")
+    assert not asyncio.run(app.call_tool("open_session", {"project": p})).isError and projects.bound["sid-a"] == p and not called
+    app._caller = lambda: (None, "x@b.c", "sid-x")
+    assert asyncio.run(app.call_tool("open_session", {"project": p})).isError and "sid-x" not in projects.bound
+
+
 def test_unknown_tool_books_no_device():
     called = []
 
@@ -355,9 +372,9 @@ def test_unknown_tool_books_no_device():
 def test_install_apk_pushes_the_job_file_to_the_slot():
     from mcp import types as mt
     srv = serve()
-    storage.BLOB_URL = "file://" + tempfile.mkdtemp()
+    testing.fresh_store()
     try:
-        key = jobs._key("a@b.c", f"{app.RID}.{UUID}")
+        job, key = testing.new_job("a@b.c")
         storage.write_bytes(key, "original/app.apk", b"PK\3\4apk", "application/vnd.android.package-archive")
         storage.write_bytes(key, "original/notes.txt", b"hello", "text/plain")
 
@@ -368,26 +385,26 @@ def test_install_apk_pushes_the_job_file_to_the_slot():
 
         c = Client()
         _fake_session(c)
-        r = asyncio.run(app.call_tool("device_install_apk", {"job_id": f"{app.RID}.{UUID}", "path": "original/app.apk"}))
+        r = asyncio.run(app.call_tool("device_install_apk", {"job_id": job, "path": "original/app.apk"}))
         assert not r.isError and c.seen[0] == "device_install_apk"
         pushed = c.seen[1]["file"]
         assert pushed.endswith(".apk") and "/" not in pushed and FakeSlotd.files_in[pushed] == b"PK\3\4apk"
-        for args, msg in (({"job_id": f"{app.RID}.{UUID}", "path": "original/notes.txt"}, "not an APK"),
-                          ({"job_id": f"{app.RID}.{UUID}", "path": "original/none.apk"}, "not found"),
-                          ({"job_id": f"{app.RID}.{UUID}", "path": "../../x"}, "invalid path")):
+        for args, msg in (({"job_id": job, "path": "original/notes.txt"}, "not an APK"),
+                          ({"job_id": job, "path": "original/none.apk"}, "not found"),
+                          ({"job_id": job, "path": "../../x"}, "invalid path")):
             r = asyncio.run(app.call_tool("device_install_apk", args))
             assert r.isError and msg in r.content[0].text, (args, r)
         # another user's job is not reachable
         _fake_session(c, owner="other@b.c")
-        r = asyncio.run(app.call_tool("device_install_apk", {"job_id": f"{app.RID}.{UUID}", "path": "original/app.apk"}))
+        r = asyncio.run(app.call_tool("device_install_apk", {"job_id": job, "path": "original/app.apk"}))
         assert r.isError
     finally:
         srv.shutdown()
 
 
 def test_apk_upload_is_stored_not_parsed():
-    storage.BLOB_URL = "file://" + tempfile.mkdtemp()
-    key = jobs._key("a@b.c", f"{app.RID}.{UUID}")
+    testing.fresh_store()
+    key = testing.new_job("a@b.c")[1]
     r = jobs._store_and_parse(key, "x.apk", b"PK\3\4", "application/vnd.android.package-archive")
     assert [f["path"] for f in r["files"]] == ["original/x.apk"]
 

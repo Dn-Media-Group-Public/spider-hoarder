@@ -9,14 +9,15 @@ See also: [Plan: Browser sessions](../implemented-plans/browser-sessions-plan.md
 ## Gateway tools
 | Tool | Behaviour |
 |---|---|
-| `open_session(media?, allow?, deny?)` | **Must be the first call of a conversation.** Sets the session's no-media policy; calling it again ends the existing session (browsers, cookies, tabs) and starts over, since clients may reuse one MCP session across conversations; every other tool fails until then. Ask the user about security settings first; pass `allow` / `deny` (MIME types or `type/*`) only on request. `media` defaults to false on Tor / I2P, true on clear. Returns the effective policy. See also: [Plan: No-media sessions](../implemented-plans/no-media-sessions.md) |
+| `open_session(project?, media?, allow?, deny?)` | **Must be the first call of a conversation.** `project` binds the conversation to a project (needs `write`): its jobs are stored there. (Android's `open_session(project)` only binds.) Sets the session's no-media policy; calling it again ends the existing session (browsers, cookies, tabs) and starts over, since clients may reuse one MCP session across conversations; every other tool fails until then. Ask the user about security settings first; pass `allow` / `deny` (MIME types or `type/*`) only on request. `media` defaults to false on Tor / I2P, true on clear. Returns the effective policy. See also: [Plan: No-media sessions](../implemented-plans/no-media-sessions.md) |
 | `get_session()` | Read-only: `{egress, opened, media, blocked_resource_types, allowed_content_types, denied_content_types}`. Works before `open_session` (`opened: false`, the defaults). For subagents. `opened: true` may be a leftover from an earlier conversation on the same MCP session; a conversation that has not itself asked the user should call `open_session`. |
 | `browser_request_human_help(reason, browser?)` | Link for the user to solve a CAPTCHA/login in the live view (owner-only, SSO). Wait for the user. |
 | `browser_save_page(target?, browser?)` | Convert the open page (or `target`: an element ref/selector) to Markdown and store it as a job. Prefer over `browser_snapshot` for content. |
-| `ingest_page(url, target?)` | One shot: ephemeral browser, navigate, save, destroy. `target` must be a selector. Non-HTML goes through `requests`. Uses the session's media policy: blocked content types error with `blocked: media disabled for this session (<type>)`. |
+| `ingest_page(url, target?, project?)` | One shot: ephemeral browser, navigate, save, destroy. `target` must be a selector. Non-HTML goes through `requests`. Uses the session's media policy: blocked content types error with `blocked: media disabled for this session (<type>)`. |
 | `browser_end_session(browser?)` | Close one browser, or all and the session; the result counts requests the media policy blocked. Ending the session also forgets the media policy: `open_session` must be called again. |
-| `get_upload_link()` | Page where the *user* uploads files into a new job (1 h). Archives are unpacked; binary formats (msgpack, CBOR, BSON, plist, protobuf) also get `parsed/*.json`. See also: [Plan: more file formats](../implemented-plans/more-file-formats.md) |
-| `list_files(job_id)` | Manifest of a job. |
+| `get_upload_link(project?)` | Page where the *user* uploads files into a new job (1 h; needs `write`). Archives are unpacked; binary formats (msgpack, CBOR, BSON, plist, protobuf) also get `parsed/*.json`. See also: [Plan: more file formats](../implemented-plans/more-file-formats.md) |
+| `create_project(name)`, `list_projects()`, `get_project(project)`, `share_project(project, email, role)`, `unshare_project(project, email)`, `delete_project(project)` | Projects and their members (`read` / `write` / `admin`; admin-only: share, unshare, delete, member list). Every job lives in a project. See also: [Plan: project access model](../implemented-plans/project-access-model.md) |
+| `list_files(job_id)` | Manifest of a job. A job id is `<project>/<session>/<job>`. |
 | `get_file_text(job_id, path, offset?, length?)` | Page through a stored file (20,000-char slices by default). |
 | `grep_file(job_id, path, pattern, context=2, max_matches=50)` | Regex search in a stored text file (`/pat/i` accepted). |
 | `get_file_url(job_id, path)` | Short-lived (15 min) signed download link. |
@@ -44,7 +45,7 @@ Every one takes optional `browser` (default `main`).
     only for a plain GET/POST without headers/cookies), `xhr` (a `fetch` from a page at `origin`: CORS, `Origin`/`Referer`, cookies are a
     page script's; `credentials` `include` (default) or `omit`; `Cookie`, `User-Agent`, `Origin`, `Referer`, `Sec-*`, `Proxy-*` and the other
     forbidden headers, `cookies`, and a body with GET/HEAD are errors). `Host`, `Content-Length`, `Transfer-Encoding`, `Connection` are errors everywhere.
-  - `body`, by shape: a string is raw text; `{job_id, path}` is the raw bytes of a file of one of the caller's own jobs; any other object is
+  - `body`, by shape: a string is raw text; `{job_id, path}` is the raw bytes of a file of a job in a project the caller can read; any other object is
     a **fields** object `{name: value}`, a value being text, a number or boolean (as JS `String()`), a file part
     `{job_id, path, filename?, content_type?}`, or a list of those (null and nested lists are errors; a field cannot be named `job_id`/`path`).
     `form` takes fields only. Fields are urlencoded (no file part) or multipart (file part) unless a `Content-Type` header says

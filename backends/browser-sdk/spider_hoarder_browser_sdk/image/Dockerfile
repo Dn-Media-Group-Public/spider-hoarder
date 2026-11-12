@@ -27,12 +27,14 @@ ENV CMP_BLOCKLIST_PATH=/opt/cmp_blocklist.txt
 # The SDK packages (third-party dependencies come from PyPI, ours from the source tree)
 COPY sdk/ /src/sdk/
 COPY backends/browser-sdk/ /src/browser-sdk/
-RUN pip install --no-cache-dir /src/sdk /src/browser-sdk \
+# GCS support is a separate pip step: sdk/pyproject.toml explains the protobuf pin that stops one resolution
+RUN pip install --no-cache-dir "/src/sdk[s3]" /src/browser-sdk \
+ && pip install --no-cache-dir gcsfs google-auth \
  && rm -rf /src && chmod -R a+rX /venv/lib \
  && chmod +x /venv/lib/python*/site-packages/spider_hoarder_browser_sdk/session_server/session/session-group.sh
 # gw-collect (gid 1500): the gateway is added at start (start.py setpriv); session out/ dirs belong to it.
-# /data: blob storage (gateway uid 1000). /home, /run: sessiond's per-session homes and socket.
-RUN groupadd -g 1500 gw-collect && mkdir -p /data && chown 1000:1000 /data
+# /home, /run: sessiond's per-session homes and socket.
+RUN groupadd -g 1500 gw-collect
 
 # /app/entrypoint.sh: the same path in every family, so the dev overlay can wrap it (localhost-is-host.sh)
 RUN mkdir -p /app && printf '#!/bin/sh\nexec python -m spider_hoarder_browser_sdk.start\n' > /app/entrypoint.sh && chmod +x /app/entrypoint.sh

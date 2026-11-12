@@ -1,6 +1,6 @@
 """End to end through nginx on the deployed --dev stack, with real Keycloak tokens: open dn.no in each backend and look at it.
 
-    source .env-less; eval "$(tests/live/e2e_android_setup.sh)"
+    tests/live/e2e_android_setup.sh   # once: the e2e-android client (login: researcher / researcher-pw, or KC_USER/KC_PASSWORD)
     .venv/bin/python tests/live/e2e_dn.py browser-clear browser-tor android-clear [android-tor]
 
 browser-*: open_session, browser_navigate, browser_save_page (the page as a job), get_file_text.
@@ -28,8 +28,8 @@ SITE = os.environ.get("SITE", "https://www.dn.no/")
 
 def token():
     r = httpx.post(f"{KC}/realms/{REALM}/protocol/openid-connect/token", data={
-        "grant_type": "password", "client_id": "e2e-android", "username": "alice",
-        "password": os.environ["KC_ALICE_PASSWORD"], "scope": os.environ.get("MCP_SCOPE", "spider-hoarder")})
+        "grant_type": "password", "client_id": "e2e-android", "username": os.environ.get("KC_USER", "researcher"),
+        "password": os.environ.get("KC_PASSWORD", "researcher-pw"), **({"scope": os.environ["MCP_SCOPE"]} if os.environ.get("MCP_SCOPE") else {})})
     r.raise_for_status()
     return r.json()["access_token"]
 
@@ -49,7 +49,7 @@ def text_of(r):
     return "".join(c.text for c in r.content if hasattr(c, "text"))
 
 
-async def call(cs, name, **args):
+async def call(cs, name, /, **args):
     r = await cs.call_tool(name, args)
     return r.isError, text_of(r)
 
@@ -79,7 +79,11 @@ async def run(server):
             out["instructions_tail"] = (init.instructions or "")[-420:]
             try:
                 if server.startswith("browser-"):
-                    err, t = await call(cs, "open_session")
+                    err, t = await call(cs, "create_project", name="e2e-dn")
+                    out["create_project"] = t[:400]
+                    proj = json.loads(t)["project"] if not err else ""
+                    out["project"] = proj
+                    err, t = await call(cs, "open_session", project=proj)
                     out["open_session"] = t[:200]
                     err, t = await call(cs, "browser_navigate", url=SITE)
                     out["navigate"] = ("ERR " if err else "") + t[:300]

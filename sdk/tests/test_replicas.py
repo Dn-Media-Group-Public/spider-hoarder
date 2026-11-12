@@ -98,14 +98,14 @@ def test_session_id_prefix_and_reserve():
     assert sessions.pool.free == [0]
 
 
-def test_foreign_job_id():
-    ok = jobs._key("a@x.y", f"{jobs.RID}.{UUID}")
-    assert ok == f"a@x.y/{UUID}"
-    for bad, msg in ((f"10-0-0-9.{UUID}", "another replica"), (UUID, "invalid"), (f"{jobs.RID}.nope", "invalid")):
+def test_job_ids_carry_no_replica():
+    """Any replica serves any job: a job id is `<proj>/<session>/<job>` and a replica-prefixed (old style) id is invalid."""
+    for bad in (f"{jobs.RID}.{UUID}", UUID, f"{UUID}/{UUID}", f"{UUID}/{UUID}/..", f"{UUID}/{UUID}/{UUID}/{UUID}"):
         try:
-            jobs._key("a@x.y", bad); assert False, bad
+            jobs.job_key(bad); assert False, bad
         except ValueError as e:
-            assert msg in str(e), (bad, e)
+            assert "invalid job_id" in str(e), (bad, e)
+    assert jobs.job_key(f"{UUID}/{UUID}/{UUID}") == f"projects/{UUID}/data/{UUID}/{UUID}"
 
 
 def _mcp_route():

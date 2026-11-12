@@ -13,7 +13,7 @@ from spider_hoarder_browser_sdk import fetch
 from spider_hoarder_browser_sdk.mediapolicy import Policy
 from spider_hoarder_sdk.content import storage
 from spider_hoarder_sdk.gateway.driver import sessions
-from spider_hoarder_sdk.gateway.jobs import _key, _meta, _new_job_id, _store_and_parse
+from spider_hoarder_sdk.gateway.jobs import _meta, _new_job, _store_and_parse
 
 if TYPE_CHECKING:
     from spider_hoarder_sdk.gateway.sessions import Session
@@ -102,8 +102,8 @@ async def _navigate_read(bs: Session, url: str, browser: str | None = None, targ
 
 
 async def ingest_page(egress, owner: str, url: str, live: Session | None = None, target: str | None = None,
-                       policy: Policy | None = None) -> dict:
-    job_id = _new_job_id()
+                       policy: Policy | None = None, sid: str | None = None, project: str | None = None) -> dict:
+    job_id, key = _new_job(owner, sid, project)  # before fetching: no write role / no project fails early
     kw = {}
     if live:  # preflight/download as the real browser session: its cookies, its Tor circuit / I2P destination
         kw = {"cookies": await cookies_for(live, url), "socks_port": egress.socks_port(live.uid)}
@@ -114,16 +114,14 @@ async def ingest_page(egress, owner: str, url: str, live: Session | None = None,
     else:
         raw, ctype = await asyncio.to_thread(fetch.download, egress, url, policy, **kw)
     filename = os.path.basename(url.split("?")[0]) or "page"
-    key = _key(owner, job_id)
     result = _store_and_parse(key, filename, raw, ctype, url)
     storage.set_meta(key, url=url, target=target if "html" in ctype else None)
     return {"job_id": job_id, **result, **_meta(key)}
 
 
 async def save_page(bs: Session, browser: str | None = None, target: str | None = None) -> dict:
-    job_id = _new_job_id()
+    job_id, key = _new_job(bs.owner, bs.sid)
     html, url = await page_html(bs, browser, target)
-    key = _key(bs.owner, job_id)
     result = _store_and_parse(key, "page.html", html.encode(), "text/html", url)
     storage.set_meta(key, url=url, target=target)
     return {"job_id": job_id, **result, **_meta(key)}

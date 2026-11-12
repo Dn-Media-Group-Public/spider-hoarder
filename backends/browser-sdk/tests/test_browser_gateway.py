@@ -11,6 +11,7 @@ import pytest
 from spider_hoarder_browser_sdk import cmp_rules, files, netguard, pages, ports, fetch
 from spider_hoarder_browser_sdk import driver as bdriver
 from spider_hoarder_browser_sdk.mediapolicy import Policy
+from spider_hoarder_sdk import testing
 from spider_hoarder_sdk.content import storage
 from spider_hoarder_sdk.gateway import app, jobs, sessions
 
@@ -53,7 +54,7 @@ def test_filter_proxy():
 
 def test_file_outputs():
     import tempfile
-    storage.BLOB_URL = "file://" + tempfile.mkdtemp()
+    testing.fresh_store()
     home = tempfile.mkdtemp()
     ports.home = lambda uid: home
     os.mkdir(home + "/out")
@@ -85,8 +86,7 @@ def test_file_outputs():
         n = jobs._job_name(given, "d")
         assert "/" not in n and "\\" not in n and n not in ("", ".", ".."), (given, n)
     assert jobs._job_name("../../x.png", "d") == "x.png"
-    j = f"{jobs.RID}.123e4567-e89b-12d3-a456-426614174000"
-    key = jobs._key("a@x.y", j)
+    key = testing.new_job("a@x.y")[1]
     r = jobs._store_file(key, "shot.png", b"\x89PNG\0\0")
     assert "text" not in r and any(f["path"] == "original/shot.png" for f in r["files"]), r
     r = jobs._store_file(key, "snap.md", b"# page")
@@ -124,7 +124,7 @@ def test_tree_reader():
 def test_file_tools_are_jobs():
     import tempfile, json
     from mcp import types as mt
-    storage.BLOB_URL = "file://" + tempfile.mkdtemp()
+    testing.fresh_store()
     home = tempfile.mkdtemp()
     os.mkdir(home + "/out")
     ports.home = lambda uid: home
@@ -135,7 +135,8 @@ def test_file_tools_are_jobs():
             open(f"{home}/out/{args['filename']}", "w").write(snap)
             return mt.CallToolResult(content=[mt.TextContent(type="text", text="### Page\n- Page URL: http://p/\n### Snapshot\n- [Snapshot](out/x)\n")])
 
-    bs = types.SimpleNamespace(client=Client(), owner="a@b.c", id="v", uid=1, last_used=0, opts=None)
+    bs = types.SimpleNamespace(client=Client(), owner="a@b.c", id="v", uid=1, last_used=0, opts=None, sid="sid1")
+    testing.bind_project("sid1")
 
     async def get_session(*a, **k):
         return bs
@@ -196,12 +197,12 @@ def test_file_tools_are_jobs():
 def test_request_make_body_and_job():
     import tempfile, json
     from mcp import types as mt
-    storage.BLOB_URL = "file://" + tempfile.mkdtemp()
+    testing.fresh_store()
     home = tempfile.mkdtemp()
     os.mkdir(home + "/out"); os.mkdir(home + "/in")
     ports.home = lambda uid: home
-    jid = f"{jobs.RID}.123e4567-e89b-12d3-a456-426614174000"
-    storage.write_bytes(jobs._key("a@b.c", jid), "original/d.json", b'{"k":1}', "application/json")
+    jid, jkey = testing.new_job("a@b.c")
+    storage.write_bytes(jkey, "original/d.json", b'{"k":1}', "application/json")
     ref = {"job_id": jid, "path": "original/d.json"}
     rb = lambda owner="a@b.c", routed=False, **a: files._request_body(owner, 1, a, routed)
     staged = lambda: sorted(os.listdir(home + "/in"))
@@ -220,9 +221,9 @@ def test_request_make_body_and_job():
         except ValueError:
             pass
     try:
-        rb("other@b.c", body=ref); assert False  # another owner's job
+        rb("other@b.c", body=ref); assert False  # a project the caller is not in
     except ValueError as e:
-        assert str(e) == "file not found"
+        assert str(e) == "project not found"
     assert staged() == []  # nothing is copied for a refused call
 
     files.MAX_REQUEST_BODY = 6  # the file is 7 bytes; text counts too
@@ -265,7 +266,7 @@ def test_request_make_body_and_job():
     os.symlink("/etc/passwd", home + "/in/trap")  # a session-planted name is never written through
     shutil.move(home + "/in", home + "/real"); os.symlink(home + "/real", home + "/in")  # swapped in/ dir
     try:
-        files._stage(1, jobs._key("a@b.c", jid), "original/d.json", "x"); assert False
+        files._stage(1, jkey, "original/d.json", "x"); assert False
     except OSError:
         pass
     os.unlink(home + "/in"); shutil.move(home + "/real", home + "/in"); os.unlink(home + "/in/trap")
@@ -299,7 +300,7 @@ def test_request_make_body_and_job():
                 "Origin: http://o.test/page\n"
                 'Redirects: [{"url": "http://n.test/a", "status": 307}]'))])
 
-    bs = types.SimpleNamespace(client=Client(), owner="a@b.c", id="v", uid=1, last_used=0, opts=None)
+    bs = types.SimpleNamespace(client=Client(), owner="a@b.c", id="v", uid=1, last_used=0, opts=None, sid="sid1")
     given = {"url": "http://n.test/a", "type": "form", "method": "POST", "cookies": {"a": "b"}, "body": {"f": ref}, "body_file": "x", "timeout_ms": 10**9}
     r = asyncio.run(driver.file_tool(bs, "browser_network_request_make", given))
     out = json.loads(r.content[0].text)
@@ -332,7 +333,7 @@ def test_multi_browser_routing():
             text = '### Result\n{"remaining": %d, "blocked": 0}' % remaining[0] if name == "browser_end_session" else "### Result\n\"ok\""
             return mt.CallToolResult(content=[mt.TextContent(type="text", text=text)])
 
-    bs = types.SimpleNamespace(client=Client(), owner="a@b.c", id="v", uid=1, last_used=0, opts=None)
+    bs = types.SimpleNamespace(client=Client(), owner="a@b.c", id="v", uid=1, last_used=0, opts=None, sid="sid1")
 
     async def get_session(*a, **k):
         return bs
@@ -357,6 +358,22 @@ def test_multi_browser_routing():
     run("browser_request_human_help", browser="x", reason="r")
     assert calls[-1] == ("browser_bring_to_front", {"browser": "x"})
     assert bdriver.FILE_TOOLS["browser_storage_state"] and "browser_run_code_unsafe" not in bdriver.FILE_TOOLS
+
+
+def test_open_session_binds_a_project_with_write_role():
+    import tempfile
+    from spider_hoarder_sdk.gateway import projects
+    testing.fresh_store()
+    p = projects.create("a@b.c", "P")
+    projects.share("a@b.c", p, "ro@b.c", "read")
+    run = lambda who, n, **a: (setattr(app, "_caller", lambda: (None, who, "sid-p")), asyncio.run(app.call_tool(n, a)))[1]
+    sessions.opened.clear(); projects.bound.clear()
+    assert not run("a@b.c", "open_session", project=p).isError and projects.bound == {"sid-p": p}
+    projects.bound.clear()
+    for who, proj, msg in (("ro@b.c", p, "write role"), ("x@b.c", p, "project not found"), ("a@b.c", "nope", "project not found")):
+        r = run(who, "open_session", project=proj)
+        assert r.isError and msg in r.content[0].text and not projects.bound, (who, r)
+    sessions.opened.clear()
 
 
 def test_open_session_gate_and_get_session():
@@ -418,6 +435,9 @@ def test_ingest_page_blocks_media_on_nomedia_session(monkeypatch):
             self.closed = True
 
     resp = Resp()
+    import tempfile
+    testing.fresh_store()
+    testing.bind_project(None)
     monkeypatch.setattr(fetch, "_request", lambda *a, **k: resp)
     monkeypatch.setattr(fetch, "content_type", lambda *a, **k: "image/png")
     with pytest.raises(ValueError, match="blocked: media disabled"):

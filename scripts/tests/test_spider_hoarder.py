@@ -257,6 +257,26 @@ def test_dev_overlay(tmp_path):
     assert set(doc["services"]) == {"dummy-one-gateway", "dummy-two-gateway"}
     gw = doc["services"]["dummy-one-gateway"]
     assert gw["extra_hosts"] == ["localhost:host-gateway"] and gw["entrypoint"][-2:] == ["/localhost-is-host.sh", "/app/entrypoint.sh"]
+    assert "environment" not in gw  # the store settings are the overlays' RESEARCH_BLOB_* pass-through, not dev business
+
+
+def test_seaweedfs_overlay(tmp_path):
+    _, a, _ = make_pkg(tmp_path, name="dummy_one")
+    import yaml
+    assert yaml.safe_load(sh.seaweedfs_overlay([a]))["services"] == {"dummy-one-gateway": {"networks": ["seaweedfs"]}}
+
+
+def test_seaweedfs_config(tmp_path):
+    import base64
+    env = {"SEAWEEDFS_KEY": "gk", "SEAWEEDFS_SECRET": "gs", "SEAWEEDFS_SIGNING_KEY": base64.b64encode(b"k" * 32).decode()}
+    s3, iam = sh.seaweedfs_config(env)
+    assert [i["name"] for i in s3["identities"]] == ["gateway"] and "Admin" in s3["identities"][0]["actions"]  # creating a role per job needs IAM rights
+    assert s3["identities"][0]["credentials"] == [{"accessKey": "gk", "secretKey": "gs"}]
+    assert iam["policy"]["defaultEffect"] == "Deny" and iam["sts"]["signingKey"] == env["SEAWEEDFS_SIGNING_KEY"]
+    for bad in ({"SEAWEEDFS_KEY": "changeme"}, {"SEAWEEDFS_SECRET": ""}, {"SEAWEEDFS_SIGNING_KEY": "short"}, {"SEAWEEDFS_SIGNING_KEY": "changeme"}):
+        with pytest.raises(sh.DeployError):
+            sh.seaweedfs_config({**env, **bad})
+    assert sh.main(["seaweedfs-config", str(tmp_path / "c")], env) == 0 and sorted(os.listdir(tmp_path / "c")) == ["iam.json", "s3.json"]
 
 
 # ---------------------------------------------------------------- CLI ---------------------------------------------

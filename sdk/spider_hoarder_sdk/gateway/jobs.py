@@ -1,4 +1,4 @@
-"""Job store helpers shared by every backend: job ids (`<rid>.<uuid>`, owner-scoped storage keys), storing a file
+"""Job store helpers shared by every backend: job ids (`<proj>/<session>/<job>`, project-scoped storage keys), storing a file
 and parsing it into Markdown, the {files, text?} job result. Nothing here knows what produced the file."""
 
 import mimetypes
@@ -15,9 +15,9 @@ from mcp import types
 from spider_hoarder_sdk.content import extract
 from spider_hoarder_sdk.content import metadata
 from spider_hoarder_sdk.content import storage
-from spider_hoarder_sdk.gateway import ident
+from spider_hoarder_sdk.gateway import ident, projects
 
-RID = ident.RID
+RID = ident.RID  # this replica: the MCP session id and live-view URLs carry it, jobs and links do not
 DEFAULT_TEXT_LENGTH = 20000  # chars; keeps get_file_text results LLM-sized
 UPLOAD_MARK = "@upload"  # blobtoken path marking an upload-link token (never a real file path)
 INLINE_LIMIT = 50_000
@@ -30,26 +30,35 @@ FILE_TOOLS_NOTE = ("\n\nThe result is {job_id, files, text?}: `text` is the cont
                    "with get_file_text or search it with grep_file; get_file_url for a link. `filename` only names "
                    "the file inside the job.")
 
-_RID_PREFIX = re.compile(r"^([0-9]+-[0-9]+-[0-9]+-[0-9]+)\.")
-_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+_UUID_RE = projects.UUID_RE
 
 
-def _new_job_id() -> str:
-    return f"{RID}.{uuid.uuid4()}"
-
-
-def _key(owner: str, job_id: str) -> str:
-    """Storage key: jobs live under <owner>/<uuid>, so callers only see their own. The job_id
-    is `<rid>.<uuid>`; storage is per replica, so another replica's job is not reachable."""
-    rid, _, job_id = job_id.rpartition(".")
-    if rid != RID and _RID_PREFIX.match(f"{rid}."):
-        raise ValueError("job lives on another replica and is not reachable from this session")
-    if rid != RID or not _UUID_RE.match(job_id):
+def _parse_ref(job_id: str) -> tuple[str, str, str]:
+    """`<proj>/<session>/<job>`, three uuids: no path component can hold `/` or `..`."""
+    parts = str(job_id).split("/")
+    if len(parts) != 3 or not all(_UUID_RE.match(p) for p in parts):
         raise ValueError("invalid job_id")
-    safe = re.sub(r"[^a-z0-9._@-]", "_", owner)
-    if "@" not in safe:  # also keeps '..' from being an owner dir
-        raise ValueError("invalid owner")
-    return f"{safe}/{job_id}"
+    return tuple(parts)
+
+
+def _key(owner: str, job_id: str, need: str = "read") -> str:
+    """Storage key of a job the caller has at least role `need` in (the gateway's authorisation point for jobs)."""
+    proj, session, job = _parse_ref(job_id)
+    projects.require(owner, proj, need)
+    return storage.job_key(proj, session, job)
+
+
+def job_key(job_id: str) -> str:
+    """Storage key of a job reference with no authorisation: for signed blob / upload tokens, which are the authority."""
+    return storage.job_key(*_parse_ref(job_id))
+
+
+def _new_job(owner: str, sid: str | None, project: str | None = None) -> tuple[str, str]:
+    """(job_id, key) of a new job in `project` (else the MCP session's bound project); needs the write role."""
+    proj = projects.resolve(sid, project)
+    projects.require(owner, proj, "write")
+    session, job = projects.session_dir(sid), str(uuid.uuid4())
+    return f"{proj}/{session}/{job}", storage.job_key(proj, session, job)
 
 
 def _check_rel_path(path: str) -> str:

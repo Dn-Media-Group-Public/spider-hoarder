@@ -8,8 +8,9 @@ Decisions: nginx routes (replaces Caddy; TLS already ends at the LB); round-robi
 files and jobs stay per replica; Swarm only (`tasks.<service>` DNS, `{{.Task.Slot}}`); replica identity = the task's overlay IP.
 
 - **Replica id (`rid`)**: the replica's IP on the sessions network, dashes instead of dots (`10-20-1-7`). It prefixes the MCP session id
-  (ASGI middleware: `Mcp-Session-Id: <rid>.<sdk-id>`, the SDK never sees it), the `job_id` (`<rid>.<uuid>`), and appears in
-  `/blob/<rid>/…`, `/upload/<rid>/…`, `/view/<rid>/…`. nginx extracts it and proxies straight to that IP on `GATEWAY_PORT`.
+  (ASGI middleware: `Mcp-Session-Id: <rid>.<sdk-id>`, the SDK never sees it) and appears in `/view/<rid>/…`: both are tied to one replica's
+  browser processes. nginx extracts it and proxies straight to that IP on `GATEWAY_PORT`. Job ids and `/blob/…` / `/upload/…` links carry no `rid`:
+  nginx sends them to any replica (`tasks.<backend>-gateway`), which serves them from the shared bucket.
 - **`initialize`** has no session id → round-robin over `tasks.<prefix>-gateway` (prefix = the backend name with dashes, e.g. `browser-tor`; nginx captures any `[a-z0-9-]+`, so there is no backend list in the config and an unknown or disabled prefix does not resolve: 502); a replica reserves a uid at `initialize` and returns
   503 when full; nginx tries the next one; all full → 503 to Claude. The browser itself still starts lazily on the first tool call.
 - **SSRF guard** (the `rid` in a URL is attacker-controlled): nginx is only on `auth` and the session networks each backend's overlay adds to it (`browser-tor-sessions`, `android-clear-slots`, ...), never on
@@ -20,9 +21,9 @@ files and jobs stay per replica; Swarm only (`tasks.<service>` DNS, `{{.Task.Slo
   (`hostname: "browser-i2p-router-{{.Task.Slot}}"`, overlay DNS, no `docker.sock`); ports are `I2P_SOCKS_BASE + index`. The per-uid firewall pins the
   router's IP; if `browser-i2p-router-k` gets a new IP the replica exits and Swarm restarts it, rebuilding the rules (sessions on it are lost).
   See also: [Plan: I2P egress](../implemented-plans/i2p-egress.md)
-- **Consequences**: a `job_id` from another replica is not readable ("lives on another replica"); a restarted/rescheduled replica loses
-  its sessions and links (new IP); nginx has no node-local state: `deploy.sh` builds `spider-hoarder-nginx` with `nginx.conf.template`, the aliases map and the landing page baked in (`nginx/Dockerfile`), so it runs on any node.
-  Upgrade path for shared files: shared blob storage (`RESEARCH_BLOB_URL` is already a URL).
+- **Consequences**: a restarted/rescheduled replica loses its sessions and live-view links (new IP) but not its jobs or blob / upload
+  links: jobs live in the shared bucket (`RESEARCH_BLOB_URL`: GCS, S3 or the stack's SeaweedFS; no local-disk store, replicas would not share it). nginx has no node-local state: `deploy.sh` builds `spider-hoarder-nginx` with `nginx.conf.template`, the aliases map and the landing page baked in (`nginx/Dockerfile`), so it runs on any node.
+  See also: [Plan: project access model](../implemented-plans/project-access-model.md)
 
 ## Android replicas
 `android-clear-gateway` / `android-tor-gateway` use the same `rid` routing (`/android-<egress>/…`, `tasks.android-<egress>-gateway`).

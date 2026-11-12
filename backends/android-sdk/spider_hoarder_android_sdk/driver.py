@@ -12,8 +12,9 @@ from mcp import types
 
 from spider_hoarder_android_sdk import slots
 from spider_hoarder_sdk.content import storage
+from spider_hoarder_sdk.gateway import projects
 from spider_hoarder_sdk.gateway.driver import Driver, sessions
-from spider_hoarder_sdk.gateway.jobs import (MAX_FILE_BYTES, _check_rel_path, _job_name, _key, _new_job_id, _schema, _store_file,
+from spider_hoarder_sdk.gateway.jobs import (MAX_FILE_BYTES, _check_rel_path, _job_name, _key, _new_job, _schema, _store_file,
                                              _text)
 from spider_hoarder_sdk.gateway.pool import Pool
 
@@ -41,6 +42,10 @@ def _stack_client(headers=None, timeout=None, auth=None) -> httpx.AsyncClient:
 
 def extra_tools() -> list[types.Tool]:
     return [
+        types.Tool(name="open_session", inputSchema=_schema(project="Project id that this conversation's jobs are stored in (needs the write role)"),
+                   description="Bind this conversation to a project: every job the device tools create is stored there. Call it first "
+                   "(create a project with create_project if you have none), and again after the device session ended (device_end_session or an idle timeout). "
+                   "It does not start the device."),
         types.Tool(name="device_request_human_help", inputSchema=_schema(reason="What the user needs to do, e.g. 'sign in to Google'"),
                    description="Get a link that lets the user see and control THIS conversation's device in a new tab. "
                    "Use it for a Google / Play Store sign-in, CAPTCHA, 2FA, a permission or anything else a human should do. "
@@ -68,9 +73,11 @@ class AndroidDriver(Driver):
         # or the waiter is cancelled mid-reset (pool.release finishes on its own, but the caller sees a timeout)
         self.close_timeout = slots.RESET_TIMEOUT + 90
         self.extra_tools = extra_tools()
-        self.names = {t["name"] for t in json.load(open(slots.TOOLS_FILE))} | {"device_request_human_help"}
+        self.names = {t["name"] for t in json.load(open(slots.TOOLS_FILE))} | {"device_request_human_help", "open_session"}
         self.instructions = (
-            f"{note} Each conversation gets its own private, isolated emulator (one device, wiped when the session ends; "
+            f"{note} Every job is stored in a project: call open_session(project) first (list_projects shows yours, create_project makes one; "
+            "ask the user which to use). The binding ends with the device session, so call open_session again after device_end_session or an idle timeout. "
+            "Each conversation gets its own private, isolated emulator (one device, wiped when the session ends; "
             "if all devices are busy you get a 'busy' error: try again later). Use the device_* tools: device_snapshot shows the "
             "accessibility tree with refs, device_click / device_type / device_swipe act on it, device_take_screenshot returns a "
             "screenshot file, device_install_apk installs an APK from a job (get_upload_link lets a human upload one; F-Droid is "
@@ -109,6 +116,10 @@ class AndroidDriver(Driver):
         return name in self.names  # the static list (the toolserver's) plus the gateway's own
 
     async def pre_session(self, name, args, ctx):
+        if name == "open_session":
+            projects.require(ctx.owner, args["project"], "write")
+            projects.bind(ctx.sid, args["project"])
+            return _text(json.dumps({"project": args["project"]}))
         if name == "device_end_session":
             bs = await sessions.get_session(ctx.mcp_session, ctx.owner, create=False)
             if bs:
@@ -145,7 +156,7 @@ class AndroidDriver(Driver):
     async def file_tool(self, bs, name, arguments):
         """Run a file-producing upstream tool; the file ends up under a new job id."""
         jname = _job_name(arguments.get("filename"), FILE_TOOLS[name])
-        job_id = _new_job_id()
+        job_id, key = _new_job(bs.owner, bs.sid)  # before the tool runs: no project bound / no write role fails early
         # the slot only serves plain names; the output comes back over the slot's control channel
         private = f"{uuid.uuid4()}{os.path.splitext(FILE_TOOLS[name])[1]}"
         res = await bs.client.call_tool(name, {**arguments, "filename": private})
@@ -155,7 +166,6 @@ class AndroidDriver(Driver):
             raw = await slots.backend.fetch_out(bs.uid, private, MAX_FILE_BYTES)
         except (OSError, ValueError, httpx.HTTPError) as e:
             return _text(f"{name} produced no readable output file ({e}). Upstream said: {sessions.result_text(res)}", True)
-        key = _key(bs.owner, job_id)
         result = _store_file(key, jname, raw)
         storage.set_meta(key, keep_none=("text_cap",))
         return _text(json.dumps({"job_id": job_id, **result}))

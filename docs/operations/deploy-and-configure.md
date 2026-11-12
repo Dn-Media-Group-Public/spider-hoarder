@@ -30,7 +30,9 @@ See also: [Plan: Pluggable backends](../implemented-plans/backend-plugins.md)
 | `PUBLIC_HOST`, `PUBLIC_SCHEME` | URLs users see (TLS terminates at the LB) |
 | `OIDC_ISSUER`, `MCP_SCOPE` | Keycloak realm URL; scope the token must carry (empty = no check) |
 | `O2P_COOKIE_SECRET`, `BLOB_TOKEN_SECRET` | secrets (placeholders refused by `deploy.sh`) |
-| `RESEARCH_BLOB_URL` | fsspec URL, `file:///data` or `gs://bucket/prefix` |
+| `RESEARCH_BLOB_URL`, `RESEARCH_BLOB_OPTIONS` | the shared bucket: `gs://bucket` or `s3://bucket` (no local-disk or in-memory store; `deploy.sh` refuses others), and a JSON object handed to fsspec as is (credentials, endpoint, ...). The gateway needs the right to create roles in it (per-job credentials). Not needed with `SEAWEEDFS=1` |
+| `SEAWEEDFS` (1 with `--dev`), `SEAWEEDFS_BUCKET`, `SEAWEEDFS_KEY`, `SEAWEEDFS_SECRET`, `SEAWEEDFS_SIGNING_KEY` | the stack's own SeaweedFS as the store: the bucket, the gateways' key and secret (an Admin identity: creating a role per job needs IAM rights), and the STS signing key (base64, ≥ 32 bytes; rotating it ends all minted credentials). `deploy.sh` generates SeaweedFS's `s3.json` / `iam.json` from them (`.build/seaweedfs/`, secrets: not committed), creates the bucket after the deploy and sets `RESEARCH_BLOB_*` for the gateways; placeholders are refused. See also: [Plan: project access model](../implemented-plans/project-access-model.md) |
+| `ACCESS_CACHE_SECONDS` (30) | per-replica cache of a project's `access.json` |
 | `MAX_SESSIONS_TOTAL` (18, max 48), `MAX_SESSIONS_PER_USER` (3), `IDLE_TIMEOUT` (1800 s), `DISCONNECT_TIMEOUT_MINUTES` (5) | per-container limits (browser backends; Android has its own below) |
 | `HTTP_PORT`, `GATEWAY_PORT` | published nginx port; port gateways listen on (nothing else may use it) |
 | `BACKENDS`, `BACKEND_PACKAGES` | which backends run; extra (out-of-tree) pip specs installed first. See above |
@@ -87,7 +89,7 @@ See [Authentication](../architecture/auth.md). For an external Keycloak run `key
 the README). The user's password is reset to `KC_USER_PASSWORD` on every run: change it outside dev.
 
 ## Tests
-The gateway picks its driver at import (`$BACKEND`), so each package area is its own pytest process; `scripts/test.sh` runs them all (and the Android shell-level suites).
+The gateway picks its driver at import (`$BACKEND`), so each package area is its own pytest process; `scripts/test.sh` runs them all (and the Android shell-level suites). The tests need a real object store (s3fs's listing cache, its delete and the STS credentials behave differently from any fake), so it starts one throwaway SeaweedFS container (Docker needed); set `TEST_BLOB_URL` (`s3://bucket`) and `TEST_BLOB_OPTIONS` (JSON for fsspec) to use another store, and export them yourself when running pytest by hand.
 By hand, from the repo root after `./deploy.sh` (or any run that built `.venv/`):
 
 ```

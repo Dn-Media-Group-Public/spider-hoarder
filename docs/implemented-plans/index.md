@@ -25,3 +25,4 @@ Back to the [documentation index](../index.md). Open plans: [plans](../plans/ind
 - [Multi-node swarm support (registry, `PIN_DATA`, several KVM nodes)](multi-node.md)
 - [Build everything inside `docker build` (repo-root context, a Dockerfile per image, no wheels)](build-in-docker.md)
 - [File metadata extraction (`metadata/<path>.yaml`)](file-metadata.md)
+- [Project access model (projects with roles, `projects/<proj>/data/<session>/<job>`, scoped store credentials, shared bucket, dev SeaweedFS)](project-access-model.md)

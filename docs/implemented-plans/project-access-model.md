@@ -1,6 +1,6 @@
 # Plan: projects, shared access and per-session scoped storage credentials
 
-See also [Plan: parser wrapper](parser-wrapper.md) (consumes the scoped credentials and the key layout defined here),
+See also [Plan: parser wrapper](../plans/parser-wrapper.md) (consumes the scoped credentials and the key layout defined here),
 [Jobs, storage and links](../architecture/jobs-and-storage.md) (today's `<owner>/<uuid>` layout and links), [Auth](../architecture/auth.md),
 [Scaling](../architecture/scaling.md) (`rid`), [Session isolation](../architecture/session-isolation.md).
 
@@ -13,7 +13,7 @@ is entirely in the gateway, which holds one credential for the whole store. Weak
 - the sanitising `re.sub(r"[^a-z0-9._@-]", "_", owner)` can map two emails to one prefix (cross-user access), and the signed link tokens carry the
   readable owner email to whoever receives the link;
 - jobs are tied to one gateway replica (`job_id` = `<rid>.<uuid>`, per-replica disk), so a replica restart or reschedule loses them;
-- any component that gets storage access gets all of it. The parser wrapper ([Plan: parser wrapper](parser-wrapper.md)) must be able to write only
+- any component that gets storage access gets all of it. The parser wrapper ([Plan: parser wrapper](../plans/parser-wrapper.md)) must be able to write only
   what it is parsing.
 
 Goal: named **projects** with per-user roles, jobs keyed by project and session, **short-lived credentials limited to one project's read side and one
@@ -177,3 +177,31 @@ dev exception from the parser-wrapper plan. `file:///data` stays for unit tests 
 - `docs/architecture/session-isolation.md`: sessions hold no store credentials; the wrapper's scoped credential.
 - `docs/architecture/overview.md`, `docs/operations/deploy-and-configure.md`: services, variables (`RESEARCH_BLOB_URL`, gateway key, role ARN, signing key), SeaweedFS.
 - `docs/implemented-plans/index.md` and `docs/plans/index.md`; each updated section gets `See also: [Plan: project access model](../implemented-plans/project-access-model.md)`.
+
+## Implementation notes (this supersedes the text above where they differ)
+
+- All nine open decisions: the suggested defaults, except as noted. Android got its own `open_session(project)` (binding only), as it had no such tool.
+- **No local or in-memory store, ever** (decision 4 reversed): `RESEARCH_BLOB_URL` is `s3://` or `gs://`, `deploy.sh` refuses anything else, the `/data` volumes are gone. The
+  tests run against a real SeaweedFS that `scripts/test.sh` starts (`testing.fresh_store()` gives each test a fresh prefix).
+- **Store settings are one JSON object**, `RESEARCH_BLOB_OPTIONS`, handed to fsspec as is (credentials, endpoint, ...). No `AWS_*`, `FSSPEC_S3_*` or `STS_*` settings, no role ARN;
+  all backend overlays pass `RESEARCH_BLOB_URL` and `RESEARCH_BLOB_OPTIONS` through, whatever the store. SeaweedFS is an opt-in service of the stack
+  (`SEAWEEDFS=1`, default with `--dev`; `docker-compose.seaweedfs.yml`), not a dev-only one: GCS is just as possible in dev and SeaweedFS in prod.
+- **Credentials: a new role per job** instead of one role plus an inline session policy. With a broad role (`s3:*` on the bucket) the whole security boundary was the session
+  policy; if it were missing or ignored the consumer would get the whole bucket, `access.json` included. Now the role's own policy is exactly the job's scope, the gateway assumes it, and
+  the credential is plain fsspec options (`key`, `secret`, `token`; GCS: `token`). Measured on SeaweedFS 4.53: deleting the role kills the credential at once, so the plan's
+  "no revocation" no longer holds on S3: `Scoped.release` ends it with the job, `revoke_project` with the project (this replica's), `sweep` (every 5 min) deletes roles a crashed gateway
+  left behind. A SeaweedFS restart also ends credentials in flight, since roles live in memory (storeType `filer` did not change that); the consumer re-mints. `mint` raises on any failure and
+  deletes a half-created role; it never falls back to the gateway's own credential. GCS stays a downscoped token (not revocable).
+- **The gateway needs IAM rights** to create roles: on SeaweedFS its identity has the `Admin` action (one static identity in the generated `s3.json`, keys from `.env`, since IAM
+  `CreateAccessKey` cannot produce chosen keys). On real AWS that is a wide privilege (a compromised gateway can create any role); an IAM permission boundary on what it may create is advisable.
+  The bucket is created by `deploy.sh` with `weed shell` inside the container, so no port is published and nothing runs on the host.
+- **Project delete** deletes the prefix with `fs.rm(recursive=True)` and then lists what is left (raising if any file remains), instead of the SeaweedFS filer HTTP delete or reading
+  `DeleteObjects` `Errors` (s3fs drops them). No second pass (decision 8). SeaweedFS keeps an empty directory entry no S3 client sees as an object, so only files count.
+- Insufficient role (a member with too low a role) answers "this needs the `<role>` role"; only non-members and missing projects get "project not found" (identical text).
+- s3fs on a shared bucket: directory listings are never cached (`use_listings_cache=False`; checked: a second writer's entry stayed invisible otherwise), a credentialed filesystem skips fsspec's
+  instance cache, and rewritten objects (`access.json`, `index.json`) are read with one plain GET (`open()` pins the ETag and raised `FileExpired` under a concurrent write; found by the
+  concurrent-grants test). `delete_project` ends the bound MCP sessions only on the replica that handled it; other replicas' bindings stop within the 30 s cache window.
+- Verified on SeaweedFS 4.53 (`sdk/tests/test_creds.py`, every `scripts/test.sh` run): read/list of the project, write/delete only in the job, multipart, denied lists and writes elsewhere
+  (`access.json`, `users/`, siblings, the bucket root), presigned URLs, release / revoke / sweep, failed mint. **Verified since**: credential expiry (works until 890 s, refused at 910 s); GCS on a real bucket with a Credential Access Boundary token (`sdk/tests/test_creds_gcs.py`, run with `TEST_GCS_URL=gs://scratch-bucket`: reads only the project's data side, writes and multipart-uploads only inside its own job, denied everywhere else; not revocable, so the token simply expires); a full `./deploy.sh --dev` (SeaweedFS in the stack, bucket created, gateways on `s3://` + `RESEARCH_BLOB_OPTIONS`) and a dn.no scrape over MCP through nginx with real Keycloak tokens (`tests/live/e2e_dn.py`: `create_project`, `open_session(project)`, `browser_save_page`, `get_file_text` on the job). That run found two deploy-only bugs: a bare `boto3` in the `s3` extra made pip backtrack to `s3fs 0.4.2` (now `s3fs[boto3]>=2024.1`), and `weed shell` exits non-zero when the bucket already exists (a redeploy failed). **Not verified**: real AWS.
+- `creds.mint` is not called by anything yet: the parser wrapper that consumes it is a separate plan.
+- The two accepted `access.json` races are exercised in `sdk/tests/test_projects.py::test_concurrent_grants_keep_a_valid_access_json`.

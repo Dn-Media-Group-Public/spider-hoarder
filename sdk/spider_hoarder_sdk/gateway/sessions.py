@@ -16,7 +16,7 @@ import httpx
 from mcp import ClientSession, types
 from mcp.client.streamable_http import streamablehttp_client
 
-from spider_hoarder_sdk.gateway import ident
+from spider_hoarder_sdk.gateway import ident, projects
 from spider_hoarder_sdk.gateway.driver import driver
 from spider_hoarder_sdk.gateway.pool import Pool
 
@@ -152,6 +152,8 @@ async def close(bs: Session) -> None:
     if by_mcp.get(id(bs.mcp_session)) is bs:
         del by_mcp[id(bs.mcp_session)]
     by_view.pop(bs.id, None)
+    if bs.sid:  # an ephemeral session (ingest_page's throwaway browser) is no MCP session's
+        projects.unbind(bs.sid)
     opened.pop(bs.sid, None)  # every way a session ends (idle reaper included) makes the next open-session step ask the user again
     bs.closing.set()
     if bs.task:
@@ -198,6 +200,7 @@ async def end_mcp_session(sid: str) -> None:
     """MCP session closed (DELETE): free its reservation and any session."""
     conn.pop(sid, None)
     opened.pop(sid, None)
+    projects.forget(sid)
     await unreserve(sid)
     for bs in [b for b in by_mcp.values() if b.sid == sid]:
         await close(bs)

@@ -8,7 +8,8 @@ x-gateway-env: &gateway-env
   PUBLIC_SCHEME: ${PUBLIC_SCHEME:-https}
   OIDC_ISSUER: ${OIDC_ISSUER}
   MCP_SCOPE: ${MCP_SCOPE:-}
-  RESEARCH_BLOB_URL: ${RESEARCH_BLOB_URL:-file:///data}
+  RESEARCH_BLOB_URL: ${RESEARCH_BLOB_URL}
+  RESEARCH_BLOB_OPTIONS: ${RESEARCH_BLOB_OPTIONS:-}   # JSON, handed to fsspec (credentials, endpoint, ...)
   BLOB_TOKEN_SECRET: ${BLOB_TOKEN_SECRET}
   MAX_SESSIONS_TOTAL: ${MAX_SESSIONS_TOTAL:-18}
   MAX_SESSIONS_PER_USER: ${MAX_SESSIONS_PER_USER:-3}
@@ -30,8 +31,6 @@ services:
     # NET_ADMIN: the start script's firewall only, dropped before sessiond/gateway start.
     # The rest is sessiond's (setuid/setgid/chown/kill, DAC_OVERRIDE+FOWNER to sweep session files).
     cap_add: [NET_ADMIN, SETUID, SETGID, CHOWN, KILL, DAC_OVERRIDE, FOWNER]
-    volumes:
-      - browser-clear-data:/data
     deploy:
       replicas: ${BROWSER_CLEAR_REPLICAS:-1}
       restart_policy: { condition: any }
@@ -44,6 +43,3 @@ services:
 
 networks:
   browser-clear-sessions: { driver: overlay }   # clear browsers -> internet (the uid firewall blocks private ranges)
-
-volumes:
-  browser-clear-data: {}

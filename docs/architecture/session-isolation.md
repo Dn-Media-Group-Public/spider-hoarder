@@ -3,6 +3,13 @@
 Per-session isolation is **one Unix uid per session**, enforced by `sessiond`, plus a per-uid egress firewall.
 See also: [Plan: Browser sessions](../implemented-plans/browser-sessions-plan.md), [Plan: Pluggable backends](../implemented-plans/backend-plugins.md) (egress hooks)
 
+## Store credentials
+Browser and Android sessions hold **no store credentials**, and the per-uid firewall keeps session processes off the private ranges the store lives on (the SeaweedFS filer's IAM gRPC is unauthenticated, so that firewall is what protects it): the gateway writes a session's `out/` files into
+the project's bucket on its behalf and stages project files into `in/`. Components that must touch the store themselves (the parser wrapper)
+get a per-job credential minted by the gateway, limited to read `projects/<proj>/data/*` and write one job's directory
+([Jobs and storage](jobs-and-storage.md#access-and-links)). The gateway's own credential is broad: all authorisation is in its code.
+See also: [Plan: project access model](../implemented-plans/project-access-model.md)
+
 ## The uid lifecycle
 
 The pool is `UID_BASE .. UID_BASE+N-1` (default 20000; N = `MAX_SESSIONS_TOTAL` + 2 spare for `ingest_page` and the tool-list

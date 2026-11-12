@@ -1,0 +1,20 @@
+# The stack's own object store (`SEAWEEDFS=1` in .env, or `./deploy.sh --dev`): SeaweedFS with S3 and STS, the same bucket for every gateway
+# replica. Alternatives: any S3-compatible store or GCS, via RESEARCH_BLOB_URL / RESEARCH_BLOB_OPTIONS. deploy.sh generates the config
+# (`spider_hoarder.py seaweedfs-config`, secrets from .env), creates the bucket with `weed shell` after the deploy, and joins the gateways to
+# the `seaweedfs` network (`seaweedfs-overlay`). Pinned >= 4.31 (earlier releases mis-authorise prefixed lists), 4.53 verified. No port is
+# published; the filer's IAM gRPC (8888) is unauthenticated, so only the gateways' network may reach it (a gateway holds the key anyway).
+version: "3.8"
+
+services:
+  seaweedfs:
+    image: chrislusf/seaweedfs:4.53
+    command: ["server", "-s3", "-s3.config=/cfg/s3.json", "-s3.iam.config=/cfg/iam.json", "-s3.iam.readOnly=false", "-dir=/data"]
+    volumes: ["seaweedfs-data:/data", "./.build/seaweedfs:/cfg:ro"]
+    deploy: { replicas: 1, restart_policy: { condition: any } }
+    networks: [seaweedfs]
+
+networks:
+  seaweedfs: { driver: overlay }
+
+volumes:
+  seaweedfs-data: {}

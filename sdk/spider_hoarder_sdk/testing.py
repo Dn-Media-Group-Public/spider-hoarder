@@ -20,6 +20,39 @@ def gateway_env(**over) -> None:
         os.environ[k] = str(v)
 
 
+def fresh_store() -> str:
+    """Point storage at a new, empty prefix of the test store: a real SeaweedFS, since s3fs's listing cache, its delete and the STS
+    credentials behave differently from any fake. scripts/test.sh starts one and exports TEST_BLOB_URL (s3://bucket) and
+    TEST_BLOB_OPTIONS (JSON for fsspec); set them yourself to use another store."""
+    import json
+    import uuid
+    from spider_hoarder_sdk.content import storage
+    try:
+        base, opts = os.environ["TEST_BLOB_URL"], os.environ["TEST_BLOB_OPTIONS"]
+    except KeyError:
+        raise RuntimeError("the tests need an object store: run them through scripts/test.sh (it starts a SeaweedFS), or set TEST_BLOB_URL and TEST_BLOB_OPTIONS") from None
+    storage.BLOB_URL, storage.BLOB_OPTIONS = f"{base.rstrip('/')}/{uuid.uuid4()}", json.loads(opts)
+    return storage.BLOB_URL
+
+
+def new_job(owner="a@b.c", proj=None) -> tuple[str, str]:
+    """(job_id, storage key) of a fresh job in a new project `owner` administers (or in `proj`); call after setting storage.BLOB_URL."""
+    import uuid
+    from spider_hoarder_sdk.content import storage
+    from spider_hoarder_sdk.gateway import projects
+    proj = proj or projects.create(owner, "test")
+    session, job = str(uuid.uuid4()), str(uuid.uuid4())
+    return f"{proj}/{session}/{job}", storage.job_key(proj, session, job)
+
+
+def bind_project(sid="sid1", owner="a@b.c") -> str:
+    """Create a project `owner` administers and bind MCP session `sid` to it (as open_session(project) does); returns its id."""
+    from spider_hoarder_sdk.gateway import projects
+    proj = projects.create(owner, "test")
+    projects.bind(sid, proj)
+    return proj
+
+
 class FakeBackend:
     """pool.Pool backend that records its calls."""
 

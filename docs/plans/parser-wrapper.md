@@ -6,7 +6,7 @@ rest are replaced, see the numbering note under "Decisions and open decisions"),
 [Jobs, storage and links](../architecture/jobs-and-storage.md), [Session isolation](../architecture/session-isolation.md) (the uid lifecycle and the
 `browser_clear` egress rules this plan copies), [Backend plugins](../architecture/backend-plugins.md) (overlay contract),
 [Plan: OCR hybrid](ocr-hybrid.md) (its remote step moves to the OCR sidecar below).
-**Depends on [Plan: project access model](project-access-model.md)**: the key layout (`projects/<proj>/data/<session>/<job>/…`), the three-part job
+**Depends on [Plan: project access model](../implemented-plans/project-access-model.md)**: the key layout (`projects/<proj>/data/<session>/<job>/…`), the three-part job
 reference, the shared bucket and the per-job scoped credentials are defined there; this plan only uses them.
 
 ## Problem / Goal
@@ -52,7 +52,7 @@ part of this plan.
 
 1. The gateway (browser `out/` collection, upload, `ingest_page`, ...) streams the original into the blob store as today
    (`projects/<proj>/data/<session>/<job>/original/<path>`), then mints the job's scoped credential
-   ([project access model](project-access-model.md): read the project's `data/`, write only `<session>/<job>/`, 900 s) and calls the wrapper.
+   ([project access model](../implemented-plans/project-access-model.md): read the project's `data/`, write only `<session>/<job>/`, 900 s) and calls the wrapper.
 2. `POST <wrapper>/jobs/<proj>/<session>/<job>` with the wrapper token and the scoped credential; body `{path, content_type, base_url?, unzip?, features?}`.
    `features` (see "Remote OCR") is `{"ocr": "<profile>"}` or absent; an unknown feature key or an unknown profile name is a **400**. The wrapper
    builds the storage key itself from the three uuids (validated against the UUID regex), never from a caller-supplied path; the gateway has
@@ -160,7 +160,7 @@ on; the parser container is not.
 - Same kernel, same filesystem namespace, same PID view as the wrapper (hidepid=2 mitigates reading `/proc`); a kernel privilege-escalation bug defeats
   the uid separation. Weaker than a second container; the same trust level as the browser sessions.
 - One shared proxy token: a leak gives general internet access through the proxy but not the blob credentials (rotate it). A leaked scoped credential is
-  limited to one project's read side and one job's write side, for at most its 900 s lifetime (no revocation). A leaked OCR profile token gives free OCR on
+  limited to one project's read side and one job's write side, for at most its 900 s lifetime (S3: revocable at once by deleting the job's role). A leaked OCR profile token gives free OCR on
   that profile only.
 - **OCR privacy** rests on the gateway sending `features.ocr` only where allowed (it already holds the data) and on the wrapper handing the parser only the
   requested profile's token. A compromised parser can send its own job's input, nothing else, to that profile's endpoint.
@@ -224,7 +224,7 @@ concurrency cap (values to set when implementing).
 
 ## Implementation order
 
-0. The [project access model](project-access-model.md) steps 1 to 6 first (layout, credentials, SeaweedFS in dev); this plan assumes them.
+0. The [project access model](../implemented-plans/project-access-model.md) steps 1 to 6 first (layout, credentials, SeaweedFS in dev); this plan assumes them.
 1. Verify the unknowns. **Done:** `s3fs` through an HTTP proxy with credentials and a session token (see decision 3). **Still to verify:** SeaweedFS
    behind the proxy rules with the exception in place (the test ran squid without the firewall rules), STS-issued scoped credentials from the project access
    model, `gcsfs` through the proxy, and the `os.dup2` and `PYTHONUNBUFFERED` behaviour with markitdown, `ffprobe` and `exiftool`.

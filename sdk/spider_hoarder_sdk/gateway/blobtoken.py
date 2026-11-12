@@ -1,4 +1,5 @@
-"""HMAC-signed opaque tokens for GET /blob/<token>: encode {job_id, path, exp}."""
+"""HMAC-signed tokens for GET /blob/<token> and /upload/<token>: {job_id (<proj>/<session>/<job>), path, exp}. Signed, not
+encrypted: anyone holding a link can read what it carries (no email, only the job reference)."""
 
 import base64
 import hmac

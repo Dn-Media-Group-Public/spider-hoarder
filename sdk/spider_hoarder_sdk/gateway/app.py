@@ -3,7 +3,7 @@ and the MCP plumbing with a dynamic tool list. Everything backend-specific (brow
 ...) is the driver's (driver.py): the backend named by $BACKEND.
 
 Everything is served under /<prefix>/ (prefix = the backend name with `_` as `-`; nginx routes by that prefix and by
-the replica id `rid` in ids and URLs), except /authz which nginx's auth_request calls on the internal network.
+the replica id `rid` in MCP session ids and live-view URLs), except /authz which nginx's auth_request calls on the internal network.
 See docs/architecture/backend-plugins.md and docs/implemented-plans/research-replicas.md."""
 
 import asyncio
@@ -33,10 +33,12 @@ from spider_hoarder_sdk.content import extract
 from spider_hoarder_sdk.content import storage
 from spider_hoarder_sdk.gateway import auth
 from spider_hoarder_sdk.gateway import blobtoken
+from spider_hoarder_sdk.gateway import creds
+from spider_hoarder_sdk.gateway import projects
 from spider_hoarder_sdk.gateway import sessions
 from spider_hoarder_sdk.gateway.driver import driver, hyphen
 from spider_hoarder_sdk.gateway.jobs import (DEFAULT_TEXT_LENGTH, FILE_TOOLS_NOTE, INLINE_LIMIT, RID, UPLOAD_MARK, _check_rel_path,
-                                             _key, _new_job_id, _schema, _store_and_parse, _text)
+                                             _key, _new_job, _schema, _store_and_parse, _text, job_key)
 
 PREFIX = sessions.PREFIX  # the URL prefix nginx routes on
 logging.basicConfig(level="INFO", format="%(name)s %(levelname)s %(message)s")
@@ -88,13 +90,24 @@ driver.register(mcp)
 
 # The job tools every backend has: files stored under a job id, whoever produced them.
 JOB_TOOLS = [
-    types.Tool(name="get_upload_link", inputSchema=_schema(),
-               description="Mint a job id and a link for a human to upload files through a browser."),
-    types.Tool(name="list_files", inputSchema=_schema(job_id="Job id"), description="Manifest of files stored under a job id. terse/<name>.md is an outline (headings, links, images) of parsed/<name>.md."),
+    types.Tool(name="create_project", inputSchema=_schema(name="Project name (not unique; the returned id is the identity)"),
+               description="Create a project; you become its admin. Every job lives in a project, and its members see its jobs."),
+    types.Tool(name="list_projects", inputSchema=_schema(), description="The projects you are a member of: {project, name, role}."),
+    types.Tool(name="get_project", inputSchema=_schema(project="Project id"),
+               description="A project's name and your role; its member list too, for admins."),
+    types.Tool(name="share_project", inputSchema=_schema(project="Project id", email="User's email", role="read, write or admin"),
+               description="Admin only. Give a user a role in the project (or change it): read = read and list files, write = also create jobs, admin = also manage users and delete the project."),
+    types.Tool(name="unshare_project", inputSchema=_schema(project="Project id", email="User's email"),
+               description="Admin only. Remove a user from the project (a project always keeps at least one admin)."),
+    types.Tool(name="delete_project", inputSchema=_schema(project="Project id"),
+               description="Admin only. Permanently delete the project with all its sessions and jobs."),
+    types.Tool(name="get_upload_link", inputSchema=_schema({"project": "Project id; optional when this session is bound to one"}),
+               description="Mint a job id and a link for a human to upload files through a browser (needs the write role)."),
+    types.Tool(name="list_files", inputSchema=_schema(job_id="Job id (<project>/<session>/<job>)"), description="Manifest of files stored under a job id. terse/<name>.md is an outline (headings, links, images) of parsed/<name>.md."),
     types.Tool(name="get_file_text", inputSchema={
                    "type": "object", "required": ["job_id", "path"],
                    "properties": {
-                       "job_id": {"type": "string", "description": "Job id"},
+                       "job_id": {"type": "string", "description": "Job id (<project>/<session>/<job>)"},
                        "path": {"type": "string", "description": "File path from the manifest"},
                        "offset": {"type": "integer", "minimum": 0, "description": "Start character (default 0)"},
                        "length": {"type": ["integer", "null"], "minimum": 0, "default": DEFAULT_TEXT_LENGTH,
@@ -105,7 +118,7 @@ JOB_TOOLS = [
     types.Tool(name="grep_file", inputSchema={
                    "type": "object", "required": ["job_id", "path", "pattern"],
                    "properties": {
-                       "job_id": {"type": "string", "description": "Job id"},
+                       "job_id": {"type": "string", "description": "Job id (<project>/<session>/<job>)"},
                        "path": {"type": "string", "description": "Text file path from the manifest"},
                        "pattern": {"type": "string", "description": "Python regular expression, or /pattern/i for case-insensitive"},
                        "context": {"type": "integer", "minimum": 0, "default": 2, "description": "Lines of context around each match (default 2)"},
@@ -113,7 +126,7 @@ JOB_TOOLS = [
                description="Search one text file of a job (e.g. a stored snapshot, matches or parsed page) with a regular "
                "expression. Returns matching lines with context, line numbers and the character offset of each block "
                "(usable as get_file_text offset). Binary files are refused."),
-    types.Tool(name="get_file_url", inputSchema=_schema(job_id="Job id", path="File path from the manifest"),
+    types.Tool(name="get_file_url", inputSchema=_schema(job_id="Job id (<project>/<session>/<job>)", path="File path from the manifest"),
                description="Mint a short-lived opaque signed URL for one blob (original or parsed)."),
 ]
 
@@ -136,6 +149,30 @@ def _caller() -> tuple[Any, str, str | None]:
 
 
 
+PROJECT_TOOLS = ("create_project", "list_projects", "get_project", "share_project", "unshare_project", "delete_project")
+
+
+async def _project_tool(name: str, args: dict, ctx: Ctx) -> types.CallToolResult:
+    owner = ctx.owner
+    if name == "create_project":
+        return _text(json.dumps({"project": await asyncio.to_thread(projects.create, owner, args["name"])}))
+    if name == "list_projects":
+        return _text(json.dumps(await asyncio.to_thread(projects.list_for, owner)))
+    proj = args["project"]
+    if name == "get_project":
+        return _text(json.dumps(await asyncio.to_thread(projects.get, owner, proj)))
+    if name == "share_project":
+        await asyncio.to_thread(projects.share, owner, proj, args["email"], args["role"])
+    elif name == "unshare_project":
+        await asyncio.to_thread(projects.unshare, owner, proj, args["email"])
+    else:
+        await asyncio.to_thread(projects.require, owner, proj, "admin")  # before revoking anything
+        await asyncio.to_thread(creds.revoke_project, proj)  # no credential minted for it outlives the project
+        for sid in await asyncio.to_thread(projects.delete, owner, proj):
+            await sessions.end_mcp_session(sid)
+    return _text(json.dumps({"ok": True}))
+
+
 @server.list_tools()
 async def list_tools() -> list[types.Tool]:
     own = {t.name for t in [*driver.extra_tools, *JOB_TOOLS]}  # the gateway's versions replace the upstream ones of the same name
@@ -153,12 +190,14 @@ async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
     if name in driver.hidden:
         return _text(f"{name} is disabled", True)
     try:
+        if name in PROJECT_TOOLS:  # before pre_session: a project is needed to open a session
+            return await _project_tool(name, args, ctx)
         if (res := await driver.pre_session(name, args, ctx)) is not None:
             return res
         if name == "get_upload_link":
-            job_id = _new_job_id()
-            token = blobtoken.mint(_key(owner, job_id), UPLOAD_MARK, ttl=3600)
-            return _text(json.dumps({"url": f"{BASE}/upload/{RID}/{token}", "job_id": job_id}))
+            job_id, _ = _new_job(owner, sid, args.get("project"))
+            token = blobtoken.mint(job_id, UPLOAD_MARK, ttl=3600)
+            return _text(json.dumps({"url": f"{BASE}/upload/{token}", "job_id": job_id}))
         if name in ("list_files", "get_file_text", "get_file_url", "grep_file"):
             key = _key(owner, args["job_id"])
             if name == "list_files":
@@ -183,7 +222,7 @@ async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
                 return _text(f"[Showing characters {off}-{end} of {len(text)}."
                              + (f" Truncated: call again with offset={end} to continue." if end < len(text) else "")
                              + f"]\n\n{text[off:end]}")
-            return _text(json.dumps({"url": f"{BASE}/blob/{RID}/{blobtoken.mint(key, path)}"}))
+            return _text(json.dumps({"url": f"{BASE}/blob/{blobtoken.mint(args['job_id'], path)}"}))
 
         if not driver.known(name):  # before get_session: an unknown tool must not book a session
             return _text(f"unknown tool {name}", True)
@@ -247,17 +286,19 @@ async def view_start(request: Request) -> Response:
 def _upload_key(token: str) -> str:
     try:
         data = blobtoken.verify(token)
+        key = job_key(data["job_id"])
     except ValueError as e:
         raise HTTPException(403, str(e))
     if data["path"] != UPLOAD_MARK:
         raise HTTPException(403, "not an upload link")
-    return data["job_id"]
+    if not projects.exists(data["job_id"].split("/")[0]):  # a deleted project takes its open upload links with it
+        raise HTTPException(404, "not found")
+    return key
 
 
 
-@mcp.custom_route(f"/{PREFIX}/upload/{{rid}}/{{token}}", methods=["GET"])
+@mcp.custom_route(f"/{PREFIX}/upload/{{token}}", methods=["GET"])
 async def upload_page(request: Request) -> Response:
-    _own(request)
     _upload_key(request.path_params["token"])
     return HTMLResponse(
         '<!doctype html><html><body><h1>Upload files</h1>'
@@ -265,9 +306,8 @@ async def upload_page(request: Request) -> Response:
         '<input type="file" name="files" multiple><button type="submit">Upload</button></form></body></html>')
 
 
-@mcp.custom_route(f"/{PREFIX}/upload/{{rid}}/{{token}}", methods=["POST"])
+@mcp.custom_route(f"/{PREFIX}/upload/{{token}}", methods=["POST"])
 async def upload_submit(request: Request) -> Response:
-    _own(request)
     key = _upload_key(request.path_params["token"])
     form = await request.form()
     previews = []
@@ -283,17 +323,17 @@ async def upload_submit(request: Request) -> Response:
     return HTMLResponse(f"<!doctype html><html><body><h1>Uploaded</h1>{body}</body></html>")
 
 
-@mcp.custom_route(f"/{PREFIX}/blob/{{rid}}/{{token}}", methods=["GET"])
+@mcp.custom_route(f"/{PREFIX}/blob/{{token}}", methods=["GET"])
 async def get_blob(request: Request) -> Response:
-    _own(request)
     try:
         data = blobtoken.verify(request.path_params["token"])
+        key = job_key(data["job_id"])  # the signed token is the authority: a link works without an account
     except ValueError as e:
         raise HTTPException(403, str(e))
-    if data["path"] == UPLOAD_MARK or not storage.exists(data["job_id"], data["path"]):
+    if data["path"] == UPLOAD_MARK or not storage.exists(key, _check_rel_path(data["path"])):
         raise HTTPException(404, "file not found")
     ctype = mimetypes.guess_type(data["path"])[0] or "application/octet-stream"
-    return Response(content=storage.read_bytes(data["job_id"], data["path"]), media_type=ctype)
+    return Response(content=storage.read_bytes(key, data["path"]), media_type=ctype)
 
 
 # ---------------------------------------------------------------- app ------
@@ -372,15 +412,28 @@ for _r in app.routes:
 _inner_lifespan = app.router.lifespan_context
 
 
+async def _sweep_roles() -> None:
+    """Every 5 minutes: delete the per-job roles a crashed gateway left behind (creds.sweep)."""
+    while True:
+        try:
+            if n := await asyncio.to_thread(creds.sweep):
+                log.info("swept %d expired job roles", n)
+        except Exception:  # noqa: BLE001
+            log.exception("role sweep failed")
+        await asyncio.sleep(300)
+
+
 @contextlib.asynccontextmanager
 async def lifespan(a):
     await sessions.pool.reset()
     async with _inner_lifespan(a):
         task = asyncio.create_task(sessions.reaper())
+        sweeper = asyncio.create_task(_sweep_roles())
         try:
             yield
         finally:
             task.cancel()
+            sweeper.cancel()
             for bs in list(sessions.by_mcp.values()):
                 await sessions.close(bs)
 

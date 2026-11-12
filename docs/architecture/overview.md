@@ -43,6 +43,7 @@ browser-<egress>-gateway container (1..N replicas):
 | `browser-i2p-router`, `browser-i2p-seed` | I2P egress: one `i2pd` router per `browser-i2p-gateway` replica (slot k ↔ `browser-i2p-router-k`), a SOCKS destination per session; the seed serves a netDb snapshot so routers start fast. See also: [Plan: I2P egress](../implemented-plans/i2p-egress.md) | `backends/browser_i2p/browser_i2p/{router,seed}/` |
 | `android-clear-gateway`, `android-tor-gateway`, `android-*-wrapper`, `android-tor-daemon`, slots | Optional Android emulators: a light gateway, one wrapper per backend that makes the slot containers, one emulator per slot, and (tor) the backend's own transparent-proxy Tor daemon. See [Android emulators](android.md). | `backends/android-sdk/`, `backends/android_*/` |
 | Keycloak | External OIDC provider (prod); a throwaway one in `--dev`. | `keycloak/setup.sh` |
+| `seaweedfs` (optional: `SEAWEEDFS=1`, default with `--dev`) | The stack's own object store (S3 + STS), an alternative to GCS or another S3: jobs live in one bucket so any gateway replica serves any job, and the gateway can mint per-job credentials. Bucket created by `deploy.sh` (`weed shell`), no published port. See also: [Plan: project access model](../implemented-plans/project-access-model.md) | `docker-compose.seaweedfs.yml` |
 
 ### Why one container per backend, not per session
 No Docker socket and no container creation: a session is a Unix uid plus a process group inside the container. Parsing
@@ -93,6 +94,7 @@ Separate pip distributions in one repository, installed into `.venv/` by `deploy
 | `sdk/spider_hoarder_sdk/gateway/driver.py` | the `Driver` base class (the seam) and the entry-point loader |
 | `sdk/spider_hoarder_sdk/gateway/sessions.py`, `pool.py`, `jobs.py`, `ident.py` | session registry, reservations, reaper; uid pool; job ids/store/parse helpers; replica id |
 | `sdk/spider_hoarder_sdk/gateway/auth.py`, `blobtoken.py` | Keycloak JWT verification, HMAC links |
+| `sdk/spider_hoarder_sdk/gateway/projects.py`, `creds.py` | projects, roles, `access.json` and the `users/` index, the per-MCP-session project binding; scoped store credentials (STS / Credential Access Boundary). See also: [Plan: project access model](../implemented-plans/project-access-model.md) |
 | `sdk/spider_hoarder_sdk/content/`, `textcap.py` | content pipeline: `extract.py` (Markdown, terse outline, grep), `storage.py` (fsspec); text caps |
 | `backends/browser-sdk/spider_hoarder_browser_sdk/` | `driver.py` (BrowserDriver), `egress.py` (egress-policy base), `firewall.py`, `start.py` (container start), `files.py`, `pages.py`, `fetch.py`, `netguard.py`, `ports.py`, `mediapolicy.py`, `cmp_rules.py`, `sessiond_client.py`, `image/` (base image) |
 | `backends/browser-sdk/.../session_server/` | `sessiond/` (root side of the uid pool), `session/` (`session-group.sh`, `filter_proxy.py`), `toolserver/` ([details](browser-toolserver.md)) |

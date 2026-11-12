@@ -15,7 +15,8 @@ from spider_hoarder_browser_sdk.mediapolicy import Policy
 from spider_hoarder_browser_sdk.sessiond_client import Sessiond
 from spider_hoarder_sdk.content import storage
 from spider_hoarder_sdk.gateway.driver import Driver, sessions
-from spider_hoarder_sdk.gateway.jobs import _job_name, _key, _new_job_id, _schema, _text
+from spider_hoarder_sdk.gateway import projects
+from spider_hoarder_sdk.gateway.jobs import _job_name, _new_job, _schema, _text
 from spider_hoarder_sdk.gateway.pool import Pool
 from spider_hoarder_sdk.textcap import DEFAULT_TEXT_CAP
 
@@ -44,6 +45,9 @@ def extra_tools(egress) -> list[types.Tool]:
     EGRESS, EGRESS_NOTE = egress.name, egress.note
     return [
         types.Tool(name="open_session", inputSchema={"type": "object", "properties": {
+                       "project": {"type": "string", "description": "Project id that this conversation's jobs are stored in (needs the write role); "
+                                   "create one with create_project. Without it, browser_save_page and the other tools that store a job fail "
+                                   "(ingest_page and get_upload_link can take their own `project`)."},
                        "media": {"type": "boolean", "description": "true = load images, video, audio and other media; false = never request or download them. "
                                  "Default: false on Tor and I2P, true on clear."},
                        "allow": {**_MIME_LIST, "description": "Extra content types allowed for direct navigation/downloads, e.g. ['image/svg+xml']"},
@@ -75,7 +79,7 @@ def extra_tools(egress) -> list[types.Tool]:
                    description="With `browser`: close just that browser (window and tabs). Without: close all browsers and end "
                    "this conversation's session, discarding its state (cookies, tabs, downloads). Subagents: pass the id "
                    "from browser_start_session when done. Closing the last browser ends the session."),
-        types.Tool(name="ingest_page", inputSchema=_schema({"target": "Unique selector of the element to convert (refs do not work here: no snapshot exists); omit for the whole page"}, url="URL to fetch"),
+        types.Tool(name="ingest_page", inputSchema=_schema({"project": "Project id; optional when open_session was given one", "target": "Unique selector of the element to convert (refs do not work here: no snapshot exists); omit for the whole page"}, url="URL to fetch"),
                    description=f"[{EGRESS.upper()}] {EGRESS_NOTE}\n\nOne-shot: fetch a URL (HTML via a throwaway browser, anything else directly) and parse it "
                    "to Markdown. Returns {job_id, files, text?}. `target` (HTML only) converts just that element, and must be a selector. `simplified/` holds an automatic main-content guess that may omit text. If the text looks like a consent/CAPTCHA wall, use the "
                    "browser_* tools and browser_request_human_help instead."),
@@ -115,7 +119,10 @@ class BrowserDriver(Driver):
             "automatic main-content extraction that may omit text. Before browser_save_page, use browser_find to "
             "locate the main content element and pass its ref as `target`. "
             "Call browser_end_session when finished. "
-            "FIRST call open_session (after asking the user about security settings): every other tool fails until then.")
+            "Every job is stored in a project: list_projects shows yours, create_project makes one (ask the user which to use; they can share "
+            "a project with others via share_project). "
+            "FIRST call open_session(project) (after asking the user about security settings): every other tool fails until then, and the "
+            "browser_* tools that store jobs need the project it binds (ending the session drops the binding: call open_session again).")
         self._host_rules = cmp_rules.host_rules()
 
     # ---- pool and upstream session
@@ -165,6 +172,9 @@ class BrowserDriver(Driver):
                 if bs := await sessions.get_session(mcp_session, owner, create=False):
                     await sessions.close(bs)
             sessions.opened[sid] = policy
+            if args.get("project"):  # after the close above: ending a session drops its binding
+                projects.require(owner, args["project"], "write")
+                projects.bind(sid, args["project"])
             return _text(json.dumps(policy.summary(egress, True)))
         if name == "get_session":
             return _text(json.dumps((sessions.opened.get(sid or "") or Policy.make(self.egress.media_default)).summary(egress, sid in sessions.opened)))
@@ -188,7 +198,7 @@ class BrowserDriver(Driver):
         if name == "ingest_page":
             return _text(json.dumps(await pages.ingest_page(
                 self.egress, owner, args["url"], await sessions.get_session(mcp_session, owner, create=False), args.get("target"),
-                sessions.opened[sid])))
+                sessions.opened[sid], sid, args.get("project"))))
 
     async def with_session(self, name, args, ctx, bs):
         if name == "browser_request_human_help":
@@ -209,7 +219,7 @@ class BrowserDriver(Driver):
         """Run a file-producing upstream tool; the file ends up under a new job id."""
         tree = name in TREE_TOOLS
         jname = FILE_TOOLS[name] if tree else _job_name(arguments.get("filename"), FILE_TOOLS[name])
-        job_id = _new_job_id()
+        job_id, key = _new_job(bs.owner, bs.sid)  # before the tool runs: no project bound / no write role fails early
         private = f"{uuid.uuid4()}-{jname}"  # gateway-chosen, relative: lands in out/, never a client-chosen path
         staged, given = [], arguments
         if name == "browser_network_request_make":
@@ -238,7 +248,6 @@ class BrowserDriver(Driver):
                     meta["origin"] = r.group(1)
                 if isinstance(given.get("body"), dict):  # the argument as given, with job references: never a second copy of a big upload
                     meta["body"] = given["body"]
-        key = _key(bs.owner, job_id)
         try:
             result = await asyncio.to_thread(files._ingest_out, bs.uid, private, key, jname, tree, meta.get("url", ""))
         except (OSError, ValueError) as e:

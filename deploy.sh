@@ -45,6 +45,16 @@ if [ "$DEV" -eq 1 ]; then
   echo "Deploying in DEV mode (local Keycloak, http://localhost, no TLS)"
   export PUBLIC_HOST=localhost:$HTTP_PORT PUBLIC_SCHEME=http
   export OIDC_ISSUER="http://localhost:${KC_DEV_PORT:-8085}/realms/${KC_REALM:-newsroom}"
+  SEAWEEDFS="${SEAWEEDFS:-1}"   # the dev store is the stack's own SeaweedFS unless .env says otherwise
+fi
+# The object store (all gateway replicas share one bucket; no local disk): the stack's own SeaweedFS (SEAWEEDFS=1) or RESEARCH_BLOB_URL
+# (gs://bucket or s3://bucket) with RESEARCH_BLOB_OPTIONS, a JSON object handed to fsspec (credentials, endpoint, ...).
+SEAWEEDFS="${SEAWEEDFS:-0}"
+if [ "$SEAWEEDFS" = 1 ]; then
+  REQUIRED+=(SEAWEEDFS_BUCKET SEAWEEDFS_KEY SEAWEEDFS_SECRET SEAWEEDFS_SIGNING_KEY)
+else
+  REQUIRED+=(RESEARCH_BLOB_URL)
+  case "${RESEARCH_BLOB_URL:-}" in s3://*|gs://*|"") ;; *) echo "RESEARCH_BLOB_URL must be s3://bucket or gs://bucket (no local or in-memory store)" >&2; exit 1 ;; esac
 fi
 if [ "$DEV_KC" -eq 1 ]; then
   export KC_SETUP_HASH=$(md5sum keycloak/setup.sh | cut -c1-8)   # swarm configs are immutable: the hash is in the name
@@ -73,6 +83,11 @@ pip install -q --no-deps --force-reinstall ./sdk ./backends/*/ ${BACKEND_PACKAGE
 
 TOOL="python scripts/spider_hoarder.py"
 $TOOL validate
+if [ "$SEAWEEDFS" = 1 ]; then
+  $TOOL seaweedfs-config .build/seaweedfs   # holds secrets: .build/ is not committed
+  export RESEARCH_BLOB_URL="s3://$SEAWEEDFS_BUCKET"
+  export RESEARCH_BLOB_OPTIONS="$(python -c 'import json,os;print(json.dumps({"key":os.environ["SEAWEEDFS_KEY"],"secret":os.environ["SEAWEEDFS_SECRET"],"endpoint_url":"http://seaweedfs:8333"}))')"
+fi
 $TOOL preflight
 
 # Build local images (build: is ignored in stack deploy)
@@ -101,6 +116,10 @@ FILES=(-c docker-compose.yml)
 if [ "$DEV_KC" -eq 1 ]; then
   FILES+=(-c docker-compose.keycloak.yml)
 fi
+if [ "$SEAWEEDFS" = 1 ]; then
+  $TOOL seaweedfs-overlay .build/docker-compose.seaweedfs-gateways.yml
+  FILES+=(-c docker-compose.seaweedfs.yml -c .build/docker-compose.seaweedfs-gateways.yml)
+fi
 if [ "$DEV" -eq 1 ]; then
   $TOOL dev-overlay .build/docker-compose.dev-gateways.yml
   FILES+=(-c docker-compose.dev.yml -c .build/docker-compose.dev-gateways.yml)
@@ -120,4 +139,14 @@ else
   for s in nginx $($TOOL services); do
     docker service update --force --no-resolve-image "${STACK}_$s"
   done
+fi
+if [ "$SEAWEEDFS" = 1 ]; then   # the bucket (idempotent; waits for the store to come up). No port is published: weed shell runs inside the container
+  for _ in $(seq 60); do
+    cid=$(docker ps -q -f "name=${STACK}_seaweedfs" | head -1)
+    # weed shell exits non-zero when the bucket already exists: judge by its output
+    out=$([ -n "$cid" ] && echo "s3.bucket.create -name $SEAWEEDFS_BUCKET" | docker exec -i "$cid" weed shell -master=localhost:9333 2>&1 || true)
+    if echo "$out" | grep -q "created bucket\|already exists"; then ready=1; break; fi
+    sleep 2
+  done
+  [ -n "${ready:-}" ] || { echo "SeaweedFS did not come up" >&2; exit 1; }
 fi

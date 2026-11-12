@@ -46,8 +46,8 @@ def extract(name: str, data: bytes, ctype: str = "application/octet-stream"):
 
 
 def job(monkeypatch):
-    monkeypatch.setattr(storage, "BLOB_URL", "file://" + tempfile.mkdtemp())
-    return jobs._key("a@x.y", f"{jobs.RID}.123e4567-e89b-12d3-a456-426614174099")
+    testing.fresh_store()
+    return testing.new_job("a@x.y")[1]
 
 
 def test_office_revisions_comments_and_hostile_xml():

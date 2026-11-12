@@ -9,7 +9,8 @@ x-gateway-env: &gateway-env
   PUBLIC_SCHEME: ${PUBLIC_SCHEME:-https}
   OIDC_ISSUER: ${OIDC_ISSUER}
   MCP_SCOPE: ${MCP_SCOPE:-}
-  RESEARCH_BLOB_URL: ${RESEARCH_BLOB_URL:-file:///data}
+  RESEARCH_BLOB_URL: ${RESEARCH_BLOB_URL}
+  RESEARCH_BLOB_OPTIONS: ${RESEARCH_BLOB_OPTIONS:-}   # JSON, handed to fsspec (credentials, endpoint, ...)
   BLOB_TOKEN_SECRET: ${BLOB_TOKEN_SECRET}
   MAX_SESSIONS_PER_USER: ${ANDROID_MAX_SESSIONS_PER_USER:-1}
   DISCONNECT_TIMEOUT_MINUTES: ${DISCONNECT_TIMEOUT_MINUTES:-5}
@@ -33,8 +34,6 @@ services:
     image: ${IMAGE_PREFIX:-}spider-hoarder-android-tor:${IMAGE_TAG:-local}
     cap_drop: [ALL]
     cap_add: [SETUID, SETGID, SETPCAP]
-    volumes:
-      - android-tor-data:/data
     deploy:
       replicas: ${ANDROID_TOR_REPLICAS:-1}
       restart_policy: { condition: any }
@@ -107,5 +106,4 @@ networks:
   android-tor-wrapper-net: { driver: overlay, internal: true }   # nobody else on it: the wrapper has no network to speak of
 
 volumes:
-  android-tor-data: {}
   android-tor-daemon-data: {}

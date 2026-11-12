@@ -13,7 +13,7 @@ cap; parsing does (`MAX_PARSE_BYTES`, default 50 MB: a bigger file is kept under
 `browser_network_request_get`/`_make` output a directory: only `request|response/headers.json` and `body.<ext>` are read, anything else is ignored.
 See also: [Plan: network request jobs](../implemented-plans/network-request-jobs.md)
 
-**`in/`**: for `browser_network_request_make` the gateway resolves every `{job_id, path}` in `body` (owner-scoped, `..`/absolute paths and
+**`in/`**: for `browser_network_request_make` the gateway resolves every `{job_id, path}` in `body` (read role in the job's project, `..`/absolute paths and
 missing keys rejected) and checks all sizes before copying anything: `navigation` bodies (files, text and encoded fields together) against
 `MAX_REQUEST_BODY` (env, default 64 MiB: Chromium refuses a CDP message over 100 MiB, i.e. ~75 MiB of body, by killing the whole browser
 context; measured 74 MiB ok, 76 not), the file parts of `form`/`xhr` against `MAX_UPLOAD_BYTES` (env, default 500 MiB; 64 MiB in a session
@@ -26,7 +26,18 @@ fails midway), and the session-end wipe covers the rest. `index.json` keeps the 
 See also: [Plan: network request make types](../implemented-plans/network-request-make-types.md)
 
 ## Layout
-fsspec storage (`RESEARCH_BLOB_URL`: `file:///data` or `gs://…`), keyed `<owner>/<uuid>`:
+fsspec storage in **one shared bucket** (`RESEARCH_BLOB_URL`: `gs://…` or `s3://…`, with `RESEARCH_BLOB_OPTIONS`, a JSON object handed to
+fsspec as is: credentials, endpoint, ...; the stack can run its own SeaweedFS, `SEAWEEDFS=1`). There is no local-disk or in-memory store: every replica
+must see the same files, so any gateway replica serves any job. Keys are built in one place (`storage.job_key`):
+
+```
+projects/<proj>/access.json                       {name, created, users: {<email>: admin|write|read}}   (gateway only)
+projects/<proj>/data/<session>/<job>/…            the job files below
+users/<user>/<proj>                               index for "my projects" (a hint only; <user> = lowercased email, %XX-encoded)
+```
+`<proj>`, `<session>`, `<job>` are random UUIDs, validated wherever one arrives, so no path component can hold `/` or `..`. A **job id** is
+`<proj>/<session>/<job>` (never the owner). `<session>` is one uuid per MCP session, created at its first job. `access.json` sits beside
+`data/`, so no per-job credential can read or change it. Under a job:
 
 ```
 original/<path>      the bytes as received (for HTML: the converted HTML, i.e. the target element's if given)
@@ -73,10 +84,28 @@ Rationale: trafilatura silently drops content (measured), and the client is bett
 See also: [Plan: save-page target](../implemented-plans/save-page-target.md)
 
 ## Access and links
-- Jobs are owner-scoped (the caller's email); another owner's job is "file not found". With replicas, `job_id` is `<rid>.<uuid>` and
-  jobs live on the replica that created them ([Scaling](scaling.md)).
-- `get_file_url` returns an HMAC-signed, short-lived (15 min) download link `…/blob/<rid>/<token>`; `get_upload_link` an upload page
-  link (1 h) that carries the owner-scoped job key, so uploads need no SSO and cannot cross owners. Secret: `BLOB_TOKEN_SECRET`.
+- Jobs belong to **projects** with per-user roles (`read`, `write`, `admin`; [Auth](auth.md#projects-and-roles)). Every call goes through
+  `jobs._key(owner, job_id, need)`, which checks the caller's role in `projects/<proj>/access.json` (cached 30 s per replica,
+  `ACCESS_CACHE_SECONDS`); no such project and no role both answer "project not found". Job-creating tools need `write` and take a
+  `project` argument, optional when `open_session(project)` bound the MCP session; the job's `<session>` directory is that MCP session's.
+  Jobs are not tied to a replica ([Scaling](scaling.md)); a project can be deleted (all its sessions and jobs), nothing smaller.
+- `get_file_url` returns an HMAC-signed, short-lived (15 min) download link `…/blob/<token>`, streamed by the gateway from the bucket (a
+  recipient needs no account and no network path to the store); `get_upload_link(project?)` an upload page link (1 h) for a new job, so
+  uploads need no SSO and write only into that job. The token is **signed, not encrypted**: it carries `<proj>/<session>/<job>/<path>`
+  (no email) and anyone holding the link can read it. Secret: `BLOB_TOKEN_SECRET`. A deleted project takes its upload links with it.
+- **Scoped store credentials** (`gateway/creds.py`): for components that touch the store themselves (the parser wrapper, [Plan: parser
+  wrapper](../plans/parser-wrapper.md)) the gateway mints a short-lived credential (900 s) limited to read `projects/<proj>/data/*` and
+  write `projects/<proj>/data/<session>/<job>/*`, and hands it over as plain fsspec options (`key`, `secret`, `token`; GCS: `token`). S3 /
+  SeaweedFS: a **new role per job** whose own policy is exactly that (no broad role behind it, no session policy to forget), assumed
+  by the gateway; deleting the role revokes the credential at once, so it ends with the job (`Scoped.release`) and with the project
+  (`revoke_project`), and a sweeper (every 5 min) deletes roles a crashed gateway left behind. GCS: a Credential Access Boundary
+  (downscoped token; narrow by construction, not revocable). Every failure raises: no fallback to the gateway's own credential. The gateway
+  needs the right to create roles (SeaweedFS: the `Admin` action). Sessions hold no store credentials (the gateway writes their `out/` files for
+  them). Verified on SeaweedFS 4.53 (`sdk/tests/test_creds.py`); nothing calls the minting until the parser wrapper lands.
+- **The stack's SeaweedFS** (`SEAWEEDFS=1`, default with `--dev`; `docker-compose.seaweedfs.yml`): pinned image, S3 on its own overlay network that
+  the gateways join, no published port; `deploy.sh` generates its config from `SEAWEEDFS_*`, creates the bucket with `weed shell` and gives the gateways
+  `RESEARCH_BLOB_URL` / `RESEARCH_BLOB_OPTIONS`. Its roles live in memory: a restart ends the credentials in flight (the consumer re-mints).
+  See also: [Plan: project access model](../implemented-plans/project-access-model.md)
 - Every archive (upload, `ingest_page` download, network response body) is unpacked to `original/<archive path>.d/<relpath>`, members
   parsed as any file (`parsed/<archive path>.d/<relpath>.md`); archives inside archives are only stored. Detected by extension or
   content type only (`extract.archive_kind`): zip, tar (`.tar .tgz .tar.gz .tbz .tbz2 .tar.bz2 .txz .tar.xz`, streamed), 7z (`py7zr`),

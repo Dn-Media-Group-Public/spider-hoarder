@@ -135,7 +135,7 @@ differs, and must not import `sessions` or `app` at module level (they import th
 | `after_initialize(cs, bs)` | after the upstream MCP handshake (browser: the media policy) |
 | `view_upstream(uid, rid)` | `host:port` nginx proxies the live view to |
 | `upstream_tools()`, `decorate_tools(tools)`, `hidden`, `extra_tools` | the dynamic tool list: static or probed, notes added, tools never exposed, the gateway's own tools |
-| `file_tools`, `capped_tools`, `file_tool(bs, name, args)` | proxied tools whose output becomes a job; how that file is fetched |
+| `file_tools`, `capped_tools`, `file_tool(bs, name, args)` | proxied tools whose output becomes a job; how that file is fetched. A driver creates the job with `jobs._new_job(owner, sid, project=None)` -> `(job_id, key)` (needs the write role in the project; the project is the explicit one or the one `projects.bind(sid, proj)` bound, usually from the driver's own `open_session(project)`); `jobs._key(owner, job_id, need="read")` resolves an existing job id. See also: [Plan: project access model](../implemented-plans/project-access-model.md) |
 | `known(name)` | reject an unknown tool before it books a session |
 | `pre_session(name, args, ctx)`, `with_session(name, args, ctx, bs)` | backend-owned gateway tools: before any session exists / with one; return a result or `None` |
 | `register(mcp)` | optional extra routes |

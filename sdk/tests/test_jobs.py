@@ -35,22 +35,10 @@ def test_jwt():
     assert ok(_tok(email=None)) is None
 
 
-def test_owner_scoping():
-    from spider_hoarder_sdk.gateway import jobs
-    j = f"{jobs.RID}.123e4567-e89b-12d3-a456-426614174000"
-    assert jobs._key("A@x.y", j) != jobs._key("b@x.y", j)
-    for bad in ("..", "x", ""):
-        try:
-            jobs._key(bad, j)
-            assert False, bad
-        except ValueError:
-            pass
-
-
 def test_write_stream():
     from spider_hoarder_sdk.content import storage
     import io, tempfile
-    storage.BLOB_URL = "file://" + tempfile.mkdtemp()
+    testing.fresh_store()
     data = b"abc" * (1 << 20)  # 3 MiB: several chunks
     assert storage.write_stream("j", "original/big.bin", io.BytesIO(data), "x/y") == len(data)
     assert storage.read_bytes("j", "original/big.bin") == data
@@ -136,9 +124,9 @@ def test_store_terse():
     from spider_hoarder_sdk.gateway import jobs
     from spider_hoarder_sdk.content import storage
     import tempfile
-    storage.BLOB_URL = "file://" + tempfile.mkdtemp()
+    testing.fresh_store()
     jobs.INLINE_LIMIT = 50_000
-    key = jobs._key("a@x.y", f"{jobs.RID}.123e4567-e89b-12d3-a456-426614174001")
+    key = testing.new_job("a@x.y")[1]
     paths = lambda r: {f["path"] for f in r["files"]}
     r = jobs._store_and_parse(key, "p.html", b"<html><body><article><h1>Title</h1><p>" + b"Some long article text here. " * 20 + b"</p><h2>Part</h2><p>" + b"More article text. " * 20 + b"</p></article></body></html>", "text/html")
     assert {"original/p.html", "parsed/p.html.md", "simplified/p.html.md", "terse/p.html.md"} <= paths(r), paths(r)
@@ -150,7 +138,7 @@ def test_store_terse():
     storage.write_bytes(key, "x.txt", b"x", "text/plain")  # a later manifest update keeps the meta
     m = storage.get_manifest(key)
     assert m["url"] == "http://u" and m["target"] == "main" and any(f["path"] == "d.html" or f["path"] == "x.txt" for f in m["files"]), m
-    k2 = jobs._key("a@x.y", f"{jobs.RID}.123e4567-e89b-12d3-a456-426614174002")
+    k2 = testing.new_job("a@x.y")[1]
     storage.write_bytes(k2, "a", b"a", "text/plain")
     assert "url" not in storage.get_manifest(k2) and jobs._meta(k2) == {}
     r = jobs._store_and_parse(key, "n.md", b"# H\n[l](u)", "text/markdown")
@@ -172,8 +160,8 @@ def test_archives_and_binary_formats():
     from spider_hoarder_sdk.gateway import jobs
     from spider_hoarder_sdk.content import extract, storage
     import tempfile, io, tarfile, gzip, bz2, lzma, json, msgpack, cbor2, bson, plistlib, base64, py7zr
-    storage.BLOB_URL = "file://" + tempfile.mkdtemp()
-    key = jobs._key("a@x.y", f"{jobs.RID}.123e4567-e89b-12d3-a456-426614174011")
+    testing.fresh_store()
+    key = testing.new_job("a@x.y")[1]
 
     def paths(r):
         return {f["path"] for f in r["files"]}
@@ -243,12 +231,12 @@ def test_tool_exception_is_logged(caplog):
 def test_job_names_and_stored_files():
     from spider_hoarder_sdk.content import storage
     import tempfile
-    storage.BLOB_URL = "file://" + tempfile.mkdtemp()
+    testing.fresh_store()
     for given in ("../../etc/passwd", "/etc/passwd", "a\\..\\b.png", "", "..", None):
         n = jobs._job_name(given, "d")
         assert "/" not in n and "\\" not in n and n not in ("", ".", ".."), (given, n)
     assert jobs._job_name("../../x.png", "d") == "x.png"
-    key = jobs._key("a@x.y", f"{jobs.RID}.123e4567-e89b-12d3-a456-426614174000")
+    key = testing.new_job("a@x.y")[1]
     r = jobs._store_file(key, "shot.png", b"\x89PNG\0\0")
     assert "text" not in r and any(f["path"] == "original/shot.png" for f in r["files"]), r
     r = jobs._store_file(key, "snap.md", b"# page")
@@ -264,9 +252,8 @@ def test_job_tools_through_the_gateway():
     import tempfile
     from spider_hoarder_sdk.content import storage
     from spider_hoarder_sdk.gateway import app
-    storage.BLOB_URL = "file://" + tempfile.mkdtemp()
-    job = f"{jobs.RID}.123e4567-e89b-12d3-a456-426614174077"
-    key = jobs._key("a@b.c", job)
+    testing.fresh_store()
+    job, key = testing.new_job("a@b.c")
     storage.write_bytes(key, "original/m.txt", b"- generic [ref=e1]:\n  - text: hello", "text/plain")
     storage.write_bytes(key, "original/b.bin", b"\0\1", "application/octet-stream")
     app._caller = lambda: (None, "a@b.c", "sid1")
@@ -296,9 +283,9 @@ def test_tree_store_and_zip_limits():
     from spider_hoarder_sdk.gateway import jobs
     from spider_hoarder_sdk.content import extract, storage
     import tempfile, io, zipfile
-    storage.BLOB_URL = "file://" + tempfile.mkdtemp()
+    testing.fresh_store()
     jobs.INLINE_LIMIT = 50_000
-    key = jobs._key("a@x.y", f"{jobs.RID}.123e4567-e89b-12d3-a456-426614174010")
+    key = testing.new_job("a@x.y")[1]
     page = b"<html><body><article><h1>T</h1><p>" + b"Some long article text here. " * 20 + b"</p><a href='/x'>l</a></article></body></html>"
     # tree: HTML gets absolutized only with a base_url, nested path kept, JSON parsed by the generic rule
     infos = jobs._store_tree(key, [("response/body.html", io.BytesIO(page), "text/html"),

@@ -17,6 +17,8 @@ descriptors with importlib.metadata and uses PyYAML for the overlay check; see d
   compose            one `-c <overlay>` argument per line
   services           the services to force-restart after deploy, one per line (unprefixed)
   dev-overlay FILE   stack overlay with the dev-only settings of every enabled gateway
+  seaweedfs-config DIR  the stack's SeaweedFS's s3.json and iam.json, generated from the SEAWEEDFS_* variables
+  seaweedfs-overlay FILE  stack overlay joining every enabled gateway to the SeaweedFS network
 
 Hooks (preflight, post_build, build contexts) get BACKEND, BACKEND_HYPHEN and STACK_NAME in their environment."""
 
@@ -190,6 +192,28 @@ def load_overlay(b: Backend) -> dict:
         return yaml.safe_load(f) or {}
 
 
+def seaweedfs_config(environ) -> tuple[dict, dict]:
+    """(s3.json, iam.json) of the stack's SeaweedFS: one identity, the gateways', with the Admin action (creating a role per job needs
+    IAM rights), and the STS block with default-deny policy. Roles live in SeaweedFS's memory, so a restart ends the credentials
+    in flight (the consumer re-mints). 900 s is the shortest lifetime STS accepts."""
+    import base64
+    need = ("SEAWEEDFS_KEY", "SEAWEEDFS_SECRET", "SEAWEEDFS_SIGNING_KEY")
+    bad = [v for v in need if environ.get(v, "") in ("", "changeme", "change-me")]
+    if bad:
+        raise DeployError(f"{', '.join(bad)} unset or still a placeholder (set them in .env)")
+    try:
+        ok = len(base64.b64decode(environ["SEAWEEDFS_SIGNING_KEY"], validate=True)) >= 32
+    except ValueError:
+        ok = False
+    if not ok:
+        raise DeployError("SEAWEEDFS_SIGNING_KEY must be base64 of at least 32 random bytes (openssl rand -base64 32)")
+    s3 = {"identities": [{"name": "gateway", "credentials": [{"accessKey": environ["SEAWEEDFS_KEY"], "secretKey": environ["SEAWEEDFS_SECRET"]}],
+                          "actions": ["Admin", "Read", "Write", "List", "Tagging"]}]}
+    iam = {"sts": {"tokenDuration": "15m", "maxSessionLength": "1h", "issuer": "spider-hoarder-sts", "signingKey": environ["SEAWEEDFS_SIGNING_KEY"]},
+           "policy": {"defaultEffect": "Deny", "storeType": "memory"}}
+    return s3, iam
+
+
 def validate(backends: list[Backend]) -> None:
     errs = []
     for b in backends:
@@ -314,6 +338,11 @@ def dev_overlay(backends: list[Backend]) -> str:
     return out
 
 
+def seaweedfs_overlay(backends: list[Backend]) -> str:
+    """Every enabled gateway joins the network of the stack's SeaweedFS (docker-compose.seaweedfs.yml)."""
+    return 'version: "3.8"\nservices:\n' + "".join(f"  {b.h}-gateway:\n    networks: [seaweedfs]\n" for b in backends)
+
+
 # ---------------------------------------------------------------- cli ---------------------------------------------
 def main(argv=None, environ=None) -> int:
     argv = sys.argv[1:] if argv is None else argv
@@ -323,6 +352,12 @@ def main(argv=None, environ=None) -> int:
         return 0
     cmd, args = argv[0], argv[1:]
     try:
+        if cmd == "seaweedfs-config":  # needs no backend
+            os.makedirs(args[0], exist_ok=True)
+            for name, doc in zip(("s3.json", "iam.json"), seaweedfs_config(environ)):
+                with open(os.path.join(args[0], name), "w") as f:
+                    json.dump(doc, f, indent=1)
+            return 0
         backends = load_backends(enabled_names(environ))
         if cmd == "validate":
             validate(backends)
@@ -358,6 +393,10 @@ def main(argv=None, environ=None) -> int:
             for b in backends:
                 seen += [s for s in b.d.services if s not in seen]
             print("\n".join(seen))
+        elif cmd == "seaweedfs-overlay":
+            os.makedirs(os.path.dirname(os.path.abspath(args[0])), exist_ok=True)
+            with open(args[0], "w") as f:
+                f.write(seaweedfs_overlay(backends))
         elif cmd == "dev-overlay":
             os.makedirs(os.path.dirname(os.path.abspath(args[0])), exist_ok=True)
             with open(args[0], "w") as f:
