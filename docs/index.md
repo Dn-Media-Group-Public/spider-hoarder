@@ -18,6 +18,9 @@ Start with the [README](../README.md) (what it is, quick start, how to use it).
 ## Operations
 - [Deploying, configuring and testing](operations/deploy-and-configure.md)
 
+## Known bugs
+- [Name resolution fails inside containers under load; concurrent cold-session fetches of dn.no fail](bugs/dns-failures-under-load.md) — open, root cause not established
+
 ## Plans (decision records)
 - [Plans](plans/index.md) — open / background plans
 - [Implemented plans](implemented-plans/index.md) — the plans that decided and built the above:
