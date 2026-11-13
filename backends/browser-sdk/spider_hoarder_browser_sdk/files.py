@@ -11,8 +11,7 @@ from typing import Any
 from spider_hoarder_browser_sdk import ports
 from spider_hoarder_browser_sdk.mediapolicy import ROUTED_UPLOAD_CAP
 from spider_hoarder_sdk.content import storage
-from spider_hoarder_sdk.gateway.jobs import (MAX_PARSE_BYTES, _check_rel_path, _ctype, _describe_file, _job_name, _job_result, _key,
-                                             _store_tree, _with_notes)
+from spider_hoarder_sdk.gateway.jobs import (_check_rel_path, _ctype, _job_name, _key, _parse_job, _store_original, _store_tree)
 
 # Request bodies go to Chromium as one base64 CDP message, which it refuses above 100 MiB (= 75 MiB raw) by killing the whole browser
 # context; measured: 74 MiB works, 76 does not. The default leaves room for the headers. Raising it past ~72 MiB is unsafe.
@@ -198,14 +197,10 @@ def _request_body(owner: str, uid: int, arguments: dict, routed: bool = False) -
 
 def _ingest_out(uid: int, private: str, key: str, jname: str, tree: bool, base_url: str = "") -> dict:
     """Copy a tool's output (file, or request dir if `tree`) from the session into the job; blocking."""
-    notes = []
     if tree:
-        infos = _store_tree(key, ((rel, f, _ctype(rel)) for rel, f in _out_files(uid, private, True)), base_url, notes)
-        body = next((i for p, i in infos.items() if p.startswith("response/body.")), None)
-        return _with_notes(_job_result(key, *(body or ())), notes)
+        rels = []
+        _store_tree(key, ((rels.append(rel) or rel, f, _ctype(rel)) for rel, f in _out_files(uid, private, True)))
+        return _parse_job(key, base_url, next((r for r in rels if r.startswith("response/body.")), None))
     for _, f in _out_files(uid, private):
-        size = storage.write_stream(key, f"original/{jname}", f, _ctype(jname))
-    if size > MAX_PARSE_BYTES:
-        notes.append(f"original/{jname} not parsed ({size} bytes > MAX_PARSE_BYTES)")
-        return _with_notes(_job_result(key), notes)
-    return _describe_file(key, jname, storage.read_bytes(key, f"original/{jname}"))
+        _store_original(key, jname, f, _ctype(jname))
+    return _parse_job(key, base_url, jname)

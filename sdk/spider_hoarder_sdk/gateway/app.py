@@ -29,7 +29,7 @@ from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 
-from spider_hoarder_sdk.content import extract
+from spider_hoarder_sdk.content import grep
 from spider_hoarder_sdk.content import storage
 from spider_hoarder_sdk.gateway import auth
 from spider_hoarder_sdk.gateway import blobtoken
@@ -38,7 +38,7 @@ from spider_hoarder_sdk.gateway import projects
 from spider_hoarder_sdk.gateway import sessions
 from spider_hoarder_sdk.gateway.driver import driver, hyphen
 from spider_hoarder_sdk.gateway.jobs import (DEFAULT_TEXT_LENGTH, FILE_TOOLS_NOTE, INLINE_LIMIT, RID, UPLOAD_MARK, _check_rel_path,
-                                             _key, _new_job, _schema, _store_and_parse, _text, job_key)
+                                             _key, _new_job, _parse_job, _schema, _store_original, _text, job_key)
 
 PREFIX = sessions.PREFIX  # the URL prefix nginx routes on
 logging.basicConfig(level="INFO", format="%(name)s %(levelname)s %(message)s")
@@ -209,7 +209,7 @@ async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
                 raw = storage.read_bytes(key, path)
                 if b"\0" in raw[:1024]:
                     return _text("binary file: grep_file only searches text files", True)
-                return _text(extract.grep_text(
+                return _text(grep.grep_text(
                     raw.decode("utf-8", errors="replace"), args["pattern"], int(args.get("context", 2)),
                     int(args.get("max_matches", 50)), limit=INLINE_LIMIT))
             if name == "get_file_text":
@@ -310,15 +310,18 @@ async def upload_page(request: Request) -> Response:
 async def upload_submit(request: Request) -> Response:
     key = _upload_key(request.path_params["token"])
     form = await request.form()
-    previews = []
+    names = []
     for uf in form.getlist("files"):
         if not hasattr(uf, "filename"):
             continue
         data = await uf.read()
         filename = os.path.basename(uf.filename or "upload")
         ctype = uf.content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
-        _store_and_parse(key, filename, data, ctype)
-        previews.append((filename, storage.read_text(key, f"parsed/{filename}.md") if storage.exists(key, f"parsed/{filename}.md") else "(stored)" if filename.lower().endswith(".apk") else "(archive unpacked)"))
+        await asyncio.to_thread(_store_original, key, filename, data, ctype)
+        names.append(filename)
+    await asyncio.to_thread(_parse_job, key)  # one parse of everything uploaded: the parser service unpacks archives
+    previews = [(n, storage.read_text(key, f"parsed/{n}.md") if storage.exists(key, f"parsed/{n}.md")
+                 else "(stored)" if n.lower().endswith(".apk") else "(no text)") for n in names]
     body = "".join(f"<h2>{html.escape(n)}</h2><pre>{html.escape(t[:5000])}</pre>" for n, t in previews)
     return HTMLResponse(f"<!doctype html><html><body><h1>Uploaded</h1>{body}</body></html>")
 

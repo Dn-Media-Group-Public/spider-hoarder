@@ -87,12 +87,12 @@ def test_file_outputs():
         assert "/" not in n and "\\" not in n and n not in ("", ".", ".."), (given, n)
     assert jobs._job_name("../../x.png", "d") == "x.png"
     key = testing.new_job("a@x.y")[1]
-    r = jobs._store_file(key, "shot.png", b"\x89PNG\0\0")
+    r = jobs._store_and_parse(key, "shot.png", b"\x89PNG\0\0", "image/png")
     assert "text" not in r and any(f["path"] == "original/shot.png" for f in r["files"]), r
-    r = jobs._store_file(key, "snap.md", b"# page")
+    r = jobs._store_and_parse(key, "snap.md", b"# page", "text/markdown")
     assert r["text"] == "# page"
     jobs.INLINE_LIMIT = 3
-    assert "text" not in jobs._store_file(key, "snap2.md", b"# page")
+    assert "text" not in jobs._store_and_parse(key, "snap2.md", b"# page", "text/markdown")
 
 
 def test_tree_reader():

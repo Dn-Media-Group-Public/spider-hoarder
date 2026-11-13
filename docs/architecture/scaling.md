@@ -34,6 +34,12 @@ See [Android emulators](android.md). See also: [Plan: Android hoarder](../implem
 
 Capacity is bounded by the KVM node, not by Swarm: each slot is a 2-CPU / 6 GB container and the golden-snapshot restore is disk-bound (measured on an 8 vCPU / 32 GB host: reset 44-62 s, ~5.4 GB peak per 3 GB-guest slot; see [Android emulators](android.md#image-and-golden-snapshot)). The android gateways wait `ANDROID_RESET_TIMEOUT` for a reset, so raise it on slow disks.
 
+## Parser replicas
+The parser service is shared and scales by replicas (`PARSE_REPLICAS`, `docker service scale spider-hoarder_parser=N`): each replica has its own uid pool (`PARSE_POOL_SIZE`) and
+answers **503** when full (the gateway retries once, then notes `not parsed`); the swarm VIP in front of it is enough. A `POST` lands on any replica; status reads
+land on any replica too: the owner answers from memory, the others read `status.json` from the store with the credential in the request (a heartbeat older than 30 s
+reads as "wrapper lost"). A tree of files is parsed by one parser, so wall time per job does not shrink with replicas; throughput does. [Plan: parser wrapper](../implemented-plans/parser-wrapper.md)
+
 ## Multi-node swarm
 
 All opt-in through `.env`; unset keeps the single-node behaviour (`:local` images, no constraints).

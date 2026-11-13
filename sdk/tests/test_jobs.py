@@ -1,5 +1,4 @@
-"""Job store and gateway-generic checks: JWT verification, owner scoping, storing and parsing files into jobs,
-archives and binary formats, tool dispatch errors."""
+"""Job store and gateway-generic checks: JWT verification, owner scoping, the job result from the manifest, tool dispatch errors (parsing itself is tested in parser/tests)."""
 
 import asyncio
 import os
@@ -62,7 +61,7 @@ def test_text_cap_and_grep():
     assert cf(line, (s, s + 6), 300) == line and cf("- text: hi", None, 5) == "- text: hi"
     assert cf(line, (len(line) - 3, len(line)), 20).startswith("- paragraph [ref=e1]: ...") and cf(line, (len(line) - 3, len(line)), 20).endswith("b" * 17 + "")
 
-    from spider_hoarder_sdk.content import extract
+    from spider_hoarder_sdk.content import grep as extract
     text = "\n".join(f"line {i}" for i in range(100)) + "\nTAIL " + "z" * 500
     g = extract.grep_text(text, "line 5$", context=1)
     assert g.startswith("-- line 5, offset ") and "5- line 4" in g and "6: line 5" in g and "7- line 6" in g and "line 7" not in g
@@ -78,145 +77,35 @@ def test_text_cap_and_grep():
         pass
 
 
-def test_terse():
-    from spider_hoarder_sdk.content import extract
-    t = extract.terse
-    md = """Intro [a](http://a "title") text ![i](http://i.png)
-
-Setext
-======
-
-## Sec [**bold** `c`](http://h) x
-
-[![alt](img)](url) and [**b** t](u2) <https://auto.x> https://lin.kify/x [r][ref]
-
-| c |
-|---|
-| [tl](tu) |
-
-- [li](lu)
-
-> [q](qu)
-
-```
-# not a heading
-[no](link)
-```
-
-    [no](indented)
-
-`[no](code)`
-
-<div><a href="x">no</a></div>
-
-[a](http://a)
-
-[ref]: http://ref
-"""
-    assert t(md).split("\n") == [
-        "* [a](http://a)", "* ![i](http://i.png)", "# Setext", "## Sec [bold c](http://h) x",
-        "* [![alt](img)](url)", "* [b t](u2)", "* <https://auto.x>", "* <https://lin.kify/x>", "* [r](http://ref)",
-        "* [tl](tu)", "* [li](lu)", "* [q](qu)", "* [a](http://a)"], t(md)
-    assert t("just prose\n\n```\n# x\n```") == ""
-
-
-def test_store_terse():
-    from spider_hoarder_sdk.gateway import jobs
+def test_manifest_meta_and_job_result():
+    """set_meta survives later manifest updates; _job_result picks inline text from the manifest by size (the parser marks text files)."""
     from spider_hoarder_sdk.content import storage
-    import tempfile
     testing.fresh_store()
-    jobs.INLINE_LIMIT = 50_000
     key = testing.new_job("a@x.y")[1]
-    paths = lambda r: {f["path"] for f in r["files"]}
-    r = jobs._store_and_parse(key, "p.html", b"<html><body><article><h1>Title</h1><p>" + b"Some long article text here. " * 20 + b"</p><h2>Part</h2><p>" + b"More article text. " * 20 + b"</p></article></body></html>", "text/html")
-    assert {"original/p.html", "parsed/p.html.md", "simplified/p.html.md", "terse/p.html.md"} <= paths(r), paths(r)
-    assert storage.read_text(key, "terse/p.html.md") == "# Title\n## Part"  # terse comes from parsed/
-    page = b"<html><body><p>" + b"Filler paragraph text. " * 40 + b"</p><div>Prose in a div with <a href='http://x'>a link</a> kept.</div></body></html>"
-    r = jobs._store_and_parse(key, "d.html", page, "text/html")
-    assert "Prose in a div with [a link](http://x) kept." in storage.read_text(key, "parsed/d.html.md")
+    storage.write_bytes(key, "original/d.html", b"<p>x</p>", "text/html")
     storage.set_meta(key, url="http://u", target="main")
     storage.write_bytes(key, "x.txt", b"x", "text/plain")  # a later manifest update keeps the meta
     m = storage.get_manifest(key)
-    assert m["url"] == "http://u" and m["target"] == "main" and any(f["path"] == "d.html" or f["path"] == "x.txt" for f in m["files"]), m
+    assert m["url"] == "http://u" and m["target"] == "main" and any(f["path"] == "x.txt" for f in m["files"]), m
     k2 = testing.new_job("a@x.y")[1]
     storage.write_bytes(k2, "a", b"a", "text/plain")
     assert "url" not in storage.get_manifest(k2) and jobs._meta(k2) == {}
-    r = jobs._store_and_parse(key, "n.md", b"# H\n[l](u)", "text/markdown")
-    assert "terse/n.md" in paths(r) and not any(p.startswith("parsed/n") for p in paths(r))
-    assert r["text_path"] == "original/n.md"
-    r = jobs._store_and_parse(key, "t.txt", b"hello", "text/plain")
-    assert not any(p.startswith("terse/t") for p in paths(r))
-    r = jobs._store_and_parse(key, "e.md", b"only prose", "text/markdown")
-    assert "terse/e.md" not in paths(r)
-    jobs.INLINE_LIMIT = 15  # parsed large, terse small -> outline inline
-    r = jobs._store_and_parse(key, "big.md", b"# H\n[l](u)\n" + b"prose " * 10, "text/markdown")
-    assert r["text"] == "# H\n* [l](u)" and r["text_path"] == "terse/big.md", r
-    jobs.INLINE_LIMIT = 3  # both large
-    assert "text" not in jobs._store_and_parse(key, "big2.md", b"# Heading\n[l](u)\n" + b"prose " * 10, "text/markdown")
-    jobs.INLINE_LIMIT = 50_000
-
-
-def test_archives_and_binary_formats():
-    from spider_hoarder_sdk.gateway import jobs
-    from spider_hoarder_sdk.content import extract, storage
-    import tempfile, io, tarfile, gzip, bz2, lzma, json, msgpack, cbor2, bson, plistlib, base64, py7zr
-    testing.fresh_store()
-    key = testing.new_job("a@x.y")[1]
-
-    def paths(r):
-        return {f["path"] for f in r["files"]}
-
-    def tar(mode):
-        b = io.BytesIO()
-        with tarfile.open(fileobj=b, mode=mode) as tf:
-            for n, d in (("a/n.md", b"# H\n[l](u)"), ("in.tgz", b"x")):
-                ti = tarfile.TarInfo(n); ti.size = len(d); tf.addfile(ti, io.BytesIO(d))
-        return b.getvalue()
-    for name, mode in (("t.tar", "w"), ("t.tgz", "w:gz"), ("t.tar.bz2", "w:bz2"), ("t.txz", "w:xz")):
-        p = paths(jobs._store_and_parse(key, name, tar(mode), "application/octet-stream"))
-        assert {f"original/{name}.d/a/n.md", f"terse/{name}.d/a/n.md", f"original/{name}.d/in.tgz"} <= p, p  # no recursion
-    b = io.BytesIO()
-    with py7zr.SevenZipFile(b, "w") as z:
-        z.writestr(b"# H\n[l](u)", "a/n.md")
-    assert "terse/s.7z.d/a/n.md" in paths(jobs._store_and_parse(key, "s.7z", b.getvalue(), "application/x-7z-compressed"))
-    for name, comp in (("n.md.gz", gzip.compress), ("n.md.bz2", bz2.compress), ("n.md.xz", lzma.compress)):
-        assert f"terse/{name}.d/n.md" in paths(jobs._store_and_parse(key, name, comp(b"# H\n[l](u)"), "application/octet-stream"))
-    r = jobs._store_and_parse(key, "fake.gz", b"plain text", "application/gzip")  # not really gzip: parsed as any file
-    assert "original/fake.gz" in paths(r) and not any("fake.gz.d" in p for p in paths(r))
-    assert extract.archive_kind("application/x-7z-compressed", "x") == "7z" and extract.archive_kind("", "a.rar") == "rar"
-    assert extract.archive_kind("application/gzip", "a.tar.gz") == "tar" and extract.archive_kind("text/html", "a.html") is None
-    jobs.MAX_ARCHIVE_MEMBERS = 1
-    r = jobs._store_and_parse(key, "lim.tgz", tar("w:gz"), "application/gzip")
-    assert "MAX_ARCHIVE_MEMBERS" in r["notes"][0], r
-    jobs.MAX_ARCHIVE_MEMBERS, jobs.MAX_ARCHIVE_BYTES = 50_000, 5
-    r = jobs._store_and_parse(key, "lim.txz", tar("w:xz"), "application/octet-stream")
-    assert "MAX_ARCHIVE_BYTES" in r["notes"][0], r
-    jobs.MAX_ARCHIVE_BYTES = 4 * 1024**3
-
-    # binary structured data -> parsed/<path>.json; the original is untouched
-    obj = {"a": [1, 2.5], "b": b"\x00\x01"}
-    want = {"a": [1, 2.5], "b": {"$base64": "AAE="}}
-    for name, data, ct in (("d.msgpack", msgpack.packb(obj), ""), ("d.cbor", cbor2.dumps(obj), ""),
-                           ("d.bson", bson.dumps(obj), ""), ("d.plist", plistlib.dumps(obj, fmt=plistlib.FMT_BINARY), ""),
-                           ("noext", plistlib.dumps(obj, fmt=plistlib.FMT_BINARY), "application/octet-stream"),
-                           ("noext2", msgpack.packb(obj), "application/x-msgpack")):
-        r = jobs._store_and_parse(key, name, data, ct)
-        assert "parsed/%s.json" % name in paths(r), (name, paths(r))
-        assert json.loads(storage.read_text(key, f"parsed/{name}.json")) == want, name
-        assert storage.read_bytes(key, f"original/{name}") == data
-    assert json.loads(extract.binary_to_json(cbor2.dumps({1: float("nan")}), "cbor")) == {"1": "nan"}
-    pb = b"\x0a\x03abc\x10\x96\x01"
-    j = json.loads(extract.binary_to_json(pb, "protobuf"))
-    assert j["message"] == {"1": {"$base64": "YWJj"}, "2": 150} and j["typedef"]["2"]["type"] == "int", j
-    framed = b"\x00" + len(pb).to_bytes(4, "big") + pb + b"\x80" + (9).to_bytes(4, "big") + b"grpc-status: 0"[:9]
-    j = json.loads(extract.binary_to_json(framed, "protobuf", "application/grpc-web+proto"))
-    assert j[0]["message"]["2"] == 150 and j[1] == {"trailers": "grpc-stat"}, j
-    j = json.loads(extract.binary_to_json(base64.b64encode(framed), "protobuf", "application/grpc-web-text"))
-    assert len(j) == 2
-    r = jobs._store_and_parse(key, "bad.cbor", b"\xa1\x01", "")  # undecodable: noted, job not failed, no parsed/
-    assert "bad.cbor not parsed" in r["notes"][0] and "parsed/bad.cbor.json" not in paths(r), r
-    r = jobs._store_and_parse(key, "x.json", b'{"a":1}', "application/json")
-    assert storage.read_bytes(key, "original/x.json") == b'{"a":1}' and "parsed/x.json.json" not in paths(r)
+    # text selection: parsed/ first, then a text-marked original; terse when the text is too big; nothing for an unparsed binary
+    storage.write_bytes(k2, "original/n.md", b"# H\n[l](u)\n" + b"prose " * 10, "text/markdown")
+    storage.write_bytes(k2, "terse/n.md", b"# H\n* [l](u)", "text/markdown")
+    assert jobs._job_result(k2, "n.md")["text_path"] == "terse/n.md"  # original/n.md is not marked as text: the outline
+    m = storage.get_manifest(k2)
+    m["files"] = [{**f, "text": True} if f["path"] == "original/n.md" else f for f in m["files"]]
+    storage.set_meta(k2, files=m["files"])
+    r = jobs._job_result(k2, "n.md", ["a note"])
+    assert r["text"].startswith("# H\n[l](u)") and r["text_path"] == "original/n.md" and r["notes"] == ["a note"]
+    old, jobs.INLINE_LIMIT = jobs.INLINE_LIMIT, 20
+    try:
+        assert jobs._job_result(k2, "n.md")["text_path"] == "terse/n.md"
+        jobs.INLINE_LIMIT = 3
+        assert "text" not in jobs._job_result(k2, "n.md")
+    finally:
+        jobs.INLINE_LIMIT = old
 
 
 def test_tool_exception_is_logged(caplog):
@@ -228,7 +117,7 @@ def test_tool_exception_is_logged(caplog):
     assert res.isError and any(r.exc_info and r.exc_info[0] is ValueError for r in caplog.records)
 
 
-def test_job_names_and_stored_files():
+def test_job_names():
     from spider_hoarder_sdk.content import storage
     import tempfile
     testing.fresh_store()
@@ -236,14 +125,6 @@ def test_job_names_and_stored_files():
         n = jobs._job_name(given, "d")
         assert "/" not in n and "\\" not in n and n not in ("", ".", ".."), (given, n)
     assert jobs._job_name("../../x.png", "d") == "x.png"
-    key = testing.new_job("a@x.y")[1]
-    r = jobs._store_file(key, "shot.png", b"\x89PNG\0\0")
-    assert "text" not in r and any(f["path"] == "original/shot.png" for f in r["files"]), r
-    r = jobs._store_file(key, "snap.md", b"# page")
-    assert r["text"] == "# page"
-    jobs.INLINE_LIMIT = 3
-    assert "text" not in jobs._store_file(key, "snap2.md", b"# page")
-    jobs.INLINE_LIMIT = 50_000
 
 
 def test_job_tools_through_the_gateway():
@@ -277,52 +158,3 @@ def test_fake_driver_tools_and_unknown_tool_proxy():
     names = [t.name for t in tools]
     assert "fake_tool" in names and {"list_files", "get_file_text", "grep_file", "get_file_url", "get_upload_link"} <= set(names)
     assert app.mcp.name == "spider-hoarder-fake-backend" and app.mcp.instructions.startswith("A fake backend.")
-
-
-def test_tree_store_and_zip_limits():
-    from spider_hoarder_sdk.gateway import jobs
-    from spider_hoarder_sdk.content import extract, storage
-    import tempfile, io, zipfile
-    testing.fresh_store()
-    jobs.INLINE_LIMIT = 50_000
-    key = testing.new_job("a@x.y")[1]
-    page = b"<html><body><article><h1>T</h1><p>" + b"Some long article text here. " * 20 + b"</p><a href='/x'>l</a></article></body></html>"
-    # tree: HTML gets absolutized only with a base_url, nested path kept, JSON parsed by the generic rule
-    infos = jobs._store_tree(key, [("response/body.html", io.BytesIO(page), "text/html"),
-                                  ("response/headers.json", io.BytesIO(b'{"a": 1}'), "application/json")], "http://h.test/p")
-    paths = {f["path"] for f in storage.get_manifest(key)["files"]}
-    assert {"original/response/body.html", "parsed/response/body.html.md", "simplified/response/body.html.md"} <= paths, paths
-    assert "http://h.test/x" in storage.read_text(key, "parsed/response/body.html.md")
-    assert infos["response/body.html"][1] == "parsed/response/body.html.md"
-    # zip: members under <zip>.d/, HTML member gets simplified/ but no absolutizing, md member only terse/
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w") as zf:
-        zf.writestr("a/b.html", page); zf.writestr("n.md", "# H\n[l](u)"); zf.writestr("in.zip", b"PK")
-    r = jobs._store_and_parse(key, "bundle.zip", buf.getvalue(), "application/zip", "http://h.test/p")
-    paths = {f["path"] for f in r["files"]}
-    assert {"original/bundle.zip", "original/bundle.zip.d/a/b.html", "parsed/bundle.zip.d/a/b.html.md",
-            "simplified/bundle.zip.d/a/b.html.md", "terse/bundle.zip.d/n.md", "original/bundle.zip.d/in.zip"} <= paths, paths
-    assert "parsed/bundle.zip.d/n.md.md" not in paths and "notes" not in r and "text" not in r
-    assert "http://h.test/x" not in storage.read_text(key, "parsed/bundle.zip.d/a/b.html.md")
-    # a zip as a network response body is unpacked next to it
-    r = jobs._store_and_parse(key, "response/body.zip", buf.getvalue(), "application/zip")
-    assert "original/response/body.zip.d/a/b.html" in {f["path"] for f in r["files"]}
-    # limits: member count (up front) and the running uncompressed total (each member alone is under the cap)
-    many = io.BytesIO()
-    with zipfile.ZipFile(many, "w") as zf:
-        for i in range(5):
-            zf.writestr(f"m{i}.txt", "x" * 100)
-    jobs.MAX_ARCHIVE_MEMBERS = 4
-    r = jobs._store_and_parse(key, "many.zip", many.getvalue(), "application/zip")
-    assert r["notes"] == ["archive not unpacked: 5 members > MAX_ARCHIVE_MEMBERS"] and not any("many.zip.d" in f["path"] for f in r["files"]), r
-    jobs.MAX_ARCHIVE_MEMBERS, jobs.MAX_ARCHIVE_BYTES = 50_000, 250
-    r = jobs._store_and_parse(key, "many.zip", many.getvalue(), "application/zip")
-    assert "MAX_ARCHIVE_BYTES" in r["notes"][0] and any(f["path"] == "original/many.zip" for f in r["files"]), r
-    assert sum("many.zip.d" in f["path"] and f["path"].startswith("original") for f in r["files"]) == 2  # written before the abort
-    jobs.MAX_ARCHIVE_BYTES = 4 * 1024**3
-    # parse cap: stored (no cap) but not parsed
-    jobs.MAX_PARSE_BYTES = 10
-    r = jobs._store_and_parse(key, "big.html", b"<p>" + b"x" * 50 + b"</p>", "text/html")
-    assert "text" not in r and r["notes"] == ["big.html not parsed (57 bytes > MAX_PARSE_BYTES)"], r
-    assert any(f["path"] == "original/big.html" and f["size"] == 57 for f in r["files"]) and "parsed/big.html.md" not in storage.get_manifest(key)["files"].__str__()
-    jobs.MAX_PARSE_BYTES = 50 * 1024 * 1024

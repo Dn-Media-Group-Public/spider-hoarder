@@ -6,7 +6,7 @@ FROM debian:bookworm-slim
 ENV PATH=/venv/bin:$PATH
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends python3 python3-venv python3-pip ca-certificates tini util-linux unar libimage-exiftool-perl ffmpeg \
+ && apt-get install -y --no-install-recommends python3 python3-venv python3-pip ca-certificates tini util-linux \
  && rm -rf /var/lib/apt/lists/*
 
 COPY sdk/ /src/sdk/
@@ -14,6 +14,7 @@ COPY backends/android-sdk/ /src/android-sdk/
 # GCS support is a separate pip step: sdk/pyproject.toml explains the protobuf pin that stops one resolution
 RUN python3 -m venv /venv \
  && pip install --no-cache-dir "/src/sdk[s3]" /src/android-sdk \
+ && pip install --no-cache-dir --no-deps "boto3==$(python -c 'import botocore;print(botocore.__version__)')" s3transfer \
  && pip install --no-cache-dir gcsfs google-auth \
  && rm -rf /src && chmod -R a+rX /venv/lib
 # gw-collect (gid 1500): the gateway's supplementary group at start.

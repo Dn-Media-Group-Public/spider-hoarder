@@ -8,7 +8,7 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright \
 
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      python3 python3-venv python3-pip ca-certificates curl tini iptables util-linux unar libimage-exiftool-perl ffmpeg \
+      python3 python3-venv python3-pip ca-certificates curl tini iptables util-linux \
       xvfb x11vnc novnc websockify fonts-noto fonts-noto-cjk fonts-noto-color-emoji \
  && rm -rf /var/lib/apt/lists/*
 
@@ -29,6 +29,7 @@ COPY sdk/ /src/sdk/
 COPY backends/browser-sdk/ /src/browser-sdk/
 # GCS support is a separate pip step: sdk/pyproject.toml explains the protobuf pin that stops one resolution
 RUN pip install --no-cache-dir "/src/sdk[s3]" /src/browser-sdk \
+ && pip install --no-cache-dir --no-deps "boto3==$(python -c 'import botocore;print(botocore.__version__)')" s3transfer \
  && pip install --no-cache-dir gcsfs google-auth \
  && rm -rf /src && chmod -R a+rX /venv/lib \
  && chmod +x /venv/lib/python*/site-packages/spider_hoarder_browser_sdk/session_server/session/session-group.sh

@@ -19,6 +19,10 @@ descriptors with importlib.metadata and uses PyYAML for the overlay check; see d
   dev-overlay FILE   stack overlay with the dev-only settings of every enabled gateway
   seaweedfs-config DIR  the stack's SeaweedFS's s3.json and iam.json, generated from the SEAWEEDFS_* variables
   seaweedfs-overlay FILE  stack overlay joining every enabled gateway to the SeaweedFS network
+  parse-env          `export K=V` lines for the parser service: PARSE_BLOB_OPTIONS, PARSE_OCR_TABLE, PARSE_PROXY_ALLOW
+  parse-overlay FILE stack overlay wiring the parser service to every enabled backend (and the OCR sidecar, when OCR_PROFILES is set)
+  build-parse        docker build (and push) of the parser, blob-sidecar and (with OCR_PROFILES) ocr-sidecar images
+  parse-services     the parser service's services to force-restart after deploy, one per line
 
 Hooks (preflight, post_build, build contexts) get BACKEND, BACKEND_HYPHEN and STACK_NAME in their environment."""
 
@@ -214,6 +218,91 @@ def seaweedfs_config(environ) -> tuple[dict, dict]:
     return s3, iam
 
 
+PARSE_TOKENS = ("WRAPPER_TOKEN", "PROXY_TOKEN")
+PLACEHOLDERS = ("", "changeme", "change-me")
+
+
+def ocr_profiles(environ) -> dict:
+    """OCR_PROFILES: {name: {token, base_url, model, auth?, ...}} (JSON, the sidecar's table); {} when unset."""
+    raw = (environ.get("OCR_PROFILES") or "").strip()
+    try:
+        profiles = json.loads(raw) if raw else {}
+    except ValueError as e:
+        raise DeployError(f"OCR_PROFILES is not JSON: {e}")
+    if not isinstance(profiles, dict):
+        raise DeployError("OCR_PROFILES must be a JSON object: {name: {token, base_url, model, auth}}")
+    return profiles
+
+
+def check_parse_env(backends: list[Backend], environ) -> None:
+    """The parser service's secrets and OCR settings: both tokens set, not placeholders and different secrets; every OCR profile
+    complete with its own token; a backend's `<NAME>_PARSE_OCR` names a profile that exists."""
+    errs = [f"{v} is unset or still a placeholder (set it in .env)" for v in PARSE_TOKENS if environ.get(v, "") in PLACEHOLDERS]
+    if not errs and environ["WRAPPER_TOKEN"] == environ["PROXY_TOKEN"]:
+        errs.append("WRAPPER_TOKEN and PROXY_TOKEN must be different secrets")
+    profiles = ocr_profiles(environ)
+    for name, p in profiles.items():
+        if not isinstance(p, dict) or not all(isinstance(p.get(k), str) and p[k] for k in ("token", "base_url", "model")):
+            errs.append(f"OCR_PROFILES[{name}] needs token, base_url and model")
+        elif p.get("auth", "none") not in ("none", "bearer", "google"):
+            errs.append(f"OCR_PROFILES[{name}].auth must be none, bearer or google")
+        elif p.get("auth") == "bearer" and not p.get("api_key"):
+            errs.append(f"OCR_PROFILES[{name}] has auth bearer but no api_key")
+        elif p.get("auth") == "google" and not p.get("audience"):
+            errs.append(f"OCR_PROFILES[{name}] has auth google but no audience")
+    tokens = [p.get("token") for p in profiles.values() if isinstance(p, dict)]
+    if len(set(tokens)) != len(tokens) or {*tokens} & {environ.get(v) for v in PARSE_TOKENS}:
+        errs.append("OCR_PROFILES tokens must be unique and differ from WRAPPER_TOKEN and PROXY_TOKEN (the token picks the profile)")
+    for b in backends:
+        want = environ.get(f"{b.name.upper()}_PARSE_OCR", "")
+        if want and want not in profiles:
+            errs.append(f"{b.name.upper()}_PARSE_OCR={want} is not a profile of OCR_PROFILES")
+    if errs:
+        raise DeployError("\n".join(errs))
+
+
+def parse_env(environ) -> dict:
+    """What the parser service's stack file reads: the store's options without credentials (the job's scoped credential comes with each
+    request), the wrapper's OCR table (name -> sidecar URL + token) and the proxy exception for the stack's own SeaweedFS."""
+    opts = json.loads(environ.get("RESEARCH_BLOB_OPTIONS") or "{}")
+    return {"PARSE_BLOB_OPTIONS": json.dumps({k: v for k, v in opts.items() if k not in ("key", "secret", "token", "anon")}),
+            "PARSE_OCR_TABLE": json.dumps({n: {"url": "http://ocr-sidecar:8080", "token": p["token"]} for n, p in ocr_profiles(environ).items()}),
+            "PARSE_PROXY_ALLOW": "seaweedfs:8333" if environ.get("SEAWEEDFS") == "1" else environ.get("PARSE_PROXY_ALLOW", "")}
+
+
+def parse_overlay(backends: list[Backend], environ) -> str:
+    """Per enabled backend a network `<h>-parse` that only its gateway and the shared parser are on (one shared network would let the gateways
+    reach each other), PARSE_URL / PARSE_TOKEN / PARSE_OCR in the gateway; the proxy on the SeaweedFS network when that is the store; the OCR
+    sidecar when profiles are configured."""
+    import yaml
+    doc = {"version": "3.8", "services": {"parser": {"networks": [f"{b.h}-parse" for b in backends]}}, "networks": {}}
+    for b in backends:
+        doc["services"][f"{b.h}-gateway"] = {"networks": [f"{b.h}-parse"], "environment": {
+            "PARSE_URL": "http://parser:8080", "PARSE_TOKEN": "${WRAPPER_TOKEN}", "PARSE_OCR": f"${{{b.name.upper()}_PARSE_OCR:-}}"}}
+        doc["networks"][f"{b.h}-parse"] = {"driver": "overlay", "internal": True}
+    if environ.get("SEAWEEDFS") == "1":
+        doc["services"]["blob-sidecar"] = {"networks": ["seaweedfs"]}
+    if ocr_profiles(environ):
+        doc["services"]["ocr-sidecar"] = {
+            "image": "${IMAGE_PREFIX:-}spider-hoarder-ocr-sidecar:${IMAGE_TAG:-local}", "cap_drop": ["ALL"],
+            "cap_add": ["NET_ADMIN", "SETUID", "SETGID", "SETPCAP", "KILL"], "deploy": {"replicas": 1, "restart_policy": {"condition": "any"}},
+            "environment": {"OCR_PROFILES": "${OCR_PROFILES}", "OCR_TIMEOUT": "${OCR_TIMEOUT:-120}", "OCR_MAX_BODY": "${OCR_MAX_BODY:-10485760}",
+                            "OCR_MAX_CONCURRENT": "${OCR_MAX_CONCURRENT:-4}"}, "networks": ["parse-ocr", "public"]}
+    return yaml.safe_dump(doc, sort_keys=False)
+
+
+def parse_services(environ) -> list[str]:
+    return ["parser", "blob-sidecar", *(["ocr-sidecar"] if ocr_profiles(environ) else [])]
+
+
+def build_parse(environ, run=subprocess.run) -> None:
+    for tag, dockerfile, context in (("spider-hoarder-parser:local", "parser/Dockerfile", REPO_ROOT),
+                                     ("spider-hoarder-blob-sidecar:local", "blob-sidecar/Dockerfile", os.path.join(REPO_ROOT, "blob-sidecar")),
+                                     *([("spider-hoarder-ocr-sidecar:local", "ocr-sidecar/Dockerfile", os.path.join(REPO_ROOT, "ocr-sidecar"))]
+                                       if ocr_profiles(environ) else [])):
+        build_one(tag, os.path.join(REPO_ROOT, dockerfile), context, environ, "parse", run)
+
+
 def validate(backends: list[Backend]) -> None:
     errs = []
     for b in backends:
@@ -361,6 +450,7 @@ def main(argv=None, environ=None) -> int:
         backends = load_backends(enabled_names(environ))
         if cmd == "validate":
             validate(backends)
+            check_parse_env(backends, environ)
         elif cmd == "preflight":
             for b in backends:
                 run_hook(b, "preflight", environ)
@@ -397,6 +487,17 @@ def main(argv=None, environ=None) -> int:
             os.makedirs(os.path.dirname(os.path.abspath(args[0])), exist_ok=True)
             with open(args[0], "w") as f:
                 f.write(seaweedfs_overlay(backends))
+        elif cmd == "parse-env":
+            for k, v in parse_env(environ).items():
+                print(f"export {k}={shlex.quote(v)}")
+        elif cmd == "parse-overlay":
+            os.makedirs(os.path.dirname(os.path.abspath(args[0])), exist_ok=True)
+            with open(args[0], "w") as f:
+                f.write(parse_overlay(backends, environ))
+        elif cmd == "build-parse":
+            build_parse(environ)
+        elif cmd == "parse-services":
+            print("\n".join(parse_services(environ)))
         elif cmd == "dev-overlay":
             os.makedirs(os.path.dirname(os.path.abspath(args[0])), exist_ok=True)
             with open(args[0], "w") as f:

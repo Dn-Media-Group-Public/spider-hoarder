@@ -1,5 +1,7 @@
 # Plan: file metadata extraction (YAML) alongside parsing
 
+> The child-process isolation (`unshare -rn`) of this plan is superseded by [Plan: parser wrapper](parser-wrapper.md): the extractors run inside the parser service.
+
 See also [Jobs, storage and links](../architecture/jobs-and-storage.md), [OCR hybrid](ocr-hybrid.md) (the other planned addition to the parse step; independent).
 
 ## Problem / Goal

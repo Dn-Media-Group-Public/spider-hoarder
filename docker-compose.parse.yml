@@ -1,0 +1,54 @@
+# The shared parser service (docs/architecture/jobs-and-storage.md, docs/implemented-plans/parser-wrapper.md): what interprets an untrusted file
+# runs here, not in the gateways. `parser` = the wrapper (storage <-> parser, holds the tokens) plus sandboxed parser processes on pool uids
+# that can read nothing, reach nothing and authenticate to nothing; `blob-sidecar` = the authenticated egress proxy the wrapper reaches the
+# store through (the parser has no route out: its networks are internal). `spider_hoarder.py parse-overlay` adds what depends on the enabled
+# backends and settings: a `<backend>-parse` network per backend (the gateway and the parser on it), PARSE_URL/PARSE_TOKEN in each gateway,
+# the SeaweedFS network for the proxy (dev store), and the `ocr-sidecar` when OCR_PROFILES is set.
+version: "3.8"
+
+services:
+  parser:
+    image: ${IMAGE_PREFIX:-}spider-hoarder-parser:${IMAGE_TAG:-local}   # built by deploy.sh (parser/Dockerfile)
+    # The wrapper keeps exactly what the uid lifecycle needs (parser/entrypoint.sh drops the rest and sets no_new_privs); SETPCAP is for that drop.
+    cap_drop: [ALL]
+    cap_add: [SETUID, SETGID, CHOWN, KILL, SETPCAP]
+    deploy:
+      replicas: ${PARSE_REPLICAS:-1}   # each replica has its own uid pool and answers 503 when full; any replica answers status reads
+      restart_policy: { condition: any }
+      resources:
+        limits:
+          memory: ${PARSE_MEMORY:-8g}
+    environment:
+      WRAPPER_TOKEN: ${WRAPPER_TOKEN}
+      PROXY_TOKEN: ${PROXY_TOKEN}
+      PARSE_PROXY_HOST: blob-sidecar:3128
+      RESEARCH_BLOB_URL: ${RESEARCH_BLOB_URL}
+      PARSE_BLOB_OPTIONS: ${PARSE_BLOB_OPTIONS}   # RESEARCH_BLOB_OPTIONS without credentials (endpoint ...): the job's scoped credential comes with each POST
+      OCR_PROFILES: ${PARSE_OCR_TABLE}            # name -> {url, token}: the wrapper hands a parser only the profile its job asked for
+      PARSE_POOL_SIZE: ${PARSE_POOL_SIZE:-4}
+      PARSE_JOB_TIMEOUT: ${PARSE_JOB_TIMEOUT:-600}
+      # limits the parser process enforces (the wrapper forwards exactly these): defaults are the code's
+      MAX_PARSE_BYTES: ${MAX_PARSE_BYTES:-52428800}
+      MAX_ARCHIVE_BYTES: ${MAX_ARCHIVE_BYTES:-4294967296}
+      MAX_ARCHIVE_MEMBERS: ${MAX_ARCHIVE_MEMBERS:-50000}
+      METADATA_TIMEOUT: ${METADATA_TIMEOUT:-30}
+      METADATA_MAX_MEM: ${METADATA_MAX_MEM:-1073741824}
+      METADATA_MAX_BYTES: ${METADATA_MAX_BYTES:-1048576}
+      OCR_TIMEOUT: ${OCR_TIMEOUT:-120}
+      PARSE_RLIMIT_AS: ${PARSE_RLIMIT_AS:-6442450944}   # address space per parser: a guard against runaways; a real page needs more than 2 GiB (trafilatura MemoryError)
+      REPLICA_ID: "{{.Task.Slot}}"
+    networks: [parse-egress, parse-ocr]
+
+  blob-sidecar:
+    image: ${IMAGE_PREFIX:-}spider-hoarder-blob-sidecar:${IMAGE_TAG:-local}   # blob-sidecar/Dockerfile: squid 6, own egress rules
+    cap_drop: [ALL]
+    cap_add: [NET_ADMIN, SETUID, SETGID, SETPCAP, KILL]   # NET_ADMIN for the egress rules only, dropped before squid starts; KILL: tini (root) signals squid (uid proxy) on stop
+    deploy: { replicas: 1, restart_policy: { condition: any } }
+    environment:
+      PROXY_TOKEN: ${PROXY_TOKEN}
+      PARSE_PROXY_ALLOW: ${PARSE_PROXY_ALLOW:-}   # host:port exceptions to "public internet only": the dev store (deploy.sh sets seaweedfs:8333)
+    networks: [parse-egress, public]   # public: the way out (the egress rules keep it off every private range)
+
+networks:
+  parse-egress: { driver: overlay, internal: true }   # parser <-> proxy: no route out
+  parse-ocr: { driver: overlay, internal: true }      # parser <-> ocr-sidecar

@@ -26,3 +26,4 @@ Back to the [documentation index](../index.md). Open plans: [plans](../plans/ind
 - [Build everything inside `docker build` (repo-root context, a Dockerfile per image, no wheels)](build-in-docker.md)
 - [File metadata extraction (`metadata/<path>.yaml`)](file-metadata.md)
 - [Project access model (projects with roles, `projects/<proj>/data/<session>/<job>`, scoped store credentials, shared bucket, dev SeaweedFS)](project-access-model.md)
+- [Parser service (wrapper, no-secret parser uid, authenticated egress proxy, OCR sidecar)](parser-wrapper.md)

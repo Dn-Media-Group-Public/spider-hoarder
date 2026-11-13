@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spider-hoarder-parser"
+version = "0.1.0"
+description = "spider-hoarder parser service: the wrapper (storage <-> parser, uid pool) and the sandboxed parser process"
+requires-python = ">=3.11"
+dependencies = [
+    "starlette",
+    "uvicorn[standard]",
+    "fsspec",
+    "trafilatura",
+    "markitdown[all]",
+    "python-multipart",
+    "lxml_html_clean",
+    "markdown-it-py",
+    "linkify-it-py",
+    "msgpack",
+    "cbor2",
+    "bson",
+    "py7zr",
+    "rarfile",
+    "blackboxprotobuf",
+    "pyyaml",
+    "rasterio",
+    "pyogrio",
+    "lxml",
+    "pypdf",
+]
+
+[project.optional-dependencies]
+# the store the deployment uses (see sdk/pyproject.toml for why gcsfs is a separate pip step in the images)
+s3 = ["s3fs[boto3]>=2024.1"]
+test = ["pytest", "httpx"]
+
+[tool.setuptools.packages.find]
+include = ["spider_hoarder_parser*"]

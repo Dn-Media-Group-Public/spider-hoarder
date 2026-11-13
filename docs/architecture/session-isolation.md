@@ -10,6 +10,15 @@ get a per-job credential minted by the gateway, limited to read `projects/<proj>
 ([Jobs and storage](jobs-and-storage.md#access-and-links)). The gateway's own credential is broad: all authorisation is in its code.
 See also: [Plan: project access model](../implemented-plans/project-access-model.md)
 
+## The parser's uids
+The shared parser service ([Jobs and storage](jobs-and-storage.md#the-parser-service)) uses the same uid lifecycle for its pool (`free | busy | quarantined`, wipe, verify), owned by
+the **wrapper**, which keeps `CAP_SETUID/SETGID/CHOWN/KILL` itself (no separate root helper): a parser runs as one pool uid with no credential and no
+token, and the wrapper wipes it after every job (kills every process of the uid, `lchown`s and deletes its tree and its leftovers in the shared temp dirs) and
+quarantines the uid if it still owns anything. There is **no per-uid firewall** in that container: its networks are internal and hold only the gateways, the proxy
+and the OCR sidecar, and authentication (proxy token, per-profile OCR token) keeps the parser out of them. Same kernel and PID namespace as the wrapper: a kernel
+privilege-escalation bug defeats the uid separation (the same trust level as the browser sessions); files of all backends are parsed on one kernel, the per-job
+scoped credential limits what an escape can read in the store. See also: [Plan: parser wrapper](../implemented-plans/parser-wrapper.md)
+
 ## The uid lifecycle
 
 The pool is `UID_BASE .. UID_BASE+N-1` (default 20000; N = `MAX_SESSIONS_TOTAL` + 2 spare for `ingest_page` and the tool-list
@@ -60,6 +69,10 @@ Firewall rules are installed per session uid by the browser start script (`start
 | `browser_clear` | Public internet only. REJECT RFC1918, link-local, CGNAT, loopback, cloud-metadata and other stack services (this is the SSRF fix for browsers). Configured DNS resolvers stay reachable. |
 | `browser_tor` | ACCEPT only the session's own Tor SocksPort on `browser-tor-daemon`; REJECT everything else. IPv6 is rejected for all session uids. |
 | `browser_i2p` | ACCEPT only the session's own SOCKS port on `browser-i2p-router-<slot>`; REJECT everything else. |
+
+The parser service's egress proxy (`blob-sidecar`) has **its own copy** of the `browser_clear` rules (`blob-sidecar/egress_rules.py`, applied by its start script as root with `NET_ADMIN`, dropped
+before squid starts; not imported, allowed to drift), plus the `PARSE_PROXY_ALLOW` exception (dev SeaweedFS) for exactly one address and port; the OCR sidecar's egress is pinned to its profile endpoints
+(`ocr-sidecar/egress_rules.py`). See also: [Plan: parser wrapper](../implemented-plans/parser-wrapper.md)
 
 The gateway's own `requests` downloads (non-HTML) use `netguard.py` on clear (resolve, reject non-public, pin the IP, re-check every
 redirect) and `socks5h://<router>:<port>` on Tor and I2P (`browser-tor-daemon` / `browser-i2p-router-<slot>`; the session's own port when `ingest_page` runs inside a

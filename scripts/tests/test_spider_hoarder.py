@@ -33,6 +33,8 @@ volumes:
   dummy-one-data: {}
 """
 
+PARSE_ENV = {"WRAPPER_TOKEN": "w" * 8, "PROXY_TOKEN": "p" * 8}
+
 
 class FakeEP:
     def __init__(self, name, desc, value=None):
@@ -266,6 +268,53 @@ def test_seaweedfs_overlay(tmp_path):
     assert yaml.safe_load(sh.seaweedfs_overlay([a]))["services"] == {"dummy-one-gateway": {"networks": ["seaweedfs"]}}
 
 
+OCR = {"remote": {"token": "t1", "base_url": "https://llm/v1", "model": "m", "auth": "bearer", "api_key": "k"},
+       "lan": {"token": "t2", "base_url": "http://10.0.0.7/v1", "model": "m"}}
+
+
+def test_parse_env_checks(tmp_path):
+    _, a, _ = make_pkg(tmp_path, name="dummy_one")
+    ok = {**PARSE_ENV, "OCR_PROFILES": json.dumps(OCR), "DUMMY_ONE_PARSE_OCR": "lan"}
+    sh.check_parse_env([a], ok)
+    sh.check_parse_env([a], PARSE_ENV)  # OCR is optional
+    for bad in ({"WRAPPER_TOKEN": "changeme"}, {"PROXY_TOKEN": ""}, {"PROXY_TOKEN": PARSE_ENV["WRAPPER_TOKEN"]},
+                {"OCR_PROFILES": "{"}, {"OCR_PROFILES": "[]"}, {"OCR_PROFILES": json.dumps({"x": {"token": "t"}})},
+                {"OCR_PROFILES": json.dumps({"x": {**OCR["remote"], "api_key": ""}})},
+                {"OCR_PROFILES": json.dumps({"x": {**OCR["remote"], "auth": "google"}})},
+                {"OCR_PROFILES": json.dumps({"x": OCR["remote"], "y": OCR["remote"]})},  # a token picks the profile: unique
+                {"OCR_PROFILES": json.dumps({"x": {**OCR["remote"], "token": PARSE_ENV["PROXY_TOKEN"]}})},
+                {"DUMMY_ONE_PARSE_OCR": "nope"}):
+        with pytest.raises(sh.DeployError):
+            sh.check_parse_env([a], {**ok, **bad})
+
+
+def test_parse_env_and_overlay(tmp_path):
+    import yaml
+    _, a, _ = make_pkg(tmp_path, name="dummy_one")
+    _, b, _ = make_pkg(tmp_path, name="dummy_two")
+    env = {**PARSE_ENV, "OCR_PROFILES": json.dumps(OCR), "RESEARCH_BLOB_OPTIONS": json.dumps({"key": "k", "secret": "s", "endpoint_url": "http://x"}),
+           "SEAWEEDFS": "1"}
+    pe = sh.parse_env(env)
+    assert json.loads(pe["PARSE_BLOB_OPTIONS"]) == {"endpoint_url": "http://x"}  # no credential reaches the parser service's environment
+    assert json.loads(pe["PARSE_OCR_TABLE"]) == {n: {"url": "http://ocr-sidecar:8080", "token": p["token"]} for n, p in OCR.items()}
+    assert "endpoint" not in pe["PARSE_OCR_TABLE"] and "api_key" not in pe["PARSE_OCR_TABLE"]  # the wrapper never sees the endpoints' credentials
+    assert pe["PARSE_PROXY_ALLOW"] == "seaweedfs:8333" and sh.parse_env({**env, "SEAWEEDFS": "0"})["PARSE_PROXY_ALLOW"] == ""
+    doc = yaml.safe_load(sh.parse_overlay([a, b], env))
+    assert doc["services"]["parser"]["networks"] == ["dummy-one-parse", "dummy-two-parse"]
+    assert doc["services"]["dummy-one-gateway"]["networks"] == ["dummy-one-parse"]
+    assert doc["services"]["dummy-one-gateway"]["environment"]["PARSE_OCR"] == "${DUMMY_ONE_PARSE_OCR:-}"
+    assert doc["networks"] == {"dummy-one-parse": {"driver": "overlay", "internal": True}, "dummy-two-parse": {"driver": "overlay", "internal": True}}
+    assert doc["services"]["blob-sidecar"] == {"networks": ["seaweedfs"]} and "ocr-sidecar" in doc["services"]
+    plain = yaml.safe_load(sh.parse_overlay([a], {**PARSE_ENV}))
+    assert "ocr-sidecar" not in plain["services"] and "blob-sidecar" not in plain["services"]
+    assert sh.parse_services(env) == ["parser", "blob-sidecar", "ocr-sidecar"] and sh.parse_services(PARSE_ENV) == ["parser", "blob-sidecar"]
+    # the static stack file: the parser's networks are internal (no route out), the proxy alone reaches `public`
+    base = yaml.safe_load(open(os.path.join(sh.REPO_ROOT, "docker-compose.parse.yml")))
+    assert base["services"]["blob-sidecar"]["networks"] == ["parse-egress", "public"] and "public" not in base["services"]["parser"]["networks"]
+    assert all(base["networks"][n]["internal"] for n in ("parse-egress", "parse-ocr"))
+    assert "RESEARCH_BLOB_OPTIONS" not in base["services"]["parser"]["environment"] and "BLOB_TOKEN_SECRET" not in base["services"]["parser"]["environment"]
+
+
 def test_seaweedfs_config(tmp_path):
     import base64
     env = {"SEAWEEDFS_KEY": "gk", "SEAWEEDFS_SECRET": "gs", "SEAWEEDFS_SIGNING_KEY": base64.b64encode(b"k" * 32).decode()}
@@ -287,7 +336,7 @@ def cli(tmp_path, monkeypatch):
     monkeypatch.syspath_prepend(str(tmp_path))
     monkeypatch.setattr(sh, "entry_points", lambda: [ep])
     monkeypatch.setattr(sh, "package_dir", lambda e: str(tmp_path / "dummy_one"))
-    return {"BACKENDS": "dummy_one", "PUBLIC_HOST": "h.example", "PUBLIC_SCHEME": "http"}, tmp_path
+    return {"BACKENDS": "dummy_one", "PUBLIC_HOST": "h.example", "PUBLIC_SCHEME": "http", **PARSE_ENV}, tmp_path
 
 
 def test_cli_commands(cli, capsys):

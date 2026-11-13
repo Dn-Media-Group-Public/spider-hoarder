@@ -1,11 +1,9 @@
 """File metadata (EXIF/GPS, Office revisions, GeoTIFF CRS, media streams, PDF history ...) as one YAML mapping per file.
 
 ExifTool's own groups come first; our extensions are further groups named `SpiderHoarder-<Format>`. Every extractor runs
-in its own child process on a staged copy of the file (wall-clock timeout, memory/CPU/output limits, no network where
-the kernel allows, scrubbed environment); a failing extractor is reported in `notes` and never fails the job.
-Python extractors are the functions below, run as `python -I -m spider_hoarder_sdk.content.metadata <extractor> <path>`."""
+in its own child process on a staged copy of the file (wall-clock timeout, memory/CPU/output limits, scrubbed environment; the parser container has no egress); a failing extractor is reported in `notes` and never fails the job.
+Python extractors are the functions below, run as `python -I -m spider_hoarder_parser.metadata <extractor> <path>`."""
 
-import functools
 import json
 import math
 import mimetypes
@@ -15,14 +13,14 @@ import signal
 import subprocess
 import sys
 
-TIMEOUT = int(os.environ.get("METADATA_TIMEOUT", 30))
-MAX_MEM = int(os.environ.get("METADATA_MAX_MEM", 1 << 30))
-MAX_BYTES = int(os.environ.get("METADATA_MAX_BYTES", 1 << 20))  # size of the written YAML
+TIMEOUT = int(os.environ.get("METADATA_TIMEOUT") or 30)
+MAX_MEM = int(os.environ.get("METADATA_MAX_MEM") or 1 << 30)
+MAX_BYTES = int(os.environ.get("METADATA_MAX_BYTES") or 1 << 20)  # size of the written YAML
 MAX_RAW = 16 << 20  # size of one extractor's JSON output (RLIMIT_FSIZE)
 MAX_ITEMS = 5000  # per list inside an extractor (revisions, comments, history)
 MAX_PART = 64 << 20  # per OOXML part, uncompressed
 
-RASTER = {".tif", ".tiff", ".geotiff", ".img", ".asc", ".vrt", ".jp2", ".nc", ".hgt", ".dem"}
+RASTER = {".tif", ".tiff", ".geotiff", ".img", ".asc", ".jp2", ".nc", ".hgt", ".dem"}
 VECTOR = {".gpx", ".kml", ".geojson", ".gpkg", ".zip"}  # a zip only if it holds a shapefile
 OFFICE = {".docx", ".xlsx", ".pptx"}
 MEDIA = {".mp3", ".mp4", ".m4a", ".m4v", ".mkv", ".webm", ".mov", ".avi", ".flac", ".ogg", ".opus", ".wav", ".aac", ".wmv", ".flv"}
@@ -188,14 +186,6 @@ def _exiftool(data):
     return d
 
 
-@functools.cache
-def _sandbox() -> tuple:
-    """Command prefix: no network namespace where the kernel allows it (documented as not enforced otherwise)."""
-    if shutil.which("unshare") and subprocess.run(["unshare", "-rn", "true"], capture_output=True).returncode == 0:
-        return ("unshare", "-rn")
-    return ()
-
-
 def _run(cmd: list, tmp: str) -> bytes:
     """stdout of `cmd` in `tmp`, under the limits; raises on timeout, crash or no output."""
     limits = [f"--as={MAX_MEM}", f"--cpu={TIMEOUT}", f"--fsize={MAX_RAW}"]
@@ -204,7 +194,7 @@ def _run(cmd: list, tmp: str) -> bytes:
     env = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"), "HOME": tmp, "LANG": "C.UTF-8",
            "OPENBLAS_NUM_THREADS": "1", "OMP_NUM_THREADS": "1"}  # thread arenas blow RLIMIT_AS at import of numpy
     with open(out, "wb") as o:
-        p = subprocess.Popen([*_sandbox(), *prefix, *cmd], stdout=o, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+        p = subprocess.Popen([*prefix, *cmd], stdout=o, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
                              cwd=tmp, env=env, start_new_session=True)
         try:
             p.wait(timeout=TIMEOUT)
@@ -249,15 +239,15 @@ def _kinds(ctype: str, name: str) -> list:
     return kinds
 
 
-def extract_metadata(path: str, ctype: str, name: str, notes: list) -> dict:
-    """Merged metadata of the staged file `path` ({} if there is none worth writing); `name` is the job path."""
-    tmp, meta = os.path.dirname(path), {}
+def extract_metadata(path: str, ctype: str, name: str, notes: list, tmp: str | None = None) -> dict:
+    """Merged metadata of the file `path` ({} if there is none worth writing); `name` is the job path; `tmp` is a scratch dir."""
+    tmp, meta = tmp or os.path.dirname(path), {}
     for kind in _kinds(ctype, name):
         try:
             if kind == "exiftool":
                 meta |= _exiftool(json.loads(_run(["exiftool", "-json", "-g1", "-struct", "-api", "LargeFileSupport=1", "--", path], tmp)))
             elif kind == "media":
-                probe = ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", "-show_chapters", path]
+                probe = ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", "-show_streams", "-show_chapters", "-protocol_whitelist", "file", path]
                 meta["SpiderHoarder-Media"] = _media(json.loads(_run(probe, tmp)))
             else:
                 group = "SpiderHoarder-" + {"raster": "Raster", "vector": "Vector", "office": "Office", "pdf": "PDF"}[kind]

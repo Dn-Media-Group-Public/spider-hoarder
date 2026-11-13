@@ -40,7 +40,7 @@ else
 fi
 
 export STACK_NAME=$STACK
-REQUIRED=(PUBLIC_HOST OIDC_ISSUER O2P_COOKIE_SECRET BLOB_TOKEN_SECRET GATEWAY_PORT HTTP_PORT BACKENDS)
+REQUIRED=(PUBLIC_HOST OIDC_ISSUER O2P_COOKIE_SECRET BLOB_TOKEN_SECRET WRAPPER_TOKEN PROXY_TOKEN GATEWAY_PORT HTTP_PORT BACKENDS)
 if [ "$DEV" -eq 1 ]; then
   echo "Deploying in DEV mode (local Keycloak, http://localhost, no TLS)"
   export PUBLIC_HOST=localhost:$HTTP_PORT PUBLIC_SCHEME=http
@@ -49,7 +49,7 @@ if [ "$DEV" -eq 1 ]; then
 fi
 # The object store (all gateway replicas share one bucket; no local disk): the stack's own SeaweedFS (SEAWEEDFS=1) or RESEARCH_BLOB_URL
 # (gs://bucket or s3://bucket) with RESEARCH_BLOB_OPTIONS, a JSON object handed to fsspec (credentials, endpoint, ...).
-SEAWEEDFS="${SEAWEEDFS:-0}"
+export SEAWEEDFS="${SEAWEEDFS:-0}"
 if [ "$SEAWEEDFS" = 1 ]; then
   REQUIRED+=(SEAWEEDFS_BUCKET SEAWEEDFS_KEY SEAWEEDFS_SECRET SEAWEEDFS_SIGNING_KEY)
 else
@@ -79,7 +79,7 @@ done
 source .venv/bin/activate
 pip install -q pyyaml
 # shellcheck disable=SC2086
-pip install -q --no-deps --force-reinstall ./sdk ./backends/*/ ${BACKEND_PACKAGES:-}
+pip install -q --no-deps --force-reinstall ./sdk ./parser ./backends/*/ ${BACKEND_PACKAGES:-}
 
 TOOL="python scripts/spider_hoarder.py"
 $TOOL validate
@@ -88,11 +88,13 @@ if [ "$SEAWEEDFS" = 1 ]; then
   export RESEARCH_BLOB_URL="s3://$SEAWEEDFS_BUCKET"
   export RESEARCH_BLOB_OPTIONS="$(python -c 'import json,os;print(json.dumps({"key":os.environ["SEAWEEDFS_KEY"],"secret":os.environ["SEAWEEDFS_SECRET"],"endpoint_url":"http://seaweedfs:8333"}))')"
 fi
+eval "$($TOOL parse-env)"   # after RESEARCH_BLOB_OPTIONS: the parser service's store options (no credentials), OCR table, proxy exception
 $TOOL preflight
 
 # Build local images (build: is ignored in stack deploy)
 $TOOL build-image oauth2-proxy-dcr:local oauth2-proxy
 $TOOL build
+$TOOL build-parse
 
 # Initialize swarm if not already active
 docker info --format '{{.Swarm.LocalNodeState}}' | grep -q active || docker swarm init
@@ -124,6 +126,8 @@ if [ "$DEV" -eq 1 ]; then
   $TOOL dev-overlay .build/docker-compose.dev-gateways.yml
   FILES+=(-c docker-compose.dev.yml -c .build/docker-compose.dev-gateways.yml)
 fi
+$TOOL parse-overlay .build/docker-compose.parse-gateways.yml
+FILES+=(-c docker-compose.parse.yml -c .build/docker-compose.parse-gateways.yml)
 mapfile -t BACKEND_FILES < <($TOOL compose)
 FILES+=("${BACKEND_FILES[@]}")
 if [ -n "${PIN_DATA:-}" ]; then
@@ -136,7 +140,7 @@ if [ -n "$IMAGE_PREFIX" ]; then
 else
   docker stack deploy --prune --resolve-image never "${FILES[@]}" "$STACK"
   # Force restart so freshly-built :local images (and an edited nginx.conf.template or landing page) are picked up.
-  for s in nginx $($TOOL services); do
+  for s in nginx $($TOOL services) $($TOOL parse-services); do
     docker service update --force --no-resolve-image "${STACK}_$s"
   done
 fi

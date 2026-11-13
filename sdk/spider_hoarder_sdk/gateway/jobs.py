@@ -1,30 +1,21 @@
-"""Job store helpers shared by every backend: job ids (`<proj>/<session>/<job>`, project-scoped storage keys), storing a file
-and parsing it into Markdown, the {files, text?} job result. Nothing here knows what produced the file."""
+"""Job store helpers shared by every backend: job ids (`<proj>/<session>/<job>`, project-scoped storage keys), storing files and
+having the parser service parse them (parse_client), the {files, text?} job result. Nothing here knows what produced the file."""
 
 import mimetypes
 import os
-import re
-import shutil
-import tempfile
 import uuid
-import json
 from typing import Any
 
 from mcp import types
 
-from spider_hoarder_sdk.content import extract
-from spider_hoarder_sdk.content import metadata
 from spider_hoarder_sdk.content import storage
-from spider_hoarder_sdk.gateway import ident, projects
+from spider_hoarder_sdk.gateway import ident, parse_client, projects
 
 RID = ident.RID  # this replica: the MCP session id and live-view URLs carry it, jobs and links do not
 DEFAULT_TEXT_LENGTH = 20000  # chars; keeps get_file_text results LLM-sized
 UPLOAD_MARK = "@upload"  # blobtoken path marking an upload-link token (never a real file path)
 INLINE_LIMIT = 50_000
-MAX_PARSE_BYTES = int(os.environ.get("MAX_PARSE_BYTES", 50 * 1024 * 1024))  # stored files have no cap; parsing does
 MAX_FILE_BYTES = int(os.environ.get("MAX_FILE_BYTES", 50 * 1024 * 1024))  # files pulled through the gateway (APKs, device output)
-MAX_ARCHIVE_BYTES = int(os.environ.get("MAX_ARCHIVE_BYTES") or os.environ.get("MAX_ZIP_BYTES") or 4 * 1024**3)  # uncompressed, per archive
-MAX_ARCHIVE_MEMBERS = int(os.environ.get("MAX_ARCHIVE_MEMBERS") or os.environ.get("MAX_ZIP_MEMBERS") or 50_000)
 
 FILE_TOOLS_NOTE = ("\n\nThe result is {job_id, files, text?}: `text` is the content if small, else page through it "
                    "with get_file_text or search it with grep_file; get_file_url for a link. `filename` only names "
@@ -68,118 +59,50 @@ def _check_rel_path(path: str) -> str:
     return path
 
 
-def _parse_one(key: str, path: str, raw: bytes, ctype: str, base_url: str, notes: list) -> tuple | None:
-    """Parse one stored file: (text, text_path, terse, terse_path) for _job_result, or None if nothing was made."""
-    if path.lower().endswith((".md", ".markdown")):  # already Markdown: no parsed/, terse from the original
-        text = raw.decode("utf-8", errors="replace")
-        return text, f"original/{path}", _write_terse(key, path, text), f"terse/{path}"
-    if bkind := extract.binary_kind(ctype, path, raw):
-        try:
-            text = extract.binary_to_json(raw, bkind, ctype)
-        except Exception as e:  # noqa: BLE001  undecodable: noted, never fails the job
-            notes.append(f"{path} not parsed ({type(e).__name__}: {e})")
-            return None
-        storage.write_bytes(key, f"parsed/{path}.json", text.encode(), "application/json")
-        return text, f"parsed/{path}.json", "", ""
-    if path.lower().endswith(".apk"):  # nothing to parse: stored for device_install_apk
-        return None
-    is_html = "html" in ctype or path.lower().endswith((".html", ".htm"))
-    if is_html and base_url:
-        raw = extract.absolutize(raw, base_url)  # parsed/ and simplified/ get absolute links; original/ is stored untouched
-    try:
-        text = extract.html_to_markdown(raw) if is_html else extract.file_to_markdown(raw, path)
-    except Exception as e:  # noqa: BLE001  one unparseable file never fails the job
-        notes.append(f"{path} not parsed ({type(e).__name__}: {e})")
-        return None
-    if not is_html and not text.strip():
-        return None
-    storage.write_bytes(key, f"parsed/{path}.md", text.encode(), "text/markdown")
-    if is_html and (simple := extract.html_to_simplified(raw)):
-        storage.write_bytes(key, f"simplified/{path}.md", simple.encode(), "text/markdown")
-    return text, f"parsed/{path}.md", _write_terse(key, f"{path}.md", text), f"terse/{path}.md"
-
-
-def _write_metadata(key: str, path: str, ctype: str, notes: list) -> None:
-    """Stage original/<path> to a temp file, extract its metadata and store metadata/<path>.yaml (if any)."""
-    try:
-        with tempfile.TemporaryDirectory() as tmp:
-            staged = os.path.join(tmp, "f" + re.sub(r"[^a-z0-9.]", "", os.path.splitext(path.lower())[1])[:12])
-            with storage.open_read(key, f"original/{path}") as s, open(staged, "wb") as d:
-                shutil.copyfileobj(s, d)
-            meta = metadata.extract_metadata(staged, ctype, path, notes)
-        if meta:
-            text, truncated = metadata.dump_yaml(meta)
-            if truncated:
-                notes.append(f"{path}: metadata truncated (> METADATA_MAX_BYTES)")
-            storage.write_bytes(key, f"metadata/{path}.yaml", text.encode(), "application/yaml")
-    except Exception as e:  # noqa: BLE001  metadata never fails the job
-        notes.append(f"{path}: metadata failed ({type(e).__name__})")
-
-
-def _store_one(key: str, path: str, src, ctype: str, base_url: str = "", notes: list | None = None,
-               unzip: bool = True) -> tuple | None:
-    """Store `src` (bytes or a file object) as original/<path> and parse it by the one rule for every file;
-    an archive is unpacked to <path>.d/ (once: members that are archives are only stored)."""
-    notes = [] if notes is None else notes
+def _store_original(key: str, path: str, src, ctype: str) -> int:
+    """Store `src` (bytes or a file object) as original/<path>; parsing is the parser service's job (_parse_job)."""
     if isinstance(src, bytes):
         storage.write_bytes(key, f"original/{path}", src, ctype)
-        size = len(src)
-    else:
-        size = storage.write_stream(key, f"original/{path}", src, ctype)
-    _write_metadata(key, path, ctype, notes)  # before the size check: these tools read headers, not whole files
-    if size > MAX_PARSE_BYTES:
-        notes.append(f"{path} not parsed ({size} bytes > MAX_PARSE_BYTES)")
-        return None
-    if unzip and extract.archive_kind(ctype, path):
-        try:
-            with storage.open_read(key, f"original/{path}") as af:
-                members = ((n, f, mimetypes.guess_type(n)[0] or "application/octet-stream")
-                           for n, f in extract.unpack_archive(af, path, ctype, MAX_ARCHIVE_MEMBERS, MAX_ARCHIVE_BYTES, notes))
-                _store_tree(key, members, notes=notes, prefix=f"{path}.d/", unzip=False)
-            return None
-        except extract.ArchiveLimit as e:
-            notes.append(str(e))
-            return None
-        except extract.BadArchive:
-            pass  # named like an archive but is not: parse it as any file
-    raw = src if isinstance(src, bytes) else storage.read_bytes(key, f"original/{path}")
-    return _parse_one(key, path, raw, ctype, base_url, notes)
+        return len(src)
+    return storage.write_stream(key, f"original/{path}", src, ctype)
 
 
-def _store_tree(key: str, files, base_url: str = "", notes: list | None = None, prefix: str = "",
-                unzip: bool = True) -> dict:
-    """_store_one for each (path, fileobj, ctype); returns {path: parse result}."""
-    notes = [] if notes is None else notes
-    return {path: _store_one(key, prefix + path, f, ctype, base_url, notes, unzip) for path, f, ctype in files}
+def _store_tree(key: str, files, prefix: str = "") -> None:
+    """_store_original for each (path, fileobj, ctype)."""
+    for path, f, ctype in files:
+        _store_original(key, prefix + path, f, ctype)
+
+
+def _parse_job(key: str, base_url: str = "", main: str | None = None) -> dict:
+    """Have the parser service parse everything stored in the job (archives are unpacked there), then build the job result;
+    `main` is the original whose text is returned inline."""
+    return _job_result(key, main, parse_client.parse(key, base_url))
 
 
 def _store_and_parse(key: str, filename: str, raw: bytes, content_type: str, base_url: str = "") -> dict:
-    notes = []
-    info = _store_one(key, filename, raw, content_type, base_url, notes)
-    return _with_notes(_job_result(key, *(info or ())), notes)
+    _store_original(key, filename, raw, content_type)
+    return _parse_job(key, base_url, filename)
 
 
-def _with_notes(result: dict, notes: list) -> dict:
-    return {**result, "notes": notes} if notes else result
+def _job_result(key: str, main: str | None = None, notes: list | None = None) -> dict:
+    """{files, text?, text_path?, notes?} from index.json: the one place that decides whether text is small enough to return inline;
+    falls back to the terse outline when the full text is too big. `main` is an original's path, as stored under original/."""
+    manifest = storage.get_manifest(key)
+    files = {e["path"]: e for e in manifest["files"]}
+    result = {"files": manifest["files"]}
 
+    def small(p: str) -> bool:
+        return p in files and files[p]["size"] < INLINE_LIMIT
 
-def _write_terse(key: str, name: str, md: str) -> str:
-    """Store terse/<name> if the outline is non-empty; returns the outline text."""
-    t = extract.terse(md)
-    if t:
-        storage.write_bytes(key, f"terse/{name}", t.encode(), "text/markdown")
-    return t
-
-
-def _job_result(key: str, text: str | None = None, path: str | None = None,
-                terse: str = "", terse_path: str = "") -> dict:
-    """{files, text?, text_path?}: the one place that decides whether text is small enough to return inline;
-    falls back to the terse outline when the full text is too big."""
-    result = {"files": storage.get_manifest(key)["files"]}
-    if text is not None and len(text) < INLINE_LIMIT:
-        result["text"], result["text_path"] = text, path
-    elif terse and len(terse) < INLINE_LIMIT:
-        result["text"], result["text_path"] = terse, terse_path
+    if main:
+        text = next((p for p in (f"parsed/{main}.md", f"parsed/{main}.json", f"original/{main}")
+                     if p in files and (p.startswith("parsed/") or files[p].get("text"))), None)
+        terse = next((p for p in (f"terse/{main}.md", f"terse/{main}") if p in files), None)
+        if text and small(text) or terse and small(terse):
+            path = text if text and small(text) else terse
+            result["text"], result["text_path"] = storage.read_bytes(key, path).decode("utf-8", errors="replace"), path
+    if all_notes := list(dict.fromkeys([*manifest.get("notes", []), *(notes or [])])):
+        result["notes"] = all_notes
     return result
 
 
@@ -189,27 +112,8 @@ def _job_name(filename: Any, default: str) -> str:
     return default if name in ("", ".", "..") else name
 
 
-def _store_file(key: str, name: str, raw: bytes) -> dict:
-    storage.write_bytes(key, f"original/{name}", raw, _ctype(name))
-    return _describe_file(key, name, raw)
-
-
 def _ctype(name: str) -> str:
     return mimetypes.guess_type(name)[0] or "application/octet-stream"
-
-
-def _describe_file(key: str, name: str, raw: bytes) -> dict:
-    """Job result for a tool's stored output file: PDFs are parsed, text is returned as is."""
-    if name.lower().endswith(".pdf"):
-        text = extract.file_to_markdown(raw, name)
-        storage.write_bytes(key, f"parsed/{name}.md", text.encode(), "text/markdown")
-        return _job_result(key, text, f"parsed/{name}.md", _write_terse(key, f"{name}.md", text), f"terse/{name}.md")
-    if b"\0" not in raw[:1024]:  # ponytail: NUL sniff for text vs binary
-        text = raw.decode("utf-8", errors="replace")
-        if name.lower().endswith((".md", ".markdown")):
-            return _job_result(key, text, f"original/{name}", _write_terse(key, name, text), f"terse/{name}")
-        return _job_result(key, text, f"original/{name}")
-    return _job_result(key)
 
 
 def _meta(key: str) -> dict:

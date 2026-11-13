@@ -9,14 +9,14 @@ What runs is `BACKENDS` in `.env`: space-separated canonical names (`browser_cle
 unknown or not-installed name is a hard error. `deploy.sh` then, in order:
 
 1. loads `.env`; creates the virtualenv `.venv/` (with `virtualenv`) if missing and activates it;
-2. installs every in-tree package (`sdk/`, `backends/*`) and every spec in `BACKEND_PACKAGES` (space-separated pip requirement specs, e.g. `git+ssh://...`, for
+2. installs every in-tree package (`sdk/`, `parser/`, `backends/*`) and every spec in `BACKEND_PACKAGES` (space-separated pip requirement specs, e.g. `git+ssh://...`, for
    out-of-tree backends) `--no-deps` into `.venv/`, only so the descriptors can be read (plus `pyyaml`, which the overlay check uses);
 3. `scripts/spider_hoarder.py validate` (descriptors well formed, overlays obey the [overlay contract](../architecture/backend-plugins.md)), then `preflight` (each backend's host checks, e.g. `/dev/kvm`);
 4. builds `oauth2-proxy-dcr:local`, `spider-hoarder-nginx:local` (config, aliases and landing page baked in, `nginx/Dockerfile`) and every image of the enabled backends, once per tag (plain `docker build -f <Dockerfile> .` from the repo root, no buildx needed; a Dockerfile `ARG` is fed from the environment variable of the same name); See also: [Plan: Build everything inside `docker build`](../implemented-plans/build-in-docker.md)
 5. inits Swarm, runs each backend's `post_build` hook, merges the variables the backends derive (`ANDROID_<X>_SLOTS`, ...) and builds `BACKEND_SERVERS`
    (a JSON list of every enabled backend's title and description: each gateway container has only its own backend installed, so this is how it learns the others);
 6. generates the static landing page `.build/landing.html` (`claude mcp add` lines and each backend's title and description), and in `--dev` the dev overlay;
-7. `docker stack deploy --prune` of the base `docker-compose.yml` plus each backend's overlay, then force-updates `nginx` and every backend's listed services so fresh `:local` images, an edited
+7. `docker stack deploy --prune` of the base `docker-compose.yml`, `docker-compose.parse.yml` (parser, blob-sidecar; plus the generated per-backend wiring and the optional ocr-sidecar) and each backend's overlay, then force-updates `nginx` and every backend's listed services so fresh `:local` images, an edited
    `nginx.conf.template` and the landing page are picked up.
 
 `--prune` stops the services of a backend removed from `BACKENDS`; **networks and volumes are not removed automatically** (`docker network rm` / `docker volume rm` them if you want them gone).
@@ -32,6 +32,12 @@ See also: [Plan: Pluggable backends](../implemented-plans/backend-plugins.md)
 | `O2P_COOKIE_SECRET`, `BLOB_TOKEN_SECRET` | secrets (placeholders refused by `deploy.sh`) |
 | `RESEARCH_BLOB_URL`, `RESEARCH_BLOB_OPTIONS` | the shared bucket: `gs://bucket` or `s3://bucket` (no local-disk or in-memory store; `deploy.sh` refuses others), and a JSON object handed to fsspec as is (credentials, endpoint, ...). The gateway needs the right to create roles in it (per-job credentials). Not needed with `SEAWEEDFS=1` |
 | `SEAWEEDFS` (1 with `--dev`), `SEAWEEDFS_BUCKET`, `SEAWEEDFS_KEY`, `SEAWEEDFS_SECRET`, `SEAWEEDFS_SIGNING_KEY` | the stack's own SeaweedFS as the store: the bucket, the gateways' key and secret (an Admin identity: creating a role per job needs IAM rights), and the STS signing key (base64, ≥ 32 bytes; rotating it ends all minted credentials). `deploy.sh` generates SeaweedFS's `s3.json` / `iam.json` from them (`.build/seaweedfs/`, secrets: not committed), creates the bucket after the deploy and sets `RESEARCH_BLOB_*` for the gateways; placeholders are refused. See also: [Plan: project access model](../implemented-plans/project-access-model.md) |
+| `WRAPPER_TOKEN`, `PROXY_TOKEN` | the gateways' token for the parser wrapper; the wrapper's token for the egress proxy. Different secrets, placeholders refused by `deploy.sh` and `validate`. `openssl rand -hex 32` |
+| `PARSE_REPLICAS` (1), `PARSE_POOL_SIZE` (4), `PARSE_MEMORY` (8g), `PARSE_JOB_TIMEOUT` (600 s), `PARSE_RLIMIT_AS` (6 GiB) | parser service: replicas, parsers per replica (= parallel parses; a full replica answers 503), memory limit per replica, wall clock per job, address-space limit per parser process |
+| `MAX_PARSE_BYTES` (50 MiB), `MAX_ARCHIVE_BYTES` (4 GiB), `MAX_ARCHIVE_MEMBERS` (50,000), `METADATA_TIMEOUT` (30 s), `METADATA_MAX_MEM` (1 GiB), `METADATA_MAX_BYTES` (1 MiB) | per-file limits the parser enforces: a bigger file is stored with metadata only; archive unpack caps (an aborted unpack is a note); the metadata extractors' wall clock and memory, and the cap on `metadata/<path>.yaml`. Passed to the `parser` service; the wrapper forwards exactly these (and `OCR_TIMEOUT`) to the parser process |
+| `OCR_TIMEOUT` (120 s), `OCR_MAX_BODY` (10 MiB), `OCR_MAX_CONCURRENT` (4) | remote OCR: how long a parser and the sidecar wait for an endpoint; the largest image the sidecar accepts; concurrent requests it forwards (the next gets 503) |
+| `PARSE_PROXY_ALLOW` | space-separated `host:port` exceptions to the proxy's public-internet-only rules (a private object store). Empty in production; `SEAWEEDFS=1` sets `seaweedfs:8333` |
+| `OCR_PROFILES`, `<BACKEND>_PARSE_OCR` | optional remote OCR: JSON `{name: {token, base_url, model, auth, api_key, audience}}` (the `ocr-sidecar` is deployed only when set; one unique token per profile) and, per backend (e.g. `BROWSER_CLEAR_PARSE_OCR`), the profile its files may be sent to (empty = never) |
 | `ACCESS_CACHE_SECONDS` (30) | per-replica cache of a project's `access.json` |
 | `MAX_SESSIONS_TOTAL` (18, max 48), `MAX_SESSIONS_PER_USER` (3), `IDLE_TIMEOUT` (1800 s), `DISCONNECT_TIMEOUT_MINUTES` (5) | per-container limits (browser backends; Android has its own below) |
 | `HTTP_PORT`, `GATEWAY_PORT` | published nginx port; port gateways listen on (nothing else may use it) |
@@ -42,7 +48,8 @@ See also: [Plan: Pluggable backends](../implemented-plans/backend-plugins.md)
 | `I2P_SNAPSHOT_INTERVAL` (1800 s), `I2P_PROBE_HOST` (`stats.i2p`) | seed snapshot period; eepsite probed for readiness |
 | `KC_*` | dev Keycloak and `keycloak/setup.sh` only |
 
-The size/time limits `MAX_PARSE_BYTES`, `MAX_ARCHIVE_BYTES`, `MAX_ARCHIVE_MEMBERS`, `MAX_REQUEST_BODY`, `MAX_UPLOAD_BYTES`,
+`RESEARCH_BLOB_URL` must be `s3://` or `gs://` for the parser service too (it gets the options without credentials, `PARSE_BLOB_OPTIONS`, derived by `deploy.sh`; the images install `s3fs` and, in a second pip step, `gcsfs`).
+The size/time limits `MAX_REQUEST_BODY`, `MAX_UPLOAD_BYTES`,
 `MAX_REQUEST_TIMEOUT_MS` (and `OIDC_JWKS_URL`) are read from the container environment but `docker-compose.yml` does not pass them
 through; add them to the `x-gateway-env` block of the backend's overlay (`backends/<name>/<name>/docker-compose.yml`) to change the defaults.
 
@@ -94,8 +101,11 @@ By hand, from the repo root after `./deploy.sh` (or any run that built `.venv/`)
 
 ```
 .venv/bin/pytest sdk                       # framework, job store, auth, pool, driver contract of every installed backend
+.venv/bin/pytest parser                    # parse rules, wrapper against a real store (hostile parsers, caps, uid pool, status), metadata (needs exiftool/ffprobe, else skipped)
+.venv/bin/pytest blob-sidecar ocr-sidecar  # egress rules, OCR forwarder
 .venv/bin/pytest backends/browser-sdk      # browser driver, files, egress/firewall rules, toolserver (needs Playwright + Chromium)
 .venv/bin/pytest backends/android-sdk      # android driver and slot backend (sets BACKEND=android_clear itself)
+.venv/bin/python tests/live/e2e_parser.py browser-clear   # the parser service on the deployed --dev stack: dn.no, archives, bomb, isolation (needs e2e_android_setup.sh)
 .venv/bin/pytest scripts                   # deploy tool: descriptors, overlay contract, build plan, hooks (fake entry points)
 ```
 

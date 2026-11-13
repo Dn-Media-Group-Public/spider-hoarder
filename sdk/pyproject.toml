@@ -12,32 +12,18 @@ dependencies = [
     "mcp==1.29.1",
     "httpx",
     "PyJWT[crypto]",
-    "trafilatura",
-    "markitdown[all]",
     "fsspec",
     "python-multipart",
-    "lxml_html_clean",
-    "markdown-it-py",
-    "linkify-it-py",
-    "msgpack",
-    "cbor2",
-    "bson",
-    "py7zr",
-    "rarfile",
-    "blackboxprotobuf",
-    "pyyaml",
-    "rasterio",
-    "pyogrio",
-    "lxml",
-    "pypdf",
 ]
 
 [project.optional-dependencies]
 # S3-compatible stores (scoped credentials need boto3). There is no `gcs` extra on purpose: gcsfs -> google-cloud-storage needs a protobuf that
-# blackboxprotobuf's stale `protobuf==3.10.0` pin forbids, so pip cannot resolve both in one go (it backtracks for ever). blackboxprotobuf
-# runs fine on current protobuf (decode only, checked), so the gateway images install GCS support in a second step:
+# blackboxprotobuf's stale `protobuf==3.10.0` pin forbids (blackboxprotobuf is the parser's, parser/pyproject.toml), so the images install
+# GCS support in a second step:
 #   pip install gcsfs google-auth      (pip only warns about the pin)
-s3 = ["s3fs[boto3]>=2024.1"]   # the [boto3] extra keeps boto3 in step with aiobotocore; a bare boto3 made pip backtrack to s3fs 0.4.2
+# boto3 (scoped credentials, gateway/creds.py) is not a dependency here: a bare one makes pip backtrack to s3fs 0.4.2 and recent aiobotocore has no [boto3]
+# extra, so the gateway images install the boto3 that matches the installed botocore in a second step (`pip install --no-deps boto3==<botocore version> s3transfer`)
+s3 = ["s3fs>=2024.1"]
 
 [tool.setuptools.packages.find]
 include = ["spider_hoarder_sdk*"]

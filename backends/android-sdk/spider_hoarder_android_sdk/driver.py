@@ -2,6 +2,7 @@
 the gateway starts and resets them over their control channel (slots.py) and proxies MCP tool calls to the tool server
 inside. No uid pool, sessiond or firewall in the gateway container. See docs/implemented-plans/android-hoarder.md."""
 
+import asyncio
 import json
 import os
 import socket
@@ -14,7 +15,7 @@ from spider_hoarder_android_sdk import slots
 from spider_hoarder_sdk.content import storage
 from spider_hoarder_sdk.gateway import projects
 from spider_hoarder_sdk.gateway.driver import Driver, sessions
-from spider_hoarder_sdk.gateway.jobs import (MAX_FILE_BYTES, _check_rel_path, _job_name, _key, _new_job, _schema, _store_file,
+from spider_hoarder_sdk.gateway.jobs import (MAX_FILE_BYTES, _check_rel_path, _ctype, _job_name, _key, _new_job, _schema, _store_and_parse,
                                              _text)
 from spider_hoarder_sdk.gateway.pool import Pool
 
@@ -166,6 +167,6 @@ class AndroidDriver(Driver):
             raw = await slots.backend.fetch_out(bs.uid, private, MAX_FILE_BYTES)
         except (OSError, ValueError, httpx.HTTPError) as e:
             return _text(f"{name} produced no readable output file ({e}). Upstream said: {sessions.result_text(res)}", True)
-        result = _store_file(key, jname, raw)
+        result = await asyncio.to_thread(_store_and_parse, key, jname, raw, _ctype(jname))
         storage.set_meta(key, keep_none=("text_cap",))
         return _text(json.dumps({"job_id": job_id, **result}))

@@ -32,7 +32,55 @@ def fresh_store() -> str:
     except KeyError:
         raise RuntimeError("the tests need an object store: run them through scripts/test.sh (it starts a SeaweedFS), or set TEST_BLOB_URL and TEST_BLOB_OPTIONS") from None
     storage.BLOB_URL, storage.BLOB_OPTIONS = f"{base.rstrip('/')}/{uuid.uuid4()}", json.loads(opts)
+    if _parser:  # a running parser service follows the store
+        _parser.cfg.blob_url = storage.BLOB_URL
     return storage.BLOB_URL
+
+
+_parser = None
+# the real parser worker minus the metadata extractors (they need exiftool and ffprobe, which dev machines lack)
+NO_METADATA = [sys.executable, "-I", "-u", "-c", "import sys\nfrom spider_hoarder_parser import metadata, worker\n"
+               "metadata.extract_metadata = lambda *a, **k: {}\nworker.main(sys.argv[1])"]
+PARSE_TOKEN = "test-parse-token"
+
+
+class ParserService:
+    """A parser wrapper (docs/plans/parser-wrapper.md) in a thread of the test process, on the current test store; not root, so its
+    parser runs as the test's own uid. Needs spider-hoarder-parser installed (test dependency only)."""
+
+    def __init__(self, ocr_profiles: dict | None = None, **cfg):
+        import socket
+        import tempfile
+        import threading
+        import time
+        import uvicorn
+        from spider_hoarder_parser import wrapper
+        from spider_hoarder_sdk.content import storage
+        fresh_store()
+        opts = {k: v for k, v in storage.BLOB_OPTIONS.items() if k not in ("key", "secret", "token")}  # credentials come per job
+        self.cfg = wrapper.Config(PARSE_TOKEN, storage.BLOB_URL, opts, ocr_profiles, tempfile.mkdtemp(), pool_size=cfg.pop("pool_size", 2), **cfg)
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        self.server = uvicorn.Server(uvicorn.Config(wrapper.make_app(self.cfg), host="127.0.0.1", port=port, log_level="warning"))
+        threading.Thread(target=self.server.run, daemon=True).start()
+        while not self.server.started:
+            time.sleep(0.05)
+        self.url = f"http://127.0.0.1:{port}"
+        self.wrapper = self.server.config.app.state.wrapper
+
+    def stop(self):
+        self.server.should_exit = True
+
+
+def start_parser(**cfg) -> "ParserService":
+    """Start a parser service for the rest of the process and point the gateway's PARSE_URL / PARSE_TOKEN at it (tests of parsing)."""
+    global _parser
+    cfg.setdefault("parser_cmd", NO_METADATA)
+    _parser = ParserService(**cfg)
+    os.environ.update(PARSE_URL=_parser.url, PARSE_TOKEN=PARSE_TOKEN)
+    return _parser
 
 
 def new_job(owner="a@b.c", proj=None) -> tuple[str, str]:

@@ -1,6 +1,6 @@
 # Plan: projects, shared access and per-session scoped storage credentials
 
-See also [Plan: parser wrapper](../plans/parser-wrapper.md) (consumes the scoped credentials and the key layout defined here),
+See also [Plan: parser wrapper](../implemented-plans/parser-wrapper.md) (consumes the scoped credentials and the key layout defined here),
 [Jobs, storage and links](../architecture/jobs-and-storage.md) (today's `<owner>/<uuid>` layout and links), [Auth](../architecture/auth.md),
 [Scaling](../architecture/scaling.md) (`rid`), [Session isolation](../architecture/session-isolation.md).
 
@@ -13,7 +13,7 @@ is entirely in the gateway, which holds one credential for the whole store. Weak
 - the sanitising `re.sub(r"[^a-z0-9._@-]", "_", owner)` can map two emails to one prefix (cross-user access), and the signed link tokens carry the
   readable owner email to whoever receives the link;
 - jobs are tied to one gateway replica (`job_id` = `<rid>.<uuid>`, per-replica disk), so a replica restart or reschedule loses them;
-- any component that gets storage access gets all of it. The parser wrapper ([Plan: parser wrapper](../plans/parser-wrapper.md)) must be able to write only
+- any component that gets storage access gets all of it. The parser wrapper ([Plan: parser wrapper](../implemented-plans/parser-wrapper.md)) must be able to write only
   what it is parsing.
 
 Goal: named **projects** with per-user roles, jobs keyed by project and session, **short-lived credentials limited to one project's read side and one

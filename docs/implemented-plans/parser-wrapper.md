@@ -1,10 +1,10 @@
 # Plan: parser service with a storage wrapper, a no-secret parser uid, an OCR sidecar and an authenticated egress proxy
 
-See also [Plan: file metadata](../implemented-plans/file-metadata.md) (its child-process isolation is superseded by this plan),
+See also [Plan: file metadata](file-metadata.md) (its child-process isolation is superseded by this plan),
 [Jobs, storage and links](../architecture/jobs-and-storage.md), [Session isolation](../architecture/session-isolation.md) (the uid lifecycle and the
 `browser_clear` egress rules this plan copies), [Backend plugins](../architecture/backend-plugins.md) (overlay contract),
-[Plan: OCR hybrid](ocr-hybrid.md) (its remote step moves to the OCR sidecar below).
-**Depends on [Plan: project access model](../implemented-plans/project-access-model.md)**: the key layout (`projects/<proj>/data/<session>/<job>/…`), the three-part job
+[Plan: OCR hybrid](../plans/ocr-hybrid.md) (its remote step moves to the OCR sidecar below).
+**Depends on [Plan: project access model](project-access-model.md)**: the key layout (`projects/<proj>/data/<session>/<job>/…`), the three-part job
 reference, the shared bucket and the per-job scoped credentials are defined there; this plan only uses them.
 
 ## Problem / Goal
@@ -56,7 +56,7 @@ part of this plan.
 
 1. The gateway (browser `out/` collection, upload, `ingest_page`, ...) streams the original into the blob store as today
    (`projects/<proj>/data/<session>/<job>/original/<path>`), then mints the job's scoped credential
-   ([project access model](../implemented-plans/project-access-model.md): read the project's `data/`, write only `<session>/<job>/`, 900 s) and calls the wrapper.
+   ([project access model](project-access-model.md): read the project's `data/`, write only `<session>/<job>/`, 900 s) and calls the wrapper.
 2. `POST <wrapper>/jobs/<proj>/<session>/<job>` with the wrapper token and the scoped credential; body `{path, content_type, base_url?, unzip?, features?}`.
    `features` (see "Remote OCR") is `{"ocr": "<profile>"}` or absent; an unknown feature key or an unknown profile name is a **400**. The wrapper
    builds the storage key itself from the three uuids (validated against the UUID regex), never from a caller-supplied path; the gateway has
@@ -65,7 +65,7 @@ part of this plan.
    **503** if no parser uid is free.
 3. The wrapper pulls the original from the blob store **through the proxy** into the parser's input directory (disk scratch volume, not tmpfs), writes the
    request (`path`, `content_type`, `base_url`, `unzip`, `features`) as a job file next to it, then
-   starts the parser as the reserved uid: `setgid/setuid`, minimal environment (above), `umask 027`, `setsid`, `RLIMIT_AS` 2 GiB, `RLIMIT_NPROC`, `RLIMIT_NOFILE`,
+   starts the parser as the reserved uid: `setgid/setuid`, minimal environment (above), `umask 027`, `setsid`, `RLIMIT_AS` 6 GiB, `RLIMIT_NPROC`, `RLIMIT_NOFILE`,
    `RLIMIT_FSIZE` 4 GiB, `no-new-privileges`, all inherited fds closed. Wall-clock limit **10 min** per job, then the whole process group is killed.
 4. The parser writes finished artefacts into its output directory and announces each on **stdout, which is a pipe to the wrapper**: one JSON record per
    line, `{"path": ..., "content_type": ...}`, written with one `os.write` on a private fd (each record under `PIPE_BUF`, so atomic).
@@ -120,7 +120,7 @@ replacing the `OCR_BASE_URL_<BACKEND>` variables of the OCR plan).
 
 ### Remote OCR (sidecar)
 
-The remote step of [Plan: OCR hybrid](ocr-hybrid.md) cannot run in the parser (no egress, no credentials), so it is a separate container. Tesseract and
+The remote step of [Plan: OCR hybrid](../plans/ocr-hybrid.md) cannot run in the parser (no egress, no credentials), so it is a separate container. Tesseract and
 rasterising/downscaling stay in the parser (`ocr.py` moves into `parser/`).
 
 - **`ocr-sidecar`**: a stateless forwarder. `POST` with the image bytes (PNG/JPEG, already downscaled by the parser to `OCR_MAX_SIDE`) and
@@ -255,7 +255,7 @@ authenticated by token. One parser per job, forked by the wrapper, no warm pool 
 6. ~~**Cleanup of partial jobs.**~~ **Decided: nothing in this plan.** A failed job keeps its uploaded artefacts, its `index.json` (with the failure noted) and
    `failed` status; partial results stay readable and a retry overwrites the same keys. Removing old data is a general retention question for the whole
    `data/` tree (for example a bucket lifecycle rule), outside this plan.
-7. ~~**OCR cold start**~~ ([OCR hybrid](ocr-hybrid.md), open question 2) **Decided:** the OCR plan's default stands. A self-hosted model may take minutes
+7. ~~**OCR cold start**~~ ([OCR hybrid](../plans/ocr-hybrid.md), open question 2) **Decided:** the OCR plan's default stands. A self-hosted model may take minutes
    to start; the first call after idle times out (`OCR_TIMEOUT`), the Tesseract text is kept and the note says the remote step failed. No longer
    timeout and no warm-up call; revisit with measured cold-start times.
 8. ~~**`_describe_file`**~~ **Decided: one path.** Today the gateway has two ways from an original to the `original/`, `parsed/`, `terse/`, `metadata/` tree:
@@ -268,14 +268,47 @@ authenticated by token. One parser per job, forked by the wrapper, no warm pool 
 
 ## Limits (starting values, not measured)
 
-Parser uid pool 4 per container (= parallel parses; further POSTs get 503); container memory limit 8 GiB; per-parser `RLIMIT_AS` 2 GiB; job wall clock
+Parser uid pool 4 per container (= parallel parses; further POSTs get 503); container memory limit 8 GiB; per-parser `RLIMIT_AS` 6 GiB; job wall clock
 10 min (metadata extractors keep their 30 s); heartbeat 10 s, stale after 30 s; gateway poll 50 ms to 1 s, timeout 12 min; `MAX_PARSE_BYTES`,
 `MAX_ARCHIVE_*` unchanged, now enforced in the parser; scratch on a disk-backed, ephemeral (not named-volume) area sized for about 4 × the largest expected archive, wiped after every job; sidecar body cap and
 concurrency cap (values to set when implementing).
 
+## As implemented (differences from the text above)
+
+Decided with the user while implementing; where this section and the text above disagree, this section wins.
+
+- **A parse job is a whole job, not one file.** An archive must be unpacked in the parser, so the unit is the job directory: the POST has no `path`, `content_type` or
+  `unzip`; the body is `{credentials, base_url?, features?}`. The gateway stores every original first (`jobs._store_original` / `_store_tree`, one manifest), then
+  parses once (`jobs._parse_job`); the parser walks `original/`, unpacks archives itself (members are parsed, never unpacked again) and produces `parsed/`, `simplified/`,
+  `terse/`, `metadata/` and the members under `original/<archive>.d/`. One `status.json` and one `index.json` per job; the wrapper reads the existing `index.json`
+  (the gateway's `original/…` entries, `url`, `target`, …) first and writes the merged manifest, so nothing the gateway wrote is lost, also when the pull fails. The gateway must not
+  write `index.json` between the POST and `done`.
+- **A job that is `done` (or `failed`) may be POSTed again** instead of answering 409: an upload link adds files to the same job over time and each batch is one more parse
+  (same artefacts, same keys). 409 is only for a running job with a fresh heartbeat. `<x>.d/` members already next to their archive in `original/` are parsed but not unpacked again.
+- **Records**: besides `{path, content_type}` the parser may announce `{path: original/…, text: true}` (marks a manifest entry as text) and `{note}`; the wrapper writes the
+  notes into `index.json` as `not parsed (…)` for failures. A protocol violation fails the job.
+- **OCR scope**: `docs/plans/ocr-hybrid.md` is not implemented (no Tesseract, no rasterising), so there was nothing to move. Built here: `features.ocr` validation and profile lookup,
+  the wrapper injecting only the requested profile's `OCR_URL`/`OCR_TOKEN`, `parser/ocr.py` (the sidecar client, no-op without those variables) and the `ocr-sidecar`
+  itself. The OCR plan adds Tesseract and rasterising to the parser and calls `ocr.remote_ocr`.
+- **Latency numbers and the step 8 benchmark**: not measured (`scripts/bench_parse.py` not written); there is no warm worker pool. Real-swarm verification (step 7) was not run
+  here; see the verification notes in the hand-over.
+- **Limits measured**: `RLIMIT_AS` 2 GiB made trafilatura raise `MemoryError` on a real page (dn.no); it is `PARSE_RLIMIT_AS`, default 6 GiB. `RLIMIT_NPROC` 1024 per pool uid (it counts threads).
+- **Capabilities**: the wrapper runs as uid 900 with ambient caps; the parser launch clears the ambient set (otherwise they survive `setuid`/exec), and the wrapper reaches artefacts through its group (setgid `out/`, parser umask 007), not `CAP_DAC_OVERRIDE`. Pool uids are real when the wrapper has `CAP_SETUID`, not only as euid 0. gcsfs ignores `HTTP(S)_PROXY` unless `session_kwargs={"trust_env": True}`, which the wrapper sets for `gs://`.
+- **Found only on the live swarm** (and fixed): the gateway images lost `boto3` when the parser dependencies left `sdk/pyproject.toml` (it came in through `markitdown[all]`), so
+  `creds.mint` failed and parsing degraded to a note: the Dockerfiles now install the `boto3` that matches the installed `botocore` in a second step; the OCR sidecar could not resolve
+  names after its egress rules (Docker's embedded resolver `127.0.0.11` is NATed to a random port before the filter table, so it is accepted on any port, as the browser firewall does);
+  `Popen(cwd=)` and `preexec_fn` run before the uid switch, so the parser does its own `chdir`; `tini` needs `CAP_KILL` to stop squid (uid `proxy`).
+- **Verified live** (`tests/live/e2e_parser.py`, dn.no, `--dev` stack): ingest/save_page/screenshot/pdf/network-request jobs, upload with a zip-slip archive and a 1 GiB zip bomb (unpacked in the
+  parser, member kept and not parsed), 6 concurrent ingests, two replicas (status reads on the non-owner replica), a one-parser pool (503, one retry, a note, the original kept); the parser uid
+  gets 407 from the proxy without or with a wrong token, has no route out, no capability and cannot read the wrapper's `/proc/<pid>/environ` or the scratch root; the proxy blocks the metadata
+  server, private addresses and loopback and passes `https://dn.no`; the OCR sidecar answers 401 / 415 / the profile's text, holds the `bearer` key itself and reaches only its pinned endpoint.
+  **GCS**: a throwaway bucket, the gateway's downscoped token (writes inside the job only), the parser container on an internal network with only the proxy: parse done through the proxy.
+- **Squid**: passwords are `apr1` (MD5) entries made with `openssl passwd` (squid 6's `basic_ncsa_auth` no longer accepts `{SHA}`); the proxy's own uid keeps loopback (v4 and v6),
+  which squid's helper channel needs. The proxy container needs `NET_ADMIN`, `SETUID`, `SETGID`, `SETPCAP` (to drop its bounding set).
+
 ## Implementation order
 
-0. The [project access model](../implemented-plans/project-access-model.md) steps 1 to 6 first (layout, credentials, SeaweedFS in dev); this plan assumes them.
+0. The [project access model](project-access-model.md) steps 1 to 6 first (layout, credentials, SeaweedFS in dev); this plan assumes them.
    Independent bugfixes that can land first on the current code: `ffprobe -protocol_whitelist file`, drop `.vrt` from the raster extensions.
 1. Verify the unknowns. **Done:** `s3fs` through an HTTP proxy with credentials and a session token (see decision 3). **Still to verify:** SeaweedFS
    behind the proxy rules with the exception in place (the test ran squid without the firewall rules), STS-issued scoped credentials from the project access

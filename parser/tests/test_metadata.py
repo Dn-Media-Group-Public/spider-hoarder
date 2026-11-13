@@ -1,4 +1,5 @@
-"""File metadata: the extractors, the child-process limits, and the job integration (metadata/<path>.yaml)."""
+"""File metadata: the extractors, the child-process limits, and the parse integration (metadata/<path>.yaml). Needs exiftool and ffprobe
+(the parser image has them); tests of what is missing skip."""
 
 import io
 import shutil
@@ -9,12 +10,7 @@ import zipfile
 import pytest
 import yaml
 
-from spider_hoarder_sdk import testing
-
-testing.gateway_env()
-
-from spider_hoarder_sdk.content import metadata, storage
-from spider_hoarder_sdk.gateway import jobs
+from spider_hoarder_parser import metadata, parse
 
 pytestmark = pytest.mark.metadata
 
@@ -43,11 +39,6 @@ def extract(name: str, data: bytes, ctype: str = "application/octet-stream"):
         open(path, "wb").write(data)
         meta = metadata.extract_metadata(path, ctype, name, notes)
     return meta, [n for n in notes if "exiftool" not in n and "media" not in n]
-
-
-def job(monkeypatch):
-    testing.fresh_store()
-    return testing.new_job("a@x.y")[1]
 
 
 def test_office_revisions_comments_and_hostile_xml():
@@ -133,8 +124,6 @@ def test_limits_contain_children(monkeypatch):
     with pytest.raises(RuntimeError):
         metadata._run(["false"], tmp)
     assert metadata._run(["echo", "ok"], tmp).strip() == b"ok"
-    if metadata._sandbox():
-        assert metadata._run([sys.executable, "-I", "-c", "import socket; print(len(socket.if_nameindex()))"], tmp).strip() == b"1"  # only lo
     assert metadata._run(["env"], tmp).count(b"\n") <= 5  # scrubbed environment
 
 
@@ -145,24 +134,20 @@ def test_dump_truncates(monkeypatch):
     assert truncated and len(text) <= 2000 and yaml.safe_load(text)["SpiderHoarder-Office"]["Truncated"] is True
 
 
-def test_jobs_write_metadata_yaml(monkeypatch):
-    key = job(monkeypatch)
-    paths = lambda r: {f["path"] for f in r["files"]}
-    r = jobs._store_and_parse(key, "p.geojson", GEOJSON, "application/geo+json")
-    assert "metadata/p.geojson.yaml" in paths(r)
-    assert yaml.safe_load(storage.read_text(key, "metadata/p.geojson.yaml"))["SpiderHoarder-Vector"]["Layers"]
-    assert next(f for f in r["files"] if f["path"] == "metadata/p.geojson.yaml")["content_type"] == "application/yaml"
-    monkeypatch.setattr(jobs, "MAX_PARSE_BYTES", 10)  # oversize: not parsed, still gets metadata
-    r = jobs._store_and_parse(key, "big.geojson", GEOJSON, "application/geo+json")
-    assert "metadata/big.geojson.yaml" in paths(r) and "parsed/big.geojson.md" not in paths(r) and any("not parsed" in n for n in r["notes"])
-    monkeypatch.setattr(jobs, "MAX_PARSE_BYTES", 50 << 20)
+def test_parse_writes_metadata_yaml(run, monkeypatch):
+    s = run({"p.geojson": (GEOJSON, "application/geo+json")})
+    assert yaml.safe_load(s.files["metadata/p.geojson.yaml"])["SpiderHoarder-Vector"]["Layers"]
+    monkeypatch.setattr(parse, "MAX_PARSE_BYTES", 10)  # oversize: not parsed, still gets metadata
+    s = run({"big.geojson": (GEOJSON, "application/geo+json")})
+    assert "metadata/big.geojson.yaml" in s.files and "parsed/big.geojson.md" not in s.files and any("not parsed" in n for n in s.notes)
+    monkeypatch.setattr(parse, "MAX_PARSE_BYTES", 50 << 20)
     b = io.BytesIO()
     with zipfile.ZipFile(b, "w") as z:
         z.writestr("m.geojson", GEOJSON)
-    assert "metadata/z.zip.d/m.geojson.yaml" in paths(jobs._store_and_parse(key, "z.zip", b.getvalue(), "application/zip"))
-    assert "metadata/n.txt.yaml" not in paths(jobs._store_and_parse(key, "n.txt", b"hello", "text/plain"))
+    assert "metadata/z.zip.d/m.geojson.yaml" in run({"z.zip": (b.getvalue(), "application/zip")}).files
+    assert "metadata/n.txt.yaml" not in run({"n.txt": (b"hello", "text/plain")}).files
     monkeypatch.setattr(metadata, "MAX_BYTES", 400)
     revs = "".join('<w:ins w:author="A" w:date="d"><w:r><w:t>t</w:t></w:r></w:ins>' for _ in range(100))
-    r = jobs._store_and_parse(key, "t.docx", docx(f"<w:p>{revs}</w:p>"), "application/octet-stream")
-    assert any("metadata truncated" in n for n in r["notes"])
-    assert yaml.safe_load(storage.read_text(key, "metadata/t.docx.yaml"))["SpiderHoarder-Office"]["Truncated"] is True
+    s = run({"t.docx": docx(f"<w:p>{revs}</w:p>")})
+    assert any("metadata truncated" in n for n in s.notes)
+    assert yaml.safe_load(s.files["metadata/t.docx.yaml"])["SpiderHoarder-Office"]["Truncated"] is True

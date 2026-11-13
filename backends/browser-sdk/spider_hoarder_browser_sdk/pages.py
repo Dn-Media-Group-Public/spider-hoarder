@@ -114,7 +114,7 @@ async def ingest_page(egress, owner: str, url: str, live: Session | None = None,
     else:
         raw, ctype = await asyncio.to_thread(fetch.download, egress, url, policy, **kw)
     filename = os.path.basename(url.split("?")[0]) or "page"
-    result = _store_and_parse(key, filename, raw, ctype, url)
+    result = await asyncio.to_thread(_store_and_parse, key, filename, raw, ctype, url)
     storage.set_meta(key, url=url, target=target if "html" in ctype else None)
     return {"job_id": job_id, **result, **_meta(key)}
 
@@ -122,6 +122,6 @@ async def ingest_page(egress, owner: str, url: str, live: Session | None = None,
 async def save_page(bs: Session, browser: str | None = None, target: str | None = None) -> dict:
     job_id, key = _new_job(bs.owner, bs.sid)
     html, url = await page_html(bs, browser, target)
-    result = _store_and_parse(key, "page.html", html.encode(), "text/html", url)
+    result = await asyncio.to_thread(_store_and_parse, key, "page.html", html.encode(), "text/html", url)
     storage.set_meta(key, url=url, target=target)
     return {"job_id": job_id, **result, **_meta(key)}

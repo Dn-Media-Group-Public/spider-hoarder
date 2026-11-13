@@ -3,7 +3,6 @@
 Plans awaiting implementation or kept as background. Implemented plans move to [implemented-plans](../implemented-plans/index.md).
 
 - [OCR: Tesseract first, remote multimodal model fallback](ocr-hybrid.md) — needs the lightllm plan `ocr-vision-models.md` for the default remote model
-- [Parser wrapper](parser-wrapper.md) — the parser container pulls from and writes to the blob store itself: a wrapper with the credentials, a no-secret parser uid, an authenticated egress proxy; POST/poll status; supersedes the child-process isolation of the file-metadata plan, amends the OCR plan
 - [gVisor runtime](gvisor-runtime.md) — stub
 - [Metrics and structured logs](metrics-and-logging.md) — stub
 - [`mcp` 2.x SDK port](mcp-sdk-2-migration.md) — stub

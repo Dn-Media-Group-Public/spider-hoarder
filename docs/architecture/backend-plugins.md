@@ -92,6 +92,10 @@ The base `docker-compose.yml` keeps only nginx, oauth2-proxy and the shared `pub
 - sets `BACKEND=<canonical name>`, `BACKENDS: ${BACKENDS}` and `BACKEND_SERVERS: ${BACKEND_SERVERS}` in its gateway's environment;
 - uses per-backend variable names (`<NAME>_REPLICAS`, `ANDROID_TOR_SLOTS`, ...).
 
+The parser service wires itself to every enabled backend: `deploy.sh` generates `.build/docker-compose.parse-gateways.yml`, which adds a network `<name>-parse`
+(internal: one shared network would let the gateways reach each other) with only that gateway and the shared `parser` on it, and `PARSE_URL`, `PARSE_TOKEN` and
+`PARSE_OCR` (from `<NAME>_PARSE_OCR`) to `<name>-gateway`. An overlay does not write any of it. See also: [Plan: parser wrapper](../implemented-plans/parser-wrapper.md)
+
 `scripts/spider_hoarder.py validate` checks the prefix rule and the gateway's environment and refuses a bad overlay.
 
 Each backend owns its helpers: two Tor daemons run if `browser_tor` and `android_tor` are both enabled, and the browser daemon needs no
