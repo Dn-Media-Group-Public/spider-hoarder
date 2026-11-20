@@ -37,7 +37,8 @@ Documentation (architecture, API, design decisions): [docs/index.md](docs/index.
 ## Quick start
 
 ```bash
-git clone --recurse-submodules <this repo>   # the parser service is the submodule lib/cadmus-parser (or: git submodule update --init)
+git clone --recurse-submodules git@github.com:Dn-Media-Group-Public/spider-hoarder.git   # the parser service is the submodule lib/cadmus-parser (or: git submodule update --init)
+cd spider-hoarder
 cp .env.example .env   # fill in PUBLIC_HOST, OIDC_ISSUER and the secrets
 ./deploy.sh            # prod: builds the images and deploys the stack (Docker Swarm)
 ./deploy.sh --dev      # local: same stack + a local Keycloak, http://localhost:7297, no TLS
