@@ -1,0 +1,110 @@
+# Memory limits == reservations per service (swarm schedules on reservations only, so a node is never packed beyond its RAM).
+# docker-compose.resources.yml is gitignored (per-host tuning) and added to `docker stack deploy` by deploy.sh when present;
+# docker-compose.resources.yml.example is the committed copy to start from. Keep the two in sync when the defaults change.
+# Only memory is set here: other deploy settings (replicas, placement, cpus) come from the base files.
+version: "3.8"
+services:
+  nginx:
+    deploy:
+      resources:
+        limits: { memory: 128M }
+        reservations: { memory: 128M }
+
+  oauth2-proxy:
+    deploy:
+      resources:
+        limits: { memory: 128M }
+        reservations: { memory: 128M }
+
+  # was 8g in the base file; observed ~120 MB idle. PARSE_MEMORY still overrides
+  parser:
+    deploy:
+      resources:
+        limits: { memory: ${PARSE_MEMORY:-2g} }
+        reservations: { memory: ${PARSE_MEMORY:-2g} }
+
+  blob-sidecar:
+    deploy:
+      resources:
+        limits: { memory: 256M }
+        reservations: { memory: 256M }
+
+  seaweedfs:
+    deploy:
+      resources:
+        limits: { memory: 1G }
+        reservations: { memory: 1G }
+
+  # was 12g in the base file (guards against a runaway session); observed ~150-200 MB idle
+  browser-clear-gateway:
+    deploy:
+      resources:
+        limits: { memory: 2g }
+        reservations: { memory: 2g }
+
+  # as browser-clear-gateway
+  browser-tor-gateway:
+    deploy:
+      resources:
+        limits: { memory: 2g }
+        reservations: { memory: 2g }
+
+  browser-tor-daemon:
+    deploy:
+      resources:
+        limits: { memory: 128M }
+        reservations: { memory: 128M }
+
+  # as browser-clear-gateway
+  browser-i2p-gateway:
+    deploy:
+      resources:
+        limits: { memory: 2g }
+        reservations: { memory: 2g }
+
+  browser-i2p-router:
+    deploy:
+      resources:
+        limits: { memory: 256M }
+        reservations: { memory: 256M }
+
+  browser-i2p-seed:
+    deploy:
+      resources:
+        limits: { memory: 128M }
+        reservations: { memory: 128M }
+
+  # was 2g in the base file; observed ~80-115 MB
+  android-clear-gateway:
+    deploy:
+      resources:
+        limits: { memory: 512m }
+        reservations: { memory: 512m }
+
+  # as android-clear-gateway
+  android-tor-gateway:
+    deploy:
+      resources:
+        limits: { memory: 512m }
+        reservations: { memory: 512m }
+
+  android-tor-daemon:
+    deploy:
+      resources:
+        limits: { memory: 128M }
+        reservations: { memory: 128M }
+
+  # The wrappers create the slot containers (plain containers, not swarm tasks), so each wrapper carries its slots' memory:
+  # slots per wrapper (ANDROID_SLOTS_PER_REPLICA 2 / ANDROID_KVM_NODES 2 = 1) x ANDROID_SLOT_MEMORY (8g). Change them together.
+  android-clear-wrapper:
+    deploy:
+      resources:
+        limits: { memory: 8g }
+        reservations: { memory: 8g }
+
+  # as android-clear-wrapper
+  android-tor-wrapper:
+    deploy:
+      resources:
+        limits: { memory: 8g }
+        reservations: { memory: 8g }
