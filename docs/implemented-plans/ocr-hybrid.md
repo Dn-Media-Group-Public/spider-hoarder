@@ -1,6 +1,8 @@
 # Plan: OCR in the parse step (Tesseract first, remote multimodal model as fallback)
 
 > **Amended by [Plan: parser wrapper](parser-wrapper.md) (implemented):** parsing runs in the parser service, so `ocr.py` lives in `parser/spider_hoarder_parser/` (the sidecar client is there already: `ocr.remote_ocr`), the hook is `parse.py` instead of `gateway/jobs.py::_parse_one`, and the remote step is the `ocr-sidecar` with named profiles selected per backend (`<BACKEND>_PARSE_OCR`, `OCR_PROFILES`) instead of `OCR_BASE_URL_<BACKEND>` variables. Tesseract and rasterising are implemented as below.
+>
+> **Amended by [Plan: the parser service as a library](parse-sandbox-library.md) (implemented):** `ocr.py` now lives in the library's `cadmus_parser_server` package (the `files` processor), and the remote step speaks the common sidecar protocol: `POST /process`, the image as the body, the transcript as the `text/plain` response.
 
 The code is written against any OpenAI-compatible `/v1/chat/completions` endpoint and can ship first with Tesseract only; no particular remote service is assumed.
 

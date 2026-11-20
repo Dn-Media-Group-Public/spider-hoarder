@@ -14,14 +14,15 @@ dependencies = [
     "PyJWT[crypto]",
     "fsspec",
     "python-multipart",
+    "cadmus-parser",  # the parser service client and the credential minting helper (lib/cadmus-parser/client); the images install it from the submodule
 ]
 
 [project.optional-dependencies]
 # S3-compatible stores (scoped credentials need boto3). There is no `gcs` extra on purpose: gcsfs -> google-cloud-storage needs a protobuf that
-# blackboxprotobuf's stale `protobuf==3.10.0` pin forbids (blackboxprotobuf is the parser's, parser/pyproject.toml), so the images install
+# blackboxprotobuf's stale `protobuf==3.10.0` pin forbids (blackboxprotobuf is the parser's, lib/cadmus-parser/server/pyproject.toml), so the images install
 # GCS support in a second step:
 #   pip install gcsfs google-auth      (pip only warns about the pin)
-# boto3 (scoped credentials, gateway/creds.py) is not a dependency here: a bare one makes pip backtrack to s3fs 0.4.2 and recent aiobotocore has no [boto3]
+# boto3 (scoped credentials, gateway/creds.py via cadmus_parser.minting) is not a dependency here: a bare one makes pip backtrack to s3fs 0.4.2 and recent aiobotocore has no [boto3]
 # extra, so the gateway images install the boto3 that matches the installed botocore in a second step (`pip install --no-deps boto3==<botocore version> s3transfer`)
 s3 = ["s3fs>=2024.1"]
 

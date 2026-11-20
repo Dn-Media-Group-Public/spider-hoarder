@@ -12,6 +12,10 @@
 set -e
 cd "$(dirname "$0")"
 
+# The parser service is a library in a git submodule (lib/cadmus-parser, docs/implemented-plans/parse-sandbox-library.md)
+git submodule update --init lib/cadmus-parser
+[ -f lib/cadmus-parser/docker-compose.parse.yml ] || { echo "lib/cadmus-parser is empty: run git submodule update --init" >&2; exit 1; }
+
 STACK=spider-hoarder
 DEV=0
 DEV_KC=0
@@ -79,7 +83,7 @@ done
 source .venv/bin/activate
 pip install -q pyyaml
 # shellcheck disable=SC2086
-pip install -q --no-deps --force-reinstall ./sdk ./parser ./backends/*/ ${BACKEND_PACKAGES:-}
+pip install -q --no-deps --force-reinstall ./sdk ./lib/cadmus-parser/client ./lib/cadmus-parser/server ./backends/*/ ${BACKEND_PACKAGES:-}
 
 TOOL="python scripts/spider_hoarder.py"
 $TOOL validate
@@ -127,7 +131,7 @@ if [ "$DEV" -eq 1 ]; then
   FILES+=(-c docker-compose.dev.yml -c .build/docker-compose.dev-gateways.yml)
 fi
 $TOOL parse-overlay .build/docker-compose.parse-gateways.yml
-FILES+=(-c docker-compose.parse.yml -c .build/docker-compose.parse-gateways.yml)
+FILES+=(-c lib/cadmus-parser/docker-compose.parse.yml -c .build/docker-compose.parse-gateways.yml)
 mapfile -t BACKEND_FILES < <($TOOL compose)
 FILES+=("${BACKEND_FILES[@]}")
 if [ -n "${PIN_DATA:-}" ]; then

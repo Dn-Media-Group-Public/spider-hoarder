@@ -1,5 +1,6 @@
-"""Per-job store credentials: the policies, and against the real test store (SeaweedFS, scripts/test.sh) what a minted credential can
-read, write and list, that releasing / revoking / sweeping ends it, and that a failure never leaves a role or a fallback behind."""
+"""Per-job store credentials, this project's policy (project-wide read, job-scoped write) on the cadmus-parser minting helper: the grants, and against
+the real test store (SeaweedFS, scripts/test.sh) what a minted credential can read, write and list, that releasing / revoking / sweeping ends it,
+and that a failure never leaves a role or a fallback behind."""
 
 import json
 import urllib.request
@@ -27,17 +28,11 @@ def denied(fn):
     return False
 
 
-def test_policies():
-    pol = creds.s3_policy("bkt", "pre/fix", P, S, J)
-    rd, wr, ls = pol["Statement"]
-    assert rd == {"Effect": "Allow", "Action": "s3:GetObject", "Resource": f"arn:aws:s3:::bkt/pre/fix/projects/{P}/data/*"}
-    assert wr["Resource"] == f"arn:aws:s3:::bkt/pre/fix/projects/{P}/data/{S}/{J}/*" and "s3:GetObject" not in wr["Action"]
-    assert ls["Action"] == "s3:ListBucket" and ls["Resource"] == "arn:aws:s3:::bkt" and ls["Condition"] == {"StringLike": {"s3:prefix": f"pre/fix/projects/{P}/data/*"}}
-    assert all(a.startswith("s3:") for st in pol["Statement"] for a in ([st["Action"]] if isinstance(st["Action"], str) else st["Action"]))
-    assert len(json.dumps(pol, separators=(",", ":"))) < 2048 and "access.json" not in json.dumps(pol)
-    assert f"projects/{P}/data/" in creds.s3_policy("bkt", "", P, S, J)["Statement"][0]["Resource"]
-    rules = creds.cab_rules("bkt", "", P, S, J)
-    assert len(rules) <= 10 and f"objects/projects/{P}/data/{S}/{J}/" in rules[1]["condition"] and "objectListPrefix" in rules[0]["condition"]
+def test_grants_and_urls():
+    key = storage.job_key(P, S, J)
+    root = storage.BLOB_URL.rstrip("/")
+    assert creds.urls(key) == (f"{root}/projects/{P}/data", f"{root}/{key}/original", f"{root}/{key}")
+    assert creds.grants(key) == [(f"{root}/projects/{P}/data", "read"), (f"{root}/{key}", "write")]  # project-wide read, the job's own directory for write
 
 
 @pytest.fixture
@@ -47,8 +42,9 @@ def store():
     return storage
 
 
-def reader(c):
-    fs, root = storage._abs("", c.options)
+def reader(h, key):
+    """(fs, path-of-key) with the job credential: the read side for project data, the write side for the job directory."""
+    fs, root = storage._abs("", h[creds.urls(key)[2]])
     return fs, lambda k: f"{root.rstrip('/')}/{k}"
 
 
@@ -57,9 +53,10 @@ def test_matrix(store):
     store.write_object(f"projects/{P}/data/other/job/seen.txt", b"seen")
     store.write_object(f"projects/{Q}/data/s/j/foreign.txt", b"x")
     store.write_object(f"users/a@x.y/{P}", b"admin")
-    c = creds.mint(P, S, J)
+    key = storage.job_key(P, S, J)
+    c = creds.mint(key)
     try:
-        fs, p = reader(c)
+        fs, p = reader(c, key)
         base = f"projects/{P}"
         # read the project's data side, nothing else
         assert fs.cat_file(p(f"{base}/data/other/job/seen.txt")) == b"seen"
@@ -80,7 +77,7 @@ def test_matrix(store):
         for k in (base, "projects", f"projects/{Q}", f"projects/{Q}/data", "users", ""):
             assert denied(lambda: fs.ls(p(k), detail=False)), k
     finally:
-        c.release()
+        creds.release(c)
     # the gateway's own credential is unaffected, and presigned URLs still work
     assert store.read_object(f"projects/{P}/access.json") == b"{}"
     import boto3
@@ -94,20 +91,35 @@ def test_matrix(store):
 def test_release_revoke_and_sweep_end_the_credential(store):
     store.write_object(f"projects/{P}/data/o/j/a.txt", b"a")
     store.write_object(f"projects/{Q}/data/o/j/a.txt", b"a")
-    ok = lambda c: reader(c)[0].cat_file(reader(c)[1](f"projects/{P}/data/o/j/a.txt")) == b"a"
-    a, b, other = creds.mint(P, S, J), creds.mint(P, S, J2), creds.mint(Q, S, str(uuid.uuid4()))
-    assert ok(a) and ok(b)
-    a.release(); a.release()  # idempotent
-    assert denied(lambda: ok(a)) and ok(b)  # the role is gone: so is the credential
-    assert creds.revoke_project(P) == 1 and denied(lambda: ok(b)) and not [n for n, (p, _) in creds.active.items() if p == P]
-    assert reader(other)[0].cat_file(reader(other)[1](f"projects/{Q}/data/o/j/a.txt")) == b"a"  # another project is untouched
+    ka, kb, kq = storage.job_key(P, S, J), storage.job_key(P, S, J2), storage.job_key(Q, S, str(uuid.uuid4()))
+    ok = lambda c, k, proj: reader(c, k)[0].cat_file(reader(c, k)[1](f"projects/{proj}/data/o/j/a.txt")) == b"a"
+    a, b, other = creds.mint(ka), creds.mint(kb), creds.mint(kq)
+    assert ok(a, ka, P) and ok(b, kb, P)
+    creds.release(a)
+    creds.release(a)  # idempotent
+    assert denied(lambda: ok(a, ka, P)) and ok(b, kb, P)  # the role is gone: so is the credential
+    assert creds.revoke_project(P) == 1 and denied(lambda: ok(b, kb, P)) and not [h for p, h in creds.active.values() if p == P]
+    assert ok(other, kq, Q)  # another project is untouched
     assert creds.sweep() == 0  # nothing is old enough
     assert creds.sweep(max_age=-1) >= 1  # a role no one released (e.g. a crashed gateway's) is deleted
-    assert denied(lambda: reader(other)[0].cat_file(reader(other)[1](f"projects/{Q}/data/o/j/a.txt")))
+    assert denied(lambda: ok(other, kq, Q))
+
+
+def test_a_persisted_handle_revokes_in_another_process(store):
+    key = storage.job_key(P, S, J)
+    h = creds.mint(key)
+    saved = json.loads(json.dumps(h.to_dict()))
+    assert "secret" not in json.dumps(saved)
+    from cadmus_parser import minting
+    minting.Handle.from_dict(saved, storage.BLOB_OPTIONS).revoke()
+    fs, p = reader(h, key)
+    assert denied(lambda: fs.cat_file(p(f"projects/{P}/data/x")))
+    creds.release(h)  # revoking twice is fine
 
 
 def test_a_failed_mint_leaves_no_role_and_never_falls_back(store, monkeypatch):
-    real = creds._aws
+    from cadmus_parser import minting
+    real = minting._aws
 
     class NoAssume:
         def __init__(self, c):
@@ -118,14 +130,13 @@ def test_a_failed_mint_leaves_no_role_and_never_falls_back(store, monkeypatch):
                 raise RuntimeError("sts down")
             return getattr(self.c, n)
 
-    monkeypatch.setattr(creds, "_aws", lambda svc: NoAssume(real(svc)) if svc == "sts" else real(svc))
+    monkeypatch.setattr(minting, "_aws", lambda svc, o: NoAssume(real(svc, o)) if svc == "sts" else real(svc, o))
     with pytest.raises(RuntimeError, match="sts down"):
-        creds.mint(P, S, J)
-    names = [r["RoleName"] for r in real("iam").list_roles()["Roles"]]
-    assert f"{creds.ROLE_PREFIX}{J}" not in names and not creds.active
+        creds.mint(storage.job_key(P, S, J))
+    assert not [r["RoleName"] for r in real("iam", storage.BLOB_OPTIONS).list_roles()["Roles"] if r["RoleName"].startswith(minting.ROLE_PREFIX)] and not creds.active
     monkeypatch.setattr(storage, "BLOB_URL", "https://example.org/x")
     with pytest.raises(RuntimeError, match="no scoped credentials"):
-        creds.mint(P, S, J)
+        creds.mint(storage.job_key(P, S, J))
 
 
 def test_listing_is_not_cached(store):

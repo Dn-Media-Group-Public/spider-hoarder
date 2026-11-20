@@ -277,13 +277,14 @@ def test_parse_env_checks(tmp_path):
     ok = {**PARSE_ENV, "OCR_PROFILES": json.dumps(OCR), "DUMMY_ONE_PARSE_OCR": "lan"}
     sh.check_parse_env([a], ok)
     sh.check_parse_env([a], PARSE_ENV)  # OCR is optional
+    sh.check_parse_env([a], {**ok, "PARSE_LIMITS": '{"default": {"deadline_s": 60}, "video": {"ram_mib": 0}}'})
     for bad in ({"WRAPPER_TOKEN": "changeme"}, {"PROXY_TOKEN": ""}, {"PROXY_TOKEN": PARSE_ENV["WRAPPER_TOKEN"]},
                 {"OCR_PROFILES": "{"}, {"OCR_PROFILES": "[]"}, {"OCR_PROFILES": json.dumps({"x": {"token": "t"}})},
                 {"OCR_PROFILES": json.dumps({"x": {**OCR["remote"], "api_key": ""}})},
                 {"OCR_PROFILES": json.dumps({"x": {**OCR["remote"], "auth": "google"}})},
                 {"OCR_PROFILES": json.dumps({"x": OCR["remote"], "y": OCR["remote"]})},  # a token picks the profile: unique
                 {"OCR_PROFILES": json.dumps({"x": {**OCR["remote"], "token": PARSE_ENV["PROXY_TOKEN"]}})},
-                {"DUMMY_ONE_PARSE_OCR": "nope"}):
+                {"DUMMY_ONE_PARSE_OCR": "nope"}, {"PARSE_LIMITS": "{"}, {"PARSE_LIMITS": '{"nope": {}}'}, {"PARSE_LIMITS": '{"default": {"ram_mib": -1}}'}):
         with pytest.raises(sh.DeployError):
             sh.check_parse_env([a], {**ok, **bad})
 
@@ -298,18 +299,23 @@ def test_parse_env_and_overlay(tmp_path):
     assert json.loads(pe["PARSE_BLOB_OPTIONS"]) == {"endpoint_url": "http://x"}  # no credential reaches the parser service's environment
     assert json.loads(pe["PARSE_OCR_TABLE"]) == {n: {"url": "http://ocr-sidecar:8080", "token": p["token"]} for n, p in OCR.items()}
     assert "endpoint" not in pe["PARSE_OCR_TABLE"] and "api_key" not in pe["PARSE_OCR_TABLE"]  # the wrapper never sees the endpoints' credentials
+    assert json.loads(pe["PARSE_LIMITS"]) == {"default": {"deadline_s": 600, "ram_mib": 6144, "fsize_mib": 4096, "input_mib": 20480, "output_mib": 65536}}  # today's limits unless set
+    old = json.loads(sh.parse_env({**env, "PARSE_JOB_TIMEOUT": "90", "PARSE_RLIMIT_AS": str(1 << 31)})["PARSE_LIMITS"])["default"]
+    assert old["deadline_s"] == 90 and old["ram_mib"] == 2048  # the old variables still count
+    assert sh.parse_env({**env, "PARSE_LIMITS": '{"video": {"deadline_s": 3600}}'})["PARSE_LIMITS"] == '{"video": {"deadline_s": 3600}}'  # the operator's word stands
     assert pe["PARSE_PROXY_ALLOW"] == "seaweedfs:8333" and sh.parse_env({**env, "SEAWEEDFS": "0"})["PARSE_PROXY_ALLOW"] == ""
     doc = yaml.safe_load(sh.parse_overlay([a, b], env))
     assert doc["services"]["parser"]["networks"] == ["dummy-one-parse", "dummy-two-parse"]
     assert doc["services"]["dummy-one-gateway"]["networks"] == ["dummy-one-parse"]
     assert doc["services"]["dummy-one-gateway"]["environment"]["PARSE_OCR"] == "${DUMMY_ONE_PARSE_OCR:-}"
     assert doc["networks"] == {"dummy-one-parse": {"driver": "overlay", "internal": True}, "dummy-two-parse": {"driver": "overlay", "internal": True}}
-    assert doc["services"]["blob-sidecar"] == {"networks": ["seaweedfs"]} and "ocr-sidecar" in doc["services"]
+    assert doc["services"]["blob-sidecar"] == {"networks": ["seaweedfs"], "environment": {"PARSE_PROXY_ALLOW": "seaweedfs:8333"}} and "ocr-sidecar" in doc["services"]
+    assert doc["services"]["parser"]["image"] == "${IMAGE_PREFIX:-}spider-hoarder-parser:${IMAGE_TAG:-local}"  # this project's image FROM the library's base
     plain = yaml.safe_load(sh.parse_overlay([a], {**PARSE_ENV}))
     assert "ocr-sidecar" not in plain["services"] and "blob-sidecar" not in plain["services"]
     assert sh.parse_services(env) == ["parser", "blob-sidecar", "ocr-sidecar"] and sh.parse_services(PARSE_ENV) == ["parser", "blob-sidecar"]
     # the static stack file: the parser's networks are internal (no route out), the proxy alone reaches `public`
-    base = yaml.safe_load(open(os.path.join(sh.REPO_ROOT, "docker-compose.parse.yml")))
+    base = yaml.safe_load(open(os.path.join(sh.REPO_ROOT, "lib", "cadmus-parser", "docker-compose.parse.yml")))
     assert base["services"]["blob-sidecar"]["networks"] == ["parse-egress", "public"] and "public" not in base["services"]["parser"]["networks"]
     assert all(base["networks"][n]["internal"] for n in ("parse-egress", "parse-ocr"))
     assert "RESEARCH_BLOB_OPTIONS" not in base["services"]["parser"]["environment"] and "BLOB_TOKEN_SECRET" not in base["services"]["parser"]["environment"]

@@ -62,8 +62,16 @@ async def call(cs, name, /, **args):
     return r.isError, "".join(c.text for c in r.content if hasattr(c, "text"))
 
 
+def entries(files):
+    """(name, entry) of every input file and archive member of a job result's `files` (input -> {size, outputs, files?})."""
+    for name, e in files.items():
+        yield name, e
+        yield from entries(e.get("files") or {})
+
+
 def paths(j):
-    return {f["path"] for f in j["files"]}
+    """Stored paths in a job result: each input as original/<name>, and every output (parsed/, terse/ ... as the parser wrote them)."""
+    return {f"original/{n}" for n in j["files"]} | {p for _, e in entries(j["files"]) for p in e["outputs"]}
 
 
 async def file_text(cs, job, path):
@@ -134,7 +142,7 @@ async def _scenarios(cs, server, proj):
     meta = next((f for f in paths(j) if f.startswith("metadata/")), None)
     if meta:
         y = await file_text(cs, j["job_id"], meta)
-        check("PDF metadata has the SpiderHoarder-PDF group", "SpiderHoarder-PDF" in y, y[:100].replace("\n", " "))
+        check("PDF metadata has the Cadmus-PDF group", "Cadmus-PDF" in y, y[:100].replace("\n", " "))
     err, t = await call(cs, "browser_snapshot")
     j = json.loads(t)
     check("snapshot (plain text file): inline text from original/", "text" in j and j.get("text_path", "").startswith("original/") or "text" in j, j.get("text_path"))
@@ -186,7 +194,7 @@ async def _scenarios(cs, server, proj):
     check("inner archive stored, not unpacked again", "original/hostile.zip.d/inner.zip" in p and not any("inner.zip.d" in f for f in p))
     check("m3u8 stored and parsed without a fetch (job done)", "original/playlist.m3u8" in p)
     check("1 GiB bomb: member kept, not parsed (> MAX_PARSE_BYTES) with a note", any("bomb.zip.d/zeros.bin" in f for f in p) and any("not parsed" in n for n in lf.get("notes", [])), lf.get("notes"))
-    check("bomb member size in the manifest is 1 GiB", any(f["size"] == 1 << 30 for f in lf["files"] if f["path"].endswith("zeros.bin")))
+    check("bomb member size in the manifest is 1 GiB", any(e["size"] == 1 << 30 for n, e in entries(lf["files"]) if n.endswith("zeros.bin")))
     # 6. several parses at once
     t0 = time.time()
     res = await asyncio.gather(*[call(cs, "ingest_page", url=SITE) for _ in range(6)])
@@ -217,7 +225,7 @@ def isolation():
         check(f"wrapper uid via the proxy -> {name}: blocked", "200" not in out[0], out[0])
     r = exec_in("parser", "python", "-c", "import urllib.request as u\nh=u.ProxyHandler({'https':'http://parse:%s@blob-sidecar:3128'})\nprint(u.build_opener(h).open('https://dn.no',timeout=15).status)" % ptok, user="900")
     check("wrapper uid via the proxy -> https://dn.no works", "200" in r.stdout, (r.stdout + r.stderr)[-120:])
-    pid = exec_in("parser", "python", "-c", "import os\nfor p in os.listdir('/proc'):\n if p.isdigit() and b'spider_hoarder_parser.wrapper' in open(f'/proc/{p}/cmdline','rb').read(): print(p); break", user="900").stdout.strip() or "7"
+    pid = exec_in("parser", "python", "-c", "import os\nfor p in os.listdir('/proc'):\n if p.isdigit() and b'cadmus_parser_server.wrapper' in open(f'/proc/{p}/cmdline','rb').read(): print(p); break", user="900").stdout.strip() or "7"
     r = exec_in("parser", "python", "-c", f"import sys\ntry:\n open('/proc/{pid}/environ').read(); print('READ')\nexcept OSError as e: print('denied', e.errno)")
     check("parser uid cannot read the wrapper's /proc/<pid>/environ (the tokens)", "denied" in r.stdout, r.stdout + r.stderr[-100:])
     r = exec_in("parser", "sh", "-c", "grep -E '^(Cap(Eff|Prm|Amb)|NoNewPrivs)' /proc/self/status | tr '\\n' ' '")

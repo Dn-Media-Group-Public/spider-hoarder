@@ -41,7 +41,8 @@ def test_write_stream():
     data = b"abc" * (1 << 20)  # 3 MiB: several chunks
     assert storage.write_stream("j", "original/big.bin", io.BytesIO(data), "x/y") == len(data)
     assert storage.read_bytes("j", "original/big.bin") == data
-    assert storage.get_manifest("j")["files"] == [{"path": "original/big.bin", "size": len(data), "content_type": "x/y"}]
+    assert storage.get_manifest("j")["files"] == {"big.bin": {"size": len(data), "outputs": {}}}  # no parse yet: the index is the stored originals
+    assert storage.get_meta("j")["content_types"] == {"big.bin": "x/y"} and "content_types" not in storage.get_manifest("j")  # remembered for the parser
 
 
 def test_text_cap_and_grep():
@@ -78,27 +79,35 @@ def test_text_cap_and_grep():
 
 
 def test_manifest_meta_and_job_result():
-    """set_meta survives later manifest updates; _job_result picks inline text from the manifest by size (the parser marks text files)."""
+    """meta.json (url, target ...) lives beside the parser's index.json and survives later writes; _job_result picks inline text from the index by size."""
+    import json
     from spider_hoarder_sdk.content import storage
     testing.fresh_store()
     key = testing.new_job("a@x.y")[1]
     storage.write_bytes(key, "original/d.html", b"<p>x</p>", "text/html")
     storage.set_meta(key, url="http://u", target="main")
-    storage.write_bytes(key, "x.txt", b"x", "text/plain")  # a later manifest update keeps the meta
+    storage.write_bytes(key, "original/x.txt", b"x", "text/plain")  # a later write keeps the meta
     m = storage.get_manifest(key)
-    assert m["url"] == "http://u" and m["target"] == "main" and any(f["path"] == "x.txt" for f in m["files"]), m
+    assert m["url"] == "http://u" and m["target"] == "main" and set(m["files"]) == {"d.html", "x.txt"}, m
     k2 = testing.new_job("a@x.y")[1]
-    storage.write_bytes(k2, "a", b"a", "text/plain")
+    storage.write_bytes(k2, "original/a", b"a", "text/plain")
     assert "url" not in storage.get_manifest(k2) and jobs._meta(k2) == {}
-    # text selection: parsed/ first, then a text-marked original; terse when the text is too big; nothing for an unparsed binary
+    # a job from before the library: its meta keys were at the top of the old index.json, whose `files` was a list
+    k3 = testing.new_job("a@x.y")[1]
+    storage.write_object(f"{k3}/index.json", json.dumps({"files": [{"path": "original/o", "size": 1}], "url": "http://old", "target": "t"}).encode())
+    assert jobs._meta(k3) == {"url": "http://old", "target": "t"} and storage.get_index(k3) == {"files": {}}
+    # text selection: parsed/ first, then a text-marked input; terse when the text is too big; nothing for an unparsed binary
     storage.write_bytes(k2, "original/n.md", b"# H\n[l](u)\n" + b"prose " * 10, "text/markdown")
     storage.write_bytes(k2, "terse/n.md", b"# H\n* [l](u)", "text/markdown")
-    assert jobs._job_result(k2, "n.md")["text_path"] == "terse/n.md"  # original/n.md is not marked as text: the outline
-    m = storage.get_manifest(k2)
-    m["files"] = [{**f, "text": True} if f["path"] == "original/n.md" else f for f in m["files"]]
-    storage.set_meta(k2, files=m["files"])
+    entry = {"size": 70, "outputs": {"terse/n.md": {"size": 11, "content_type": "text/markdown"}}}
+    index = lambda **kw: storage.write_object(f"{k2}/index.json", json.dumps({"files": {"n.md": {**entry, **kw}}, "notes": "wrapper note"}).encode())  # noqa: E731
+    index()
+    assert jobs._job_result(k2, "n.md")["text_path"] == "terse/n.md"  # n.md is not marked as text: the outline
+    index(meta={"text": True})
     r = jobs._job_result(k2, "n.md", ["a note"])
-    assert r["text"].startswith("# H\n[l](u)") and r["text_path"] == "original/n.md" and r["notes"] == ["a note"]
+    assert r["text"].startswith("# H\n[l](u)") and r["text_path"] == "original/n.md" and r["notes"] == ["wrapper note", "a note"]
+    index(meta={"text": True}, notes="entry note\nsecond", files={"in.zip": {"size": 1, "outputs": {}, "notes": "member note"}})
+    assert jobs._job_result(k2, "n.md")["notes"] == ["wrapper note", "entry note", "second", "member note"]  # entry and member notes are collected
     old, jobs.INLINE_LIMIT = jobs.INLINE_LIMIT, 20
     try:
         assert jobs._job_result(k2, "n.md")["text_path"] == "terse/n.md"

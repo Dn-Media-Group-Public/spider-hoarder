@@ -1,27 +1,18 @@
-"""Client of the parser service (docs/plans/parser-wrapper.md): "parse job X", then poll. The gateway sends no file and reads the result
-(`index.json` and the artefacts) from the blob store itself. Parsing never fails a job: every problem becomes a note."""
+"""Client of the parser service (docs/implemented-plans/parse-sandbox-library.md): "parse job X", then wait. The gateway sends no file and reads the
+result (`index.json` and the artefacts) from the blob store itself. Parsing never fails a job: every problem becomes a note. A thin layer over
+the cadmus-parser client: this project's job layout (input = <job>/original, output = <job>), its scoped credentials (creds.py) and its options."""
 
-import json
 import logging
 import os
-import time
 
-import httpx
+from cadmus_parser import Client, ParseError
 
-from spider_hoarder_sdk.gateway import creds as scoped
+from spider_hoarder_sdk.content import storage
+from spider_hoarder_sdk.gateway import creds
 
 log = logging.getLogger("parse_client")
-POLL_TIMEOUT = 12 * 60  # the wrapper's 10 min job limit plus queueing; the MCP tool call stays synchronous for the client
-
-
-def _wire(options: dict) -> dict:
-    """Scoped fsspec options as JSON: a GCS downscoped token is a Credentials object, sent as its access token."""
-    tok = options.get("token")
-    if tok is not None and not isinstance(tok, str):
-        import google.auth.transport.requests
-        tok.refresh(google.auth.transport.requests.Request())
-        return {**{k: v for k, v in options.items() if k != "token"}, "gcs_access_token": tok.token}
-    return options
+POLL_TIMEOUT = int(os.environ.get("PARSE_POLL_TIMEOUT") or 12 * 60)  # seconds; must exceed the largest deadline_s of PARSE_LIMITS (the default is 10 min); the MCP tool call stays synchronous
+RENEW_EVERY = 300  # seconds: well under half the credential's lifetime
 
 
 def parse(key: str, base_url: str = "", features: dict | None = None) -> list[str]:
@@ -31,44 +22,20 @@ def parse(key: str, base_url: str = "", features: dict | None = None) -> list[st
         return ["not parsed (no parser service configured)"]
     if features is None and os.environ.get("PARSE_OCR"):  # per-backend: which OCR profile may see this backend's files
         features = {"ocr": os.environ["PARSE_OCR"]}
-    parts = key.split("/")
-    ref = f"{parts[1]}/{parts[3]}/{parts[4]}"
-    head = {"Authorization": f"Bearer {token}"}
+    _, in_url, out_url = creds.urls(key)
+    proj, handles = key.split("/")[1], []
+    client = Client(url, token, storage.BLOB_OPTIONS)
+    options = {"files": {"base_url": base_url, "ctypes": storage.get_meta(key).get("content_types", {})}}
     try:
-        cred = scoped.mint(parts[1], parts[3], parts[4])
-    except Exception as e:  # noqa: BLE001
+        # project-wide read grant, job write grant (creds.grants): the whole job in one call; every credential is registered for revoke_project
+        s, _ = client.run(in_url, out_url, creds.grants(key), mint_options=storage.BLOB_OPTIONS, options=options, features=features, renew_every=RENEW_EVERY,
+                          poll_timeout=POLL_TIMEOUT, on_mint=lambda h: (creds.track(proj, h), handles.append(h)))
+    except ParseError as e:
+        return [f"not parsed (parser unavailable: {e.message})" if e.status == 0 else f"not parsed (parser answered {e.status}: {e.message[:200]})"]
+    except Exception as e:  # noqa: BLE001  no credential could be minted
         log.exception("no scoped credential")
         return [f"not parsed (no storage credential: {type(e).__name__})"]
-    try:
-        wire = _wire(cred.options)
-        body = {"credentials": wire, "base_url": base_url, **({"features": features} if features else {})}
-        with httpx.Client(timeout=30) as c:
-            for attempt in (0, 1):  # one retry on 503 or a refused connection
-                try:
-                    r = c.post(f"{url}/jobs/{ref}", json=body, headers=head)
-                except httpx.TransportError as e:
-                    if attempt:
-                        return [f"not parsed (parser unavailable: {type(e).__name__})"]
-                    time.sleep(1)
-                    continue
-                if r.status_code == 503 and not attempt:
-                    time.sleep(1)
-                    continue
-                break
-            if r.status_code != 202:
-                return [f"not parsed (parser answered {r.status_code}: {r.text[:200]})"]
-            delay, deadline = 0.05, time.monotonic() + POLL_TIMEOUT
-            while time.monotonic() < deadline:
-                time.sleep(delay)
-                delay = min(delay * 1.5, 1.0)
-                try:
-                    s = c.get(f"{url}/jobs/{ref}", headers={**head, "X-Credentials": json.dumps(wire)}).json()
-                except (httpx.TransportError, ValueError):
-                    continue
-                if s.get("status") == "done":
-                    return []
-                if s.get("status") == "failed":
-                    return [f"not parsed ({s.get('error', 'failed')})"]
-            return ["not parsed (timed out waiting for the parser)"]
     finally:
-        cred.release()
+        for h in handles:
+            creds.release(h)  # revoked already; this takes them out of the registry
+    return [] if s["status"] == "done" else [f"not parsed ({s.get('error') or 'failed'})"]

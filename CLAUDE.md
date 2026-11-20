@@ -41,3 +41,7 @@ When implementing a plan:
 
 The user then commits everything — code, moved plan, and doc updates — as a single unit.
 
+## Repository layout notes
+
+- The parser service (wrapper, uid pool, worker, the default `files` processor, sidecars, the client and the credential-minting helper) is a **library in its own repository, `cadmus-parser`, included as the git submodule `lib/cadmus-parser/`** (clone with `--recurse-submodules`). It knows nothing about this project: its docs are in `lib/cadmus-parser/docs/`, its tests run in its own CI and here through `scripts/test.sh`. Changes to it are made in the submodule and committed there; this repository records the pinned commit. This project's parts: `parser/Dockerfile` (the image, `FROM` the library's base), `sdk/.../gateway/parse_client.py` and `creds.py`.
+

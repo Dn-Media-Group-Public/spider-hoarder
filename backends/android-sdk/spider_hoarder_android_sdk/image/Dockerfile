@@ -10,10 +10,11 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 COPY sdk/ /src/sdk/
+ADD lib/cadmus-parser /cadmus
 COPY backends/android-sdk/ /src/android-sdk/
 # GCS support is a separate pip step: sdk/pyproject.toml explains the protobuf pin that stops one resolution
 RUN python3 -m venv /venv \
- && pip install --no-cache-dir "/src/sdk[s3]" /src/android-sdk \
+ && pip install --no-cache-dir "/src/sdk[s3]" /cadmus/client /src/android-sdk \
  && pip install --no-cache-dir --no-deps "boto3==$(python -c 'import botocore;print(botocore.__version__)')" s3transfer \
  && pip install --no-cache-dir gcsfs google-auth \
  && rm -rf /src && chmod -R a+rX /venv/lib

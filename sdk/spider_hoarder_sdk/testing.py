@@ -32,21 +32,19 @@ def fresh_store() -> str:
     except KeyError:
         raise RuntimeError("the tests need an object store: run them through scripts/test.sh (it starts a SeaweedFS), or set TEST_BLOB_URL and TEST_BLOB_OPTIONS") from None
     storage.BLOB_URL, storage.BLOB_OPTIONS = f"{base.rstrip('/')}/{uuid.uuid4()}", json.loads(opts)
-    if _parser:  # a running parser service follows the store
-        _parser.cfg.blob_url = storage.BLOB_URL
     return storage.BLOB_URL
 
 
 _parser = None
 # the real parser worker minus the metadata extractors (they need exiftool and ffprobe, which dev machines lack)
-NO_METADATA = [sys.executable, "-I", "-u", "-c", "import sys\nfrom spider_hoarder_parser import metadata, worker\n"
+NO_METADATA = [sys.executable, "-I", "-u", "-c", "import sys\nfrom cadmus_parser_server import metadata, worker\n"
                "metadata.extract_metadata = lambda *a, **k: {}\nworker.main(sys.argv[1])"]
 PARSE_TOKEN = "test-parse-token"
 
 
 class ParserService:
-    """A parser wrapper (docs/plans/parser-wrapper.md) in a thread of the test process, on the current test store; not root, so its
-    parser runs as the test's own uid. Needs spider-hoarder-parser installed (test dependency only)."""
+    """A parser wrapper (lib/cadmus-parser) in a thread of the test process, on the current test store; not root, so its
+    parser runs as the test's own uid. Needs cadmus-parser-server installed (test dependency only)."""
 
     def __init__(self, ocr_profiles: dict | None = None, **cfg):
         import socket
@@ -54,11 +52,11 @@ class ParserService:
         import threading
         import time
         import uvicorn
-        from spider_hoarder_parser import wrapper
+        from cadmus_parser_server import wrapper
         from spider_hoarder_sdk.content import storage
         fresh_store()
         opts = {k: v for k, v in storage.BLOB_OPTIONS.items() if k not in ("key", "secret", "token")}  # credentials come per job
-        self.cfg = wrapper.Config(PARSE_TOKEN, storage.BLOB_URL, opts, ocr_profiles, tempfile.mkdtemp(), pool_size=cfg.pop("pool_size", 2), **cfg)
+        self.cfg = wrapper.Config(PARSE_TOKEN, opts, {"ocr": ocr_profiles or {}}, tempfile.mkdtemp(), pool_size=cfg.pop("pool_size", 2), **cfg)
         s = socket.socket()
         s.bind(("127.0.0.1", 0))
         port = s.getsockname()[1]

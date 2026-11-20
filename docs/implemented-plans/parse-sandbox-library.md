@@ -1,8 +1,19 @@
 # Plan: the parser service as a generic library (git submodule)
 
-> **Status: ready for review.** All twelve open questions and the follow-up details are decided (see "Open questions", which now records the
-> decisions). It builds on the implemented [Plan: parser wrapper](../implemented-plans/parser-wrapper.md) and moves that code; the security model
-> changes only as described under "Security changes". [Plan: OCR hybrid](ocr-hybrid.md) is affected (see "OCR").
+> **Status: implemented.** All twelve open questions and the follow-up details were decided (see "Open questions", which records the
+> decisions). It built on [Plan: parser wrapper](parser-wrapper.md) and moved that code; the security model changed only as described under
+> "Security changes". [Plan: OCR hybrid](ocr-hybrid.md) is affected (see "OCR").
+>
+> **Deviations while implementing** (decisions of the implementation session, flagged for review):
+> - `index.json` is the gateway's only manifest (the user chose "gateway adopts the new shape"): this project's own keys (`url`, `target`, `text_cap`, the content types of the originals) moved to `meta.json`, and the MCP `files` result is the library's per-input recursive shape (`{<input>: {size, outputs, files?}}`), not a flat list. A job from before the library reads as no index (rebuilt from the stored originals) with its meta keys.
+> - The wrapper learns the allowed top-level output directories from a separate `python -I -m cadmus_parser_server.discover` process at its start (it imports no processor code), because a parser-supplied list would not confine a hostile parser.
+> - A processor whose import fails (the `files` extra is not installed) is skipped with a line on stderr, so the base image has no processor.
+> - `renew_loop` revokes the credential *before the previous one* after each renewal (a transfer begun before the renewal may still use the previous one); `Client.renew` / `renew_loop` take `rekey` for grants wider than a posted URL (this project's read grant is project-wide, its input is one job); `Client.wait` accepts a callable returning the current credential.
+> - Files an earlier run unpacked (`<x>.d/…` next to `<x>`) are inputs of their own on a second parse (flagged `derived`, never unpacked), and their archive is not unpacked again.
+> - A consumer image does not derive from a library base image (the user asked for it): it `ADD`s `lib/cadmus-parser` and runs `server/install.sh [extras]` (tini, util-linux, the `wrapper` uid, `/scratch`, a venv, `pip install`) on any Debian base with python3; `server/Dockerfile` is only a ready-made processor-less image.
+> - The default processors are split per kind of file / library, not one `files` processor (the user asked for it during implementation): `metadata`, `sizecap`, `archives`, `markdown`, `binary`, `html`, `apk`, `documents` (markitdown and OCR), `members`; they share the options entry `files` (`ctx.options_of`).
+> - `MAX_PARSE_BYTES` stays a setting of the `files` processor (stored files over it get metadata only), beside the wrapper's `input_mib` (this project sets `default.input_mib` and `output_mib` to 20480).
+> - The sidecars' one `egress_rules.py` is `common/egress_rules.py` (`public_rules`, `pinned_rules`); the sidecar images are built with the library root as context. The overlay generator is `cadmus_parser_server.overlay` (JSON output, which is YAML); the minting module is `cadmus_parser.minting` (the function `mint` would shadow a module of that name).
 
 ## Problem / Goal
 

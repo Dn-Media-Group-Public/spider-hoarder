@@ -28,3 +28,4 @@ Back to the [documentation index](../index.md). Open plans: [plans](../plans/ind
 - [Project access model (projects with roles, `projects/<proj>/data/<session>/<job>`, scoped store credentials, shared bucket, dev SeaweedFS)](project-access-model.md)
 - [OCR in the parse step (Tesseract, remote fallback)](ocr-hybrid.md)
 - [Parser service (wrapper, no-secret parser uid, authenticated egress proxy, OCR sidecar)](parser-wrapper.md)
+- [The parser service as a generic library (git submodule `lib/cadmus-parser`)](parse-sandbox-library.md)

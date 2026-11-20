@@ -88,7 +88,7 @@ def test_file_outputs():
     assert jobs._job_name("../../x.png", "d") == "x.png"
     key = testing.new_job("a@x.y")[1]
     r = jobs._store_and_parse(key, "shot.png", b"\x89PNG\0\0", "image/png")
-    assert "text" not in r and any(f["path"] == "original/shot.png" for f in r["files"]), r
+    assert "text" not in r and "shot.png" in r["files"], r
     r = jobs._store_and_parse(key, "snap.md", b"# page", "text/markdown")
     assert r["text"] == "# page"
     jobs.INLINE_LIMIT = 3
@@ -148,14 +148,14 @@ def test_file_tools_are_jobs():
 
     r = run("browser_snapshot", target="e5", depth=2)
     out = json.loads(r.content[0].text)
-    assert out["text"] == snap and out["files"][0]["path"] == "original/snapshot.yml", out
+    assert out["text"] == snap and list(out["files"]) == ["snapshot.yml"], out
     m = storage.get_manifest(jobs._key("a@b.c", out["job_id"]))
     assert m["url"] == "http://p/" and m["target"] == "e5" and m["depth"] == 2 and m["text_cap"] == 128 and "query" not in m, m
     r = run("browser_find", regex="/x/i", text_cap=None, filename="m.txt")
     out = json.loads(r.content[0].text)
     m = storage.get_manifest(jobs._key("a@b.c", out["job_id"]))
-    assert out["files"][0]["path"] == "original/m.txt" and m["text_cap"] is None and m["query"] == {"regex": "/x/i"} and "target" not in m, m
-    assert json.loads(run("browser_evaluate", function="() => 1").content[0].text)["files"][0]["path"] == "original/evaluate.json"
+    assert list(out["files"]) == ["m.txt"] and m["text_cap"] is None and m["query"] == {"regex": "/x/i"} and "target" not in m, m
+    assert list(json.loads(run("browser_evaluate", function="() => 1").content[0].text)["files"]) == ["evaluate.json"]
 
     class NetClient:
         async def call_tool(self, name, args):
@@ -172,7 +172,7 @@ def test_file_tools_are_jobs():
     r = run("browser_network_requests", new=True)
     assert r.content[0].text == "### Result\nNo new requests." and not r.isError  # no file: passed through
     net = json.loads(run("browser_network_request_get", index=3, filename="ignored").content[0].text)
-    paths = {f["path"] for f in net["files"]}
+    paths = {f"original/{n}" for n in net["files"]} | {p for e in net["files"].values() for p in e["outputs"]}
     assert {"original/response/headers.json", "original/response/body.html", "parsed/response/body.html.md",
             "original/response/body.png"} <= paths and not any("ignored" in p for p in paths), paths
     assert "http://n.test/x" in net["text"] and net["text_path"] == "parsed/response/body.html.md", net

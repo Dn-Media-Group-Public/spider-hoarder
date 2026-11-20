@@ -55,7 +55,7 @@ async def main():
 
             err, text = await call(cs, "ingest_page", url="https://example.com")
             ing = json.loads(text)
-            print("ingest_page:", err, ing["files"][0]["path"], "This domain" in ing.get("text", ""))
+            print("ingest_page:", err, next(iter(ing["files"])), "This domain" in ing.get("text", ""))
 
             err, text = await call(cs, "browser_navigate", url="https://example.org")
             err, text = await call(cs, "browser_save_page")
@@ -72,8 +72,8 @@ async def main():
             err, text = await call(cs, "browser_find", text="needle")
             found = json.loads(text)
             m = json.loads((await call(cs, "list_files", job_id=found["job_id"]))[1])
-            print("find job:", found["files"][0]["path"], m["url"][:20], m["text_cap"], m["query"])
-            assert found["files"][0]["path"] == "original/matches.txt" and m["text_cap"] == 128 and m["query"] == {"text": "needle"}
+            print("find job:", next(iter(found["files"])), m["url"][:20], m["text_cap"], m["query"])
+            assert list(found["files"]) == ["matches.txt"] and m["text_cap"] == 128 and m["query"] == {"text": "needle"}
             assert m["url"].startswith("data:text/html") and "NEEDLE" in found["text"] and "..." in found["text"]  # window around the match
             err, text = await call(cs, "browser_find", text="go")
             ref = re.search(r'button "Go".*?\[ref=((?:f\d+)?e\d+)\]', json.loads(text)["text"]).group(1)

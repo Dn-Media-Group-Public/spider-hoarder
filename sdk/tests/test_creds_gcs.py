@@ -1,6 +1,6 @@
 """Per-job credentials on real GCS (a Credential Access Boundary): what a minted token can read, write and list. Needs a scratch bucket
 and application-default credentials: TEST_GCS_URL=gs://bucket pytest sdk/tests/test_creds_gcs.py (skipped otherwise). Not revocable:
-release() is a no-op, the token just expires."""
+revoke() is a no-op, the token just expires."""
 
 import os
 import uuid
@@ -35,8 +35,9 @@ def test_matrix(monkeypatch):
         storage.write_object(f"{base}/access.json", b"{}")
         storage.write_object(f"{base}/data/other/job/seen.txt", b"seen")
         storage.write_object(f"projects/{Q}/data/s/j/foreign.txt", b"x")
-        c = creds.mint(P, S, J)
-        fs, root = storage._abs("", c.options)
+        key = storage.job_key(P, S, J)
+        c = creds.mint(key)
+        fs, root = storage._abs("", c[creds.urls(key)[2]])
         p = lambda k: f"{root.rstrip('/')}/{k}"
         assert fs.cat_file(p(f"{base}/data/other/job/seen.txt")) == b"seen"
         for k in (f"{base}/access.json", f"projects/{Q}/data/s/j/foreign.txt"):
@@ -53,7 +54,7 @@ def test_matrix(monkeypatch):
         assert fs.ls(p(f"{base}/data/other/job"), detail=False) and fs.ls(p(f"{base}/data"), detail=False)
         for k in (base, "projects", f"projects/{Q}", f"projects/{Q}/data", ""):
             assert denied(lambda: fs.ls(p(k), detail=False)), k
-        c.release()
+        creds.release(c)
         assert storage.read_object(f"{base}/access.json") == b"{}"   # the gateway's own credential is unaffected
     finally:
         storage.delete_tree("")

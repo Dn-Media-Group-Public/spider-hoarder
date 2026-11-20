@@ -17,7 +17,8 @@ UPLOAD_MARK = "@upload"  # blobtoken path marking an upload-link token (never a 
 INLINE_LIMIT = 50_000
 MAX_FILE_BYTES = int(os.environ.get("MAX_FILE_BYTES", 50 * 1024 * 1024))  # files pulled through the gateway (APKs, device output)
 
-FILE_TOOLS_NOTE = ("\n\nThe result is {job_id, files, text?}: `text` is the content if small, else page through it "
+FILE_TOOLS_NOTE = ("\n\nThe result is {job_id, files, text?}: `files` maps each stored file (its path is original/<name>) to its size, its `outputs` "
+                   "(parsed/, terse/ ... paths, usable as `path`) and, for archives, its unpacked `files`; `text` is the content if small, else page through it "
                    "with get_file_text or search it with grep_file; get_file_url for a link. `filename` only names "
                    "the file inside the job.")
 
@@ -84,24 +85,33 @@ def _store_and_parse(key: str, filename: str, raw: bytes, content_type: str, bas
     return _parse_job(key, base_url, filename)
 
 
+def _entry_notes(files: dict):
+    for e in files.values():
+        if e.get("notes"):
+            yield from e["notes"].split("\n")
+        yield from _entry_notes(e.get("files") or {})
+
+
 def _job_result(key: str, main: str | None = None, notes: list | None = None) -> dict:
-    """{files, text?, text_path?, notes?} from index.json: the one place that decides whether text is small enough to return inline;
-    falls back to the terse outline when the full text is too big. `main` is an original's path, as stored under original/."""
-    manifest = storage.get_manifest(key)
-    files = {e["path"]: e for e in manifest["files"]}
-    result = {"files": manifest["files"]}
-
-    def small(p: str) -> bool:
-        return p in files and files[p]["size"] < INLINE_LIMIT
-
-    if main:
-        text = next((p for p in (f"parsed/{main}.md", f"parsed/{main}.json", f"original/{main}")
-                     if p in files and (p.startswith("parsed/") or files[p].get("text"))), None)
-        terse = next((p for p in (f"terse/{main}.md", f"terse/{main}") if p in files), None)
-        if text and small(text) or terse and small(terse):
-            path = text if text and small(text) else terse
+    """{files, text?, text_path?, notes?} from the parser's index.json (files: per input file, relative to original/: size, outputs by job-relative
+    path, archive members): the one place that decides whether text is small enough to return inline; falls back to the terse outline when the
+    full text is too big. `main` is an input's path, as stored under original/."""
+    index = storage.get_index(key)
+    files = index["files"]
+    result = {"files": files}
+    if main and (entry := files.get(main)):
+        outputs = entry.get("outputs") or {}
+        # parsed text, else the input itself when the parser marked it as text
+        text = next((p for p in (f"parsed/{main}.md", f"parsed/{main}.json") if p in outputs), None)
+        sizes = {p: o["size"] for p, o in outputs.items()}
+        if text is None and (entry.get("meta") or {}).get("text"):
+            text, sizes[f"original/{main}"] = f"original/{main}", entry["size"]
+        terse = next((p for p in (f"terse/{main}.md", f"terse/{main}") if p in outputs), None)
+        small = lambda p: p is not None and sizes[p] < INLINE_LIMIT  # noqa: E731
+        if small(text) or small(terse):
+            path = text if small(text) else terse
             result["text"], result["text_path"] = storage.read_bytes(key, path).decode("utf-8", errors="replace"), path
-    if all_notes := list(dict.fromkeys([*manifest.get("notes", []), *(notes or [])])):
+    if all_notes := [n for n in dict.fromkeys([*(index.get("notes") or "").split("\n"), *_entry_notes(files), *(notes or [])]) if n]:
         result["notes"] = all_notes
     return result
 
@@ -117,7 +127,7 @@ def _ctype(name: str) -> str:
 
 
 def _meta(key: str) -> dict:
-    return {k: v for k, v in storage.get_manifest(key).items() if k in ("url", "target")}
+    return {k: v for k, v in storage.get_meta(key).items() if k in ("url", "target")}
 
 
 def _text(msg: str, error: bool = False) -> types.CallToolResult:

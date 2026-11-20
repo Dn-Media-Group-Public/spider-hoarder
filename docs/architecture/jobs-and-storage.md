@@ -9,7 +9,7 @@ See also: [Plan: Tool file outputs become jobs](../implemented-plans/file-output
 `browser_console_messages`, `browser_network_request_get`, `browser_network_request_make` (not a reader, but its output is a job), `browser_network_requests`, `browser_storage_state`, plus `browser_save_page`, `ingest_page` and uploads.
 A client-supplied `filename` only renames the file inside the job; the MCP client never controls a host path. A file the session wrote is read
 by the gateway from `out/` (opened through an `O_PATH` home fd, then `O_NOFOLLOW`, regular files only) and streamed into storage in 1 MiB chunks, **before** the session's homedir is wiped. Stored files have no size
-cap; parsing does (`MAX_PARSE_BYTES`, enforced in the parser, default 50 MB: a bigger file is kept under `original/` with a `notes` entry, not parsed).
+cap; parsing does (`MAX_PARSE_BYTES`, enforced by the default `documents`, `html`, `binary`, `markdown` and `archives` processors, default 50 MB: a bigger file is kept under `original/` with a `notes` entry, not parsed; the parser service's `PARSE_LIMITS` bound the whole job).
 `browser_network_request_get`/`_make` output a directory: only `request|response/headers.json` and `body.<ext>` are read, anything else is ignored.
 See also: [Plan: network request jobs](../implemented-plans/network-request-jobs.md)
 
@@ -22,7 +22,7 @@ whose policy blocks media). Each file is streamed (`storage.open_read`) to `<hom
 never collide and the name is exactly what the browser uploads). The job references in the arguments are replaced by the staged names
 (`body_file` for a raw file body, `{file, filename, content_type?}` for a file part); any client-supplied `body_file` is discarded. The
 toolserver deletes the directories when the call ends, success or failure; the gateway removes them again as a backstop (also when staging
-fails midway), and the session-end wipe covers the rest. `index.json` keeps the `body` argument as given, so a big upload is not stored twice.
+fails midway), and the session-end wipe covers the rest. `meta.json` keeps the `body` argument as given, so a big upload is not stored twice.
 See also: [Plan: network request make types](../implemented-plans/network-request-make-types.md)
 
 ## Layout
@@ -45,69 +45,64 @@ parsed/<path>.md     markitdown output (<path> may be nested, e.g. response/body
 simplified/<name>.md trafilatura main-content guess (HTML only, may silently omit text; never returned inline)
 terse/<name>.md      outline: headings, links, images of parsed/ (or of a Markdown original)
 metadata/<path>.yaml file metadata (EXIF/GPS, Office revisions, CRS, media streams, PDF history); absent if there is none
-index.json           {files: [...], url?, target?, text_cap?, depth?, query?, method?, status?, and for
+index.json           the parser library's manifest, the job's only one: {files: {<input path under original/>: {size, content_type?, meta?, notes?,
+                     outputs: {<path in the job>: {size, content_type, meta?}}, files?: {<archive member>: …}}}, notes?}
+status.json          {status, owner_replica, updated, error?}: the parser service's heartbeat and result
+meta.json            the gateway's own keys: {url?, target?, text_cap?, depth?, query?, method?, status?, content_types: {<original>: type}, and for
                      browser_network_request_make: type, origin?, body?, redirects?, blocked?}
 ```
+`list_files` returns the index with the meta keys (minus `content_types`) merged in. Before any parse, or when none could be written, the index is built from
+the stored originals; a job from before the parser library (a list `files` and the meta keys at the top of `index.json`) reads as no index and its meta keys.
 `text` is inline if the parsed/original text is under `INLINE_LIMIT` (50,000 chars); else the terse outline if that fits (with
 `text_path` naming it); else omitted, and the MCP client pages with `get_file_text` or searches with `grep_file`.
 See also: [Plan: Terse outline view](../implemented-plans/terse-view.md)
 
 ## The parser service
-Nothing that interprets an untrusted file runs in a gateway. Every stored original is parsed by the shared **parser service**
-(`parser/`, `docker-compose.parse.yml`), one parse per **job**: the gateway stores the job's files under `original/` (`jobs._store_original` /
-`_store_tree`, which keep the manifest), then `jobs._parse_job` (`gateway/parse_client.py`) mints the job's scoped credential, `POST`s
-`<PARSE_URL>/jobs/<proj>/<session>/<job>` (`Authorization: Bearer $PARSE_TOKEN`, body `{credentials, base_url?, features?}`) and polls the same URL
-(50 ms growing to 1 s, 12 min overall; the MCP tool call stays synchronous), then reads `index.json` and the artefacts from the store itself.
-No file passes through the gateway. `features` is `{"ocr": "<profile>"}` or absent, set from the backend's `<NAME>_PARSE_OCR`; an unknown feature
-or profile is a 400. A job may be parsed again (an upload link adds files over time): the same artefacts are written again. Answers: **202**,
-**409** (running with a fresh heartbeat), **503** (no free parser uid: the gateway retries once; so on a refused connection).
+Nothing that interprets an untrusted file runs in a gateway. Every stored original is parsed by the shared **parser service**, which is a library in its own
+repository, **cadmus-parser**, included as the git submodule `lib/cadmus-parser/` (its documentation, in `lib/cadmus-parser/docs/`, is the reference for the wrapper API,
+`index.json`, the worker protocol, the limits, the sidecar protocol and the security model; this section is only what is specific to this project). Each stack runs its own
+instance. The library's parts used here: the wrapper and its uid pool, `server/install.sh` (this project's `parser/Dockerfile` `ADD`s the submodule, runs it and adds ExifTool, ffmpeg,
+Tesseract, `unar` and the default processors (the library's `files` extra: `metadata`, `archives`, `html`, `documents` ...)), `blob-sidecar`, `ocr-sidecar`, the stack file `docker-compose.parse.yml`, the overlay generator and the
+client (`cadmus_parser`, in the gateway images).
 
-Inside the parser container two trust levels share one kernel:
-- the **wrapper** (own uid, keeps `CAP_SETUID/SETGID/CHOWN/KILL`, no_new_privs) holds the wrapper token, the proxy token, the OCR profile table and, per job
-  and only in memory, the scoped store credential. It pulls `original/` (through the egress proxy) into a scratch directory, starts the parser as a
-  **pool uid** (`PARSE_POOL_SIZE` = 4 per container; uids `PARSE_UID_BASE` = 20000 and up; `free | busy | quarantined`), reads its records, validates them and uploads;
-- the **parser** (`python -I -u -m spider_hoarder_parser.worker`, one per job, `setsid`, `umask 007` (group = the wrapper, via a setgid `out/`), `RLIMIT_AS` `PARSE_RLIMIT_AS` = 6 GiB (2 GiB was too tight for a real page) / `NPROC` / `NOFILE` / `FSIZE` 4 GiB / no core,
-  no_new_privs, wall clock `PARSE_JOB_TIMEOUT` = 10 min then the group is killed) has **no blob credential and no token**; its environment is `PYTHONUNBUFFERED`,
-  `PATH`, `HOME`/`TMPDIR` (its work dir) and, only if the job asked for remote OCR, that one profile's `OCR_URL` + `OCR_TOKEN`. It has no route out: the
-  container's networks are internal and hold only the gateways, the proxy and the OCR sidecar (it can connect to those; each refuses it without its token).
+One parse per **job**: the gateway stores the job's files under `original/` (`jobs._store_original` / `_store_tree`, which remember each file's content type in `meta.json`), then
+`jobs._parse_job` (`gateway/parse_client.py`, a thin layer over the library client):
 
-The parser walks `original/`, runs the one parse rule on every file (metadata first, then archive unpack, markitdown / trafilatura / binary decoders,
-`terse/`; members are parsed once and never unpacked again, `<x>.d/` members already next to their archive are not unpacked either) and writes artefacts into its
-`out/` directory, announcing each on a private dup of its stdout pipe (stdout itself is dup'ed onto stderr before anything is imported): one JSON line per
-record, `{"path", "content_type"}` (an artefact), `{"path", "text": true}` (the manifest entry of that original is plain text the gateway may return
-inline) or `{"note"}`. The wrapper validates each record (path under `original|parsed|simplified|terse|metadata/`, no `..`/absolute/`index.json`;
-the file opened component by component with `O_NOFOLLOW`, regular files only, size from its own `fstat`; line ≤ 4096 bytes, record count, total bytes and
-notes capped), uploads it **while the parser still runs** and deletes it. Any violation kills the parser and fails the job. Afterwards the wrapper kills every
-process of the uid, `lchown`s and deletes its directories and anything it left in `/tmp`, `/var/tmp`, `/dev/shm`, and frees the uid only if it owns nothing
-(else it is quarantined). The scratch area is ephemeral (an anonymous volume of the task).
+1. mints the job's scoped credential (`gateway/creds.py`: one read grant for the project's `data/` (a parser may correlate with earlier files of the same
+   project) and one write grant for `<job>/`, 900 s; S3: a role per store, revoked after the job; GCS: a downscoped token),
+2. `POST`s `<PARSE_URL>/jobs` with `input.url = <store>/<job>/original`, `output.url = <store>/<job>`, each side's credential, `options = {"files": {base_url,
+   ctypes}}` and `features = {"ocr": "<profile>"}` (from the backend's `<NAME>_PARSE_OCR`) or none; one retry on a 503 or a refused connection,
+3. starts `renew_loop`, which pushes fresh credentials to the replica that took the job every 5 minutes (the grant is project-wide, so renewals are re-keyed to the
+   posted input URL; every minted handle is tracked in `creds.active` for `revoke_project`),
+4. waits for `status.json` under `<job>/` (the library's heartbeat rule; 12 min overall, the MCP tool call stays synchronous) and reads `index.json` and the artefacts from
+   the store itself. No file passes through the gateway.
 
-The parser process's environment is built by hand; of the wrapper's own, only the non-secret limits `MAX_PARSE_BYTES`, `MAX_ARCHIVE_BYTES`, `MAX_ARCHIVE_MEMBERS`, `METADATA_*` and `OCR_TIMEOUT` are forwarded (`wrapper.PARSER_LIMIT_ENV`; set in `.env`, see [deploy and configure](../operations/deploy-and-configure.md#configuration-env-see-envexample)).
+A job may be parsed again (an upload link adds files over time): a fresh `index.json` of everything stored, with stored archive members (`<x>.d/…`) as inputs of their own and
+their archive not unpacked again. **Parsing never fails a gateway job and never loses the original**: service down, 503 after the retry, `failed`, poll timeout: a note
+(`not parsed (<why>)`, the `error` of `status.json` when there is one) and the stored originals still listed.
 
-`index.json` is written once at the end (the existing manifest, which the gateway wrote, plus the new `{path, size, content_type}` entries, `text` marks and `notes`),
-**before** `status.json` = `{status, owner_replica, updated}` (`running` rewritten every 10 s; older than 30 s = "wrapper lost" and the job may be restarted). Any replica
-answers `GET` from memory or from `status.json` with the credential the gateway sends. A failed job keeps its uploaded artefacts, an `index.json` noting
-`not parsed (<why>)` and the original; **parsing never fails a gateway job and never loses the original** (service down, 503 after the retry, `failed`, poll timeout:
-a note). Plain text gets no `parsed/` copy: the manifest marks the original as text and `text` comes from `original/<path>`.
+The gateway's inline text (`jobs._job_result(key, main, notes)`): for the original `main` (its entry of `index.json`), `parsed/<main>.md|.json`, else the original itself when
+a default processor marked it as text (`meta.text`), if its size is under `INLINE_LIMIT`; else `terse/<main>.md` (or `terse/<main>`) if that fits. Notes are the
+index's, every entry's and the member entries'. `get_file_text`, `grep_file` (`content/grep.py`), `get_file_url` take paths in the job (`original/<name>`, `parsed/…`).
 
-The gateway's inline text (`jobs._job_result(key, main, notes)`): for the original `main`, `parsed/<main>.md|.json`, else a text-marked `original/<main>`, if its
-manifest size is under `INLINE_LIMIT`; else `terse/<main>.md` (or `terse/<main>`) if that fits. `get_file_text`, `grep_file` (`content/grep.py`), `get_file_url`
-and the tool signatures are unchanged.
+**Limits** are the library's per-class `PARSE_LIMITS` (see [deploy and configure](../operations/deploy-and-configure.md#configuration-env-see-envexample)), with finite
+built-ins; this project sets today's per-job limits as `default.*` in `.env`. **Egress and the store**: the wrapper reaches the store only through the **blob-sidecar** (squid 6, HTTP
+Basic with the proxy token on every request; public internet only, `PARSE_PROXY_ALLOW` = `seaweedfs:8333` in dev for exactly that address and port), the parser has no route out.
+**Trust change from the first design:** the wrapper no longer builds the job's storage keys; the gateway sends complete base URLs and credentials, so the confinement to one job
+rests on the credential (here the read side is project-wide, deliberately) and on the gateway building URLs only from validated ids; see the library's security guide.
 
-Egress and the store: the wrapper reaches the store only through the **blob-sidecar** (squid 6, HTTP Basic with the proxy token on every request, 407 without;
-`http` and `https` CONNECT; no destination allowlist) whose own egress rules, a copy of the browser-clear ones (public internet only; `blob-sidecar/egress_rules.py`),
-reject private ranges, link-local/metadata, CGNAT and loopback; `PARSE_PROXY_ALLOW` (dev: `seaweedfs:8333`) is the one exception, for exactly that address and port.
-**OCR** (`parser/spider_hoarder_parser/ocr.py`, called from `parse._convert` for non-HTML files): standalone images (png, jpeg, webp, gif, tiff, bmp) and
+**OCR** (`lib/cadmus-parser/server/cadmus_parser_server/ocr.py`, called by the `documents` processor for non-HTML files): standalone images (png, jpeg, webp, gif, tiff, bmp) and
 PDFs with pages whose text layer has < `OCR_MIN_CHARS` (20) characters are OCR'd into `parsed/<path>.md`. Tesseract (`OCR_LANGS`, default `nor+eng`) runs
 first; its result is accepted at mean word confidence >= `OCR_MIN_CONF` (70) and >= `OCR_MIN_CHARS` characters, otherwise, **only if the job has a remote OCR
-profile**, the image (downscaled to `OCR_MAX_SIDE` 2000 px) goes to the sidecar and its text replaces Tesseract's. Without a profile Tesseract's text is used
+profile**, the image (downscaled to `OCR_MAX_SIDE` 2000 px) goes to the **ocr-sidecar** (the common sidecar protocol: `POST /process`, the image as the body, the transcript as the
+`text/plain` response; stateless, own pinned egress, optional) and its text replaces Tesseract's. Without a profile Tesseract's text is used
 whatever its confidence. A failed remote step keeps Tesseract's text. A scanned PDF is rebuilt per page from pdfium's text, OCR'd pages marked
 `<!-- page N (ocr) -->` (rasterised at `OCR_DPI` 200, at most `OCR_MAX_PAGES` 50 per file). Provenance is always in the job's `notes`
 (`<path>: ocr tesseract (conf 91)`, `ocr remote`, `ocr tesseract (conf 38), remote failed: TimeoutError`, `page N ocr …`, `ocr stopped at page N`); an image over
 Pillow's pixel limit is noted and not OCR'd. Privacy: images leave the swarm only for a backend whose `<NAME>_PARSE_OCR` names a profile. Tuning variables are
-global, forwarded by the wrapper to the parser (`wrapper.PARSER_LIMIT_ENV`). See also: [Plan: OCR hybrid](../implemented-plans/ocr-hybrid.md)
+global, forwarded by the wrapper to the parser. See also: [Plan: OCR hybrid](../implemented-plans/ocr-hybrid.md)
 
-Remote OCR is the **ocr-sidecar** (stateless forwarder, own pinned egress, optional): see [Plan: parser wrapper](../implemented-plans/parser-wrapper.md).
-See also: [Plan: parser wrapper](../implemented-plans/parser-wrapper.md)
+See also: [Plan: parser wrapper](../implemented-plans/parser-wrapper.md), [Plan: the parser service as a library](../implemented-plans/parse-sandbox-library.md)
 
 ### File metadata
 Every stored file (archive members too, and files over `MAX_PARSE_BYTES`: the extractors read headers) gets `metadata/<path>.yaml`
@@ -116,24 +111,24 @@ whose only finding is its type (ExifTool's `File` group) counts as none.
 
 Top-level keys are groups. ExifTool's own (`exiftool -json -g1 -struct`: `EXIF`, `XMP-dc`, `QuickTime`, `File`, ...) pass through as
 produced, minus the filesystem facts of the staged copy (`System`, `ExifTool`, file name/size/times); binary tags are not embedded.
-Our extensions are further groups named `SpiderHoarder-<Format>`, values arbitrarily nested:
+Our extensions are further groups named `Cadmus-<Format>`, values arbitrarily nested:
 
 | Group | Files | Content | Tool |
 |---|---|---|---|
-| `SpiderHoarder-Raster` | GeoTIFF/GDAL rasters | `CRS` (`EPSG`, `WKT`), `BBox`, `BBoxWGS84` (only with a CRS), `Resolution`, `Size`, `Bands`, `NoData`, `Tags` | `rasterio` |
-| `SpiderHoarder-Vector` | GPX, KML, GeoJSON, GeoPackage, shapefile zip | `CRS`, `BBox`, `BBoxWGS84`, `Layers` (name, geometry type, features) | `pyogrio` |
-| `SpiderHoarder-Office` | docx/xlsx/pptx | `Revisions` (docx tracked changes: author, date, insert/delete, text), `Comments`, `LastModifiedBy`, `RevisionCount` | `zipfile` + `lxml` (no entity expansion, size/ratio limits) |
-| `SpiderHoarder-PDF` | pdf | `IncrementalUpdates` (`%%EOF` count − 1; a linearized PDF reads one too high), XMP `History`, `Producer`, `Creator`, `CreatorTool` | `pypdf` + raw scan |
-| `SpiderHoarder-Media` | audio/video | `Duration`, `Streams`, `Chapters`, `Tags` | `ffprobe` |
+| `Cadmus-Raster` | GeoTIFF/GDAL rasters | `CRS` (`EPSG`, `WKT`), `BBox`, `BBoxWGS84` (only with a CRS), `Resolution`, `Size`, `Bands`, `NoData`, `Tags` | `rasterio` |
+| `Cadmus-Vector` | GPX, KML, GeoJSON, GeoPackage, shapefile zip | `CRS`, `BBox`, `BBoxWGS84`, `Layers` (name, geometry type, features) | `pyogrio` |
+| `Cadmus-Office` | docx/xlsx/pptx | `Revisions` (docx tracked changes: author, date, insert/delete, text), `Comments`, `LastModifiedBy`, `RevisionCount` | `zipfile` + `lxml` (no entity expansion, size/ratio limits) |
+| `Cadmus-PDF` | pdf | `IncrementalUpdates` (`%%EOF` count − 1; a linearized PDF reads one too high), XMP `History`, `Producer`, `Creator`, `CreatorTool` | `pypdf` + raw scan |
+| `Cadmus-Media` | audio/video | `Duration`, `Streams`, `Chapters`, `Tags` | `ffprobe` |
 
-Code: `parser/spider_hoarder_parser/metadata.py`, run by the parser on the pulled `original/<path>` (so big files work). Each extractor runs in its own child
+Code: `lib/cadmus-parser/server/cadmus_parser_server/metadata.py`, run by the `metadata` processor in the parser on the pulled `original/<path>` (so big files work). Each extractor runs in its own child
 process inside the parser (`prlimit` address space `METADATA_MAX_MEM` = 1 GiB, CPU and output-size limits; wall clock `METADATA_TIMEOUT` = 30 s, killed on
 overrun; scrubbed environment). Isolation is the parser container (no egress, a pool uid that holds nothing), not a per-extractor network namespace
 (`unshare` is blocked by Docker's default seccomp profile, so the old `unshare -rn` never applied in the shipped images). `ffprobe` runs with
 `-protocol_whitelist file`; `.vrt` rasters are not opened. A failing extractor is a note (`"<path>: metadata <extractor> failed (<error>)"`),
 never a failed job; the other extractors' output is still written. The YAML is capped at `METADATA_MAX_BYTES` (1 MiB): the longest
 list of an extension group is halved until it fits, with `Truncated: true` in the group and a note.
-See also: [Plan: file metadata](../implemented-plans/file-metadata.md) (its isolation section is superseded), [Plan: parser wrapper](../implemented-plans/parser-wrapper.md)
+See also: [Plan: the parser service as a library](../implemented-plans/parse-sandbox-library.md) (the `Cadmus-*` groups), [Plan: file metadata](../implemented-plans/file-metadata.md) (its isolation section is superseded), [Plan: parser wrapper](../implemented-plans/parser-wrapper.md)
 
 ## HTML conversion
 markitdown converts the whole page or the `target` element losslessly; trafilatura runs on the same HTML into `simplified/`.
@@ -151,30 +146,30 @@ See also: [Plan: save-page target](../implemented-plans/save-page-target.md)
   recipient needs no account and no network path to the store); `get_upload_link(project?)` an upload page link (1 h) for a new job, so
   uploads need no SSO and write only into that job. The token is **signed, not encrypted**: it carries `<proj>/<session>/<job>/<path>`
   (no email) and anyone holding the link can read it. Secret: `BLOB_TOKEN_SECRET`. A deleted project takes its upload links with it.
-- **Scoped store credentials** (`gateway/creds.py`): for components that touch the store themselves (the parser wrapper, [Plan: parser
-  wrapper](../implemented-plans/parser-wrapper.md)) the gateway mints a short-lived credential (900 s) limited to read `projects/<proj>/data/*` and
+- **Scoped store credentials** (`gateway/creds.py`, this project's policy on the cadmus-parser minting helper `cadmus_parser.minting`): for components that touch the store themselves (the parser wrapper, [Plan: the parser service as a
+  library](../implemented-plans/parse-sandbox-library.md)) the gateway mints a short-lived credential (900 s) limited to read `projects/<proj>/data/*` and
   write `projects/<proj>/data/<session>/<job>/*`, and hands it over as plain fsspec options (`key`, `secret`, `token`; GCS: `token`). S3 /
   SeaweedFS: a **new role per job** whose own policy is exactly that (no broad role behind it, no session policy to forget), assumed
-  by the gateway; deleting the role revokes the credential at once, so it ends with the job (`Scoped.release`) and with the project
+  by the gateway; deleting the role revokes the credential at once, so it ends with the job (`creds.release`) and with the project
   (`revoke_project`), and a sweeper (every 5 min) deletes roles a crashed gateway left behind. GCS: a Credential Access Boundary
   (downscoped token; narrow by construction, not revocable). Every failure raises: no fallback to the gateway's own credential. The gateway
   needs the right to create roles (SeaweedFS: the `Admin` action). Sessions hold no store credentials (the gateway writes their `out/` files for
-  them). Verified on SeaweedFS 4.53 (`sdk/tests/test_creds.py`); `gateway/parse_client.py` mints one per parse and releases it after the poll.
+  them). Verified on SeaweedFS 4.53 (`sdk/tests/test_creds.py`); `gateway/parse_client.py` mints one per parse, renews it while the job runs and revokes it after.
 - **The stack's SeaweedFS** (`SEAWEEDFS=1`, default with `--dev`; `docker-compose.seaweedfs.yml`): pinned image, S3 on its own overlay network that
   the gateways join, no published port; `deploy.sh` generates its config from `SEAWEEDFS_*`, creates the bucket with `weed shell` and gives the gateways
-  `RESEARCH_BLOB_URL` / `RESEARCH_BLOB_OPTIONS`. Its roles live in memory: a restart ends the credentials in flight (the consumer re-mints).
+  `RESEARCH_BLOB_URL` / `RESEARCH_BLOB_OPTIONS`. Its roles live in memory: a restart ends the credentials in flight (the client re-mints).
   See also: [Plan: project access model](../implemented-plans/project-access-model.md)
 - Every archive (upload, `ingest_page` download, network response body) is unpacked to `original/<archive path>.d/<relpath>`, members
   parsed as any file (`parsed/<archive path>.d/<relpath>.md`); archives inside archives are only stored. Detected by extension or
   content type only (`archive_kind`): zip, tar (`.tar .tgz .tar.gz .tbz .tbz2 .tar.bz2 .txz .tar.xz`, streamed), 7z (`py7zr`),
   rar (`rarfile`, needs `unar` in the parser image) and single-file `.gz/.bz2/.xz` (one member named without the suffix). Only regular files
   are extracted: names with an absolute path or `..` are dropped, symlinks/hardlinks/devices/FIFOs are skipped and listed in `notes`
-  (`"<name> skipped (symlink)"`), never followed (`parser/tests/test_archive_security.py`). Limits, enforced while extracting: `MAX_ARCHIVE_MEMBERS` (50,000)
+  (`"<name> skipped (symlink)"`), never followed (`lib/cadmus-parser/server/tests/test_archive_security.py`). Limits, enforced while extracting: `MAX_ARCHIVE_MEMBERS` (50,000)
   and `MAX_ARCHIVE_BYTES` (4 GiB uncompressed, counted from bytes actually read; `MAX_ZIP_*` still read as fallbacks); an aborted unpack
   is reported in `notes`. 7z members are extracted into memory in 64 MiB batches (by declared size). One parse rule serves every
-  caller (`parser/spider_hoarder_parser/parse.py`, run in the parser service). The archive is unpacked in the parser, never in a gateway.
+  caller (`lib/cadmus-parser/server/cadmus_parser_server/parse.py`, the `files` processor, run in the parser service). The archive is unpacked in the parser, never in a gateway.
   See also: [Plan: network request jobs](../implemented-plans/network-request-jobs.md), [Plan: more file formats](../implemented-plans/more-file-formats.md)
-- Binary structured data is decoded to pretty-printed JSON at `parsed/<path>.json` (`parser/spider_hoarder_parser/extract.py` `binary_to_json`; the original is untouched,
+- Binary structured data is decoded to pretty-printed JSON at `parsed/<path>.json` (`lib/cadmus-parser/server/cadmus_parser_server/extract.py` `binary_to_json`; the original is untouched,
   `.json` originals are not parsed): msgpack (`.msgpack .mp`), CBOR (`.cbor`), BSON (`.bson`, the PyPI `bson` package, concatenated
   documents give a list), plist (`.plist` or `bplist00` magic) and protobuf (`.pb`, `application/(x-)protobuf`, `application/grpc-web*`;
   gRPC-web frames de-framed, `-text` base64-decoded, trailers as text). Detection is by extension / content type, no content sniffing

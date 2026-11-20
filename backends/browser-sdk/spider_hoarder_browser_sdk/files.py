@@ -161,7 +161,7 @@ def _request_body(owner: str, uid: int, arguments: dict, routed: bool = False) -
         key, path = _key(owner, r["job_id"]), _check_rel_path(r["path"])
         if not storage.exists(key, path):
             raise ValueError("file not found")
-        sizes[id(r)] = next(f["size"] for f in storage.get_manifest(key)["files"] if f["path"] == path)
+        sizes[id(r)] = storage.size(key, path)
     files = sum(sizes.values())
     if typ == "navigation":  # one CDP message: everything counts
         if files + text > MAX_REQUEST_BODY:

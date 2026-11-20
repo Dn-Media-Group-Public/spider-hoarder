@@ -36,9 +36,8 @@ Capacity is bounded by the KVM node, not by Swarm: each slot is a 2-CPU / 6 GB c
 
 ## Parser replicas
 The parser service is shared and scales by replicas (`PARSE_REPLICAS`, `docker service scale spider-hoarder_parser=N`): each replica has its own uid pool (`PARSE_POOL_SIZE`) and
-answers **503** when full (the gateway retries once, then notes `not parsed`); the swarm VIP in front of it is enough. A `POST` lands on any replica; status reads
-land on any replica too: the owner answers from memory, the others read `status.json` from the store with the credential in the request (a heartbeat older than 30 s
-reads as "wrapper lost"). A tree of files is parsed by one parser, so wall time per job does not shrink with replicas; throughput does. [Plan: parser wrapper](../implemented-plans/parser-wrapper.md)
+answers **503** when full (the gateway retries once, then notes `not parsed`); the swarm VIP in front of it is enough. A `POST` lands on any replica, which tells the caller its own address (`owner` in the 202) for credential renewals (`POST /jobs/renew`); there is no status endpoint: the
+gateway reads `status.json` from the store (a heartbeat older than 30 s reads as "wrapper lost"). A tree of files is parsed by one parser, so wall time per job does not shrink with replicas; throughput does. [Plan: parser wrapper](../implemented-plans/parser-wrapper.md), [Plan: the parser service as a library](../implemented-plans/parse-sandbox-library.md)
 
 ## Multi-node swarm
 

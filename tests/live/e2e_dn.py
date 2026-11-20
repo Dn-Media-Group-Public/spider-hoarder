@@ -59,9 +59,11 @@ async def job_text(cs, res: str) -> str:
     j = json.loads(res)
     if j.get("text"):
         return j["text"]
-    for f in j.get("files", []):
-        if f["path"].startswith(("parsed/", "original/")) and not f["path"].endswith((".png", ".pdf")):
-            err, t = await call(cs, "get_file_text", job_id=j["job_id"], path=f["path"], length=6000)
+    for name, e in j.get("files", {}).items():
+        for path in (*e["outputs"], f"original/{name}"):
+            if not path.startswith(("parsed/", "original/")) or path.endswith((".png", ".pdf")):
+                continue
+            err, t = await call(cs, "get_file_text", job_id=j["job_id"], path=path, length=6000)
             if not err:
                 return t
     return ""

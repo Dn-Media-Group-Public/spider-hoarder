@@ -19,7 +19,7 @@ descriptors with importlib.metadata and uses PyYAML for the overlay check; see d
   dev-overlay FILE   stack overlay with the dev-only settings of every enabled gateway
   seaweedfs-config DIR  the stack's SeaweedFS's s3.json and iam.json, generated from the SEAWEEDFS_* variables
   seaweedfs-overlay FILE  stack overlay joining every enabled gateway to the SeaweedFS network
-  parse-env          `export K=V` lines for the parser service: PARSE_BLOB_OPTIONS, PARSE_OCR_TABLE, PARSE_PROXY_ALLOW
+  parse-env          `export K=V` lines for the parser service: PARSE_BLOB_OPTIONS, PARSE_OCR_TABLE, PARSE_LIMITS, PARSE_PROXY_ALLOW
   parse-overlay FILE stack overlay wiring the parser service to every enabled backend (and the OCR sidecar, when OCR_PROFILES is set)
   build-parse        docker build (and push) of the parser, blob-sidecar and (with OCR_PROFILES) ocr-sidecar images
   parse-services     the parser service's services to force-restart after deploy, one per line
@@ -199,7 +199,7 @@ def load_overlay(b: Backend) -> dict:
 def seaweedfs_config(environ) -> tuple[dict, dict]:
     """(s3.json, iam.json) of the stack's SeaweedFS: one identity, the gateways', with the Admin action (creating a role per job needs
     IAM rights), and the STS block with default-deny policy. Roles live in SeaweedFS's memory, so a restart ends the credentials
-    in flight (the consumer re-mints). 900 s is the shortest lifetime STS accepts."""
+    in flight (the client re-mints). 900 s is the shortest lifetime STS accepts."""
     import base64
     need = ("SEAWEEDFS_KEY", "SEAWEEDFS_SECRET", "SEAWEEDFS_SIGNING_KEY")
     bad = [v for v in need if environ.get(v, "") in ("", "changeme", "change-me")]
@@ -235,9 +235,15 @@ def ocr_profiles(environ) -> dict:
 
 
 def check_parse_env(backends: list[Backend], environ) -> None:
-    """The parser service's secrets and OCR settings: both tokens set, not placeholders and different secrets; every OCR profile
+    """The parser service's secrets, limits and OCR settings: both tokens set, not placeholders and different secrets; PARSE_LIMITS valid; every OCR profile
     complete with its own token; a backend's `<NAME>_PARSE_OCR` names a profile that exists."""
     errs = [f"{v} is unset or still a placeholder (set it in .env)" for v in PARSE_TOKENS if environ.get(v, "") in PLACEHOLDERS]
+    if raw := (environ.get("PARSE_LIMITS") or "").strip():  # the parser service's per-class limits: refuse a bad one here, not at the wrapper's start
+        try:
+            from cadmus_parser_server import limits
+            limits.resolve(json.loads(raw))
+        except Exception as e:  # noqa: BLE001
+            errs.append(f"PARSE_LIMITS: {e}")
     if not errs and environ["WRAPPER_TOKEN"] == environ["PROXY_TOKEN"]:
         errs.append("WRAPPER_TOKEN and PROXY_TOKEN must be different secrets")
     profiles = ocr_profiles(environ)
@@ -261,33 +267,38 @@ def check_parse_env(backends: list[Backend], environ) -> None:
         raise DeployError("\n".join(errs))
 
 
+def parse_limits(environ) -> str:
+    """PARSE_LIMITS as the operator set it, else this project's default: today's per-job limits as `default.*` for every media class (10 min, 6 GiB, 4 GiB per
+    output file, 64 GiB out), a finite 20 GiB input tree, so a stored original over MAX_PARSE_BYTES still gets metadata. The library's own built-ins (30-60
+    minutes for archives and video) are longer than the gateway's poll window, so they are only used when the operator writes them. The old
+    PARSE_JOB_TIMEOUT (s) and PARSE_RLIMIT_AS (bytes) still count."""
+    if raw := (environ.get("PARSE_LIMITS") or "").strip():
+        return raw
+    d = {"deadline_s": int(environ.get("PARSE_JOB_TIMEOUT") or 600), "ram_mib": int(environ.get("PARSE_RLIMIT_AS") or 6 << 30) >> 20,
+         "fsize_mib": 4096, "input_mib": 20480, "output_mib": 65536}
+    return json.dumps({"default": d})
+
+
 def parse_env(environ) -> dict:
     """What the parser service's stack file reads: the store's options without credentials (the job's scoped credential comes with each
-    request), the wrapper's OCR table (name -> sidecar URL + token) and the proxy exception for the stack's own SeaweedFS."""
+    request), the wrapper's OCR table (name -> sidecar URL + token), the limits and the proxy exception for the stack's own SeaweedFS."""
     opts = json.loads(environ.get("RESEARCH_BLOB_OPTIONS") or "{}")
     return {"PARSE_BLOB_OPTIONS": json.dumps({k: v for k, v in opts.items() if k not in ("key", "secret", "token", "anon")}),
+            "PARSE_LIMITS": parse_limits(environ),
             "PARSE_OCR_TABLE": json.dumps({n: {"url": "http://ocr-sidecar:8080", "token": p["token"]} for n, p in ocr_profiles(environ).items()}),
             "PARSE_PROXY_ALLOW": "seaweedfs:8333" if environ.get("SEAWEEDFS") == "1" else environ.get("PARSE_PROXY_ALLOW", "")}
 
 
 def parse_overlay(backends: list[Backend], environ) -> str:
-    """Per enabled backend a network `<h>-parse` that only its gateway and the shared parser are on (one shared network would let the gateways
-    reach each other), PARSE_URL / PARSE_TOKEN / PARSE_OCR in the gateway; the proxy on the SeaweedFS network when that is the store; the OCR
-    sidecar when profiles are configured."""
+    """The cadmus-parser overlay (lib/cadmus-parser, `cadmus_parser_server.overlay`): per enabled backend a network `<h>-parse` that only its gateway and
+    the shared parser are on, PARSE_URL / PARSE_TOKEN in the gateway, this project's parser image, the proxy on the SeaweedFS network when that
+    is the store and the OCR sidecar when profiles are configured. Ours on top: PARSE_OCR, the OCR profile a backend's files may be sent to."""
     import yaml
-    doc = {"version": "3.8", "services": {"parser": {"networks": [f"{b.h}-parse" for b in backends]}}, "networks": {}}
-    for b in backends:
-        doc["services"][f"{b.h}-gateway"] = {"networks": [f"{b.h}-parse"], "environment": {
-            "PARSE_URL": "http://parser:8080", "PARSE_TOKEN": "${WRAPPER_TOKEN}", "PARSE_OCR": f"${{{b.name.upper()}_PARSE_OCR:-}}"}}
-        doc["networks"][f"{b.h}-parse"] = {"driver": "overlay", "internal": True}
-    if environ.get("SEAWEEDFS") == "1":
-        doc["services"]["blob-sidecar"] = {"networks": ["seaweedfs"]}
-    if ocr_profiles(environ):
-        doc["services"]["ocr-sidecar"] = {
-            "image": "${IMAGE_PREFIX:-}spider-hoarder-ocr-sidecar:${IMAGE_TAG:-local}", "cap_drop": ["ALL"],
-            "cap_add": ["NET_ADMIN", "SETUID", "SETGID", "SETPCAP", "KILL"], "deploy": {"replicas": 1, "restart_policy": {"condition": "any"}},
-            "environment": {"OCR_PROFILES": "${OCR_PROFILES}", "OCR_TIMEOUT": "${OCR_TIMEOUT:-120}", "OCR_MAX_BODY": "${OCR_MAX_BODY:-10485760}",
-                            "OCR_MAX_CONCURRENT": "${OCR_MAX_CONCURRENT:-4}"}, "networks": ["parse-ocr", "public"]}
+    from cadmus_parser_server import overlay
+    doc = overlay.overlay([f"{b.h}-gateway" for b in backends], dev_store="seaweedfs:8333" if environ.get("SEAWEEDFS") == "1" else None,
+                          ocr=bool(ocr_profiles(environ)), parser_image="${IMAGE_PREFIX:-}spider-hoarder-parser:${IMAGE_TAG:-local}",
+                          extra_env={f"{b.h}-gateway": {"PARSE_OCR": f"${{{b.name.upper()}_PARSE_OCR:-}}"} for b in backends},
+                          network_names={f"{b.h}-gateway": f"{b.h}-parse" for b in backends})
     return yaml.safe_dump(doc, sort_keys=False)
 
 
@@ -296,11 +307,12 @@ def parse_services(environ) -> list[str]:
 
 
 def build_parse(environ, run=subprocess.run) -> None:
-    for tag, dockerfile, context in (("spider-hoarder-parser:local", "parser/Dockerfile", REPO_ROOT),
-                                     ("spider-hoarder-blob-sidecar:local", "blob-sidecar/Dockerfile", os.path.join(REPO_ROOT, "blob-sidecar")),
-                                     *([("spider-hoarder-ocr-sidecar:local", "ocr-sidecar/Dockerfile", os.path.join(REPO_ROOT, "ocr-sidecar"))]
-                                       if ocr_profiles(environ) else [])):
-        build_one(tag, os.path.join(REPO_ROOT, dockerfile), context, environ, "parse", run)
+    """The library's sidecars (context: the submodule), then this project's parser image (context: the repo root, it ADDs the submodule)."""
+    lib = os.path.join(REPO_ROOT, "lib", "cadmus-parser")
+    for tag, dockerfile, context in (("cadmus-parser-blob-sidecar:local", os.path.join(lib, "blob-sidecar", "Dockerfile"), lib),
+                                     *([("cadmus-parser-ocr-sidecar:local", os.path.join(lib, "ocr-sidecar", "Dockerfile"), lib)] if ocr_profiles(environ) else []),
+                                     ("spider-hoarder-parser:local", os.path.join(REPO_ROOT, "parser", "Dockerfile"), REPO_ROOT)):
+        build_one(tag, dockerfile, context, environ, "parse", run)
 
 
 def validate(backends: list[Backend]) -> None:

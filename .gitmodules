@@ -1,0 +1,3 @@
+[submodule "lib/cadmus-parser"]
+	path = lib/cadmus-parser
+	url = git@github.com:Dn-Media-Group-Public/cadmus-parser.git

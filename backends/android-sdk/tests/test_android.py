@@ -284,7 +284,7 @@ def test_file_tool_fetches_from_slot_into_a_job():
         testing.bind_project(None)
         r = asyncio.run(app.call_tool("device_take_screenshot", {"filename": "../../my shot.png"}))
         out = json.loads(r.content[0].text)
-        assert out["files"][0]["path"] == "original/my shot.png" and "text" not in out, out
+        assert list(out["files"]) == ["my shot.png"] and "text" not in out, out
         r = asyncio.run(app.call_tool("device_snapshot", {}))
         assert "produced no readable output file" in r.content[0].text and r.isError  # slot had nothing
     finally:
@@ -406,7 +406,7 @@ def test_apk_upload_is_stored_not_parsed():
     testing.fresh_store()
     key = testing.new_job("a@b.c")[1]
     r = jobs._store_and_parse(key, "x.apk", b"PK\3\4", "application/vnd.android.package-archive")
-    assert [f["path"] for f in r["files"]] == ["original/x.apk"]
+    assert list(r["files"]) == ["x.apk"]
 
 
 def test_reserve_android_is_per_slot_not_per_total():

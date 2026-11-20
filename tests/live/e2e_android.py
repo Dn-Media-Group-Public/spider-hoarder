@@ -173,8 +173,8 @@ async def main():
         err, text = await a.call("device_snapshot")
         snap = json.loads(text)
         first_screen = snap.get("text", "")
-        check("device_snapshot job", not err and snap["files"][0]["path"].endswith("snapshot.txt"), str(snap["files"]))
-        err, text = await a.call("grep_file", job_id=snap["job_id"], path=snap["files"][0]["path"], pattern="/chrome|settings|play store/i", context=0)
+        check("device_snapshot job", not err and next(iter(snap["files"])).endswith("snapshot.txt"), str(snap["files"]))
+        err, text = await a.call("grep_file", job_id=snap["job_id"], path="original/" + next(iter(snap["files"])), pattern="/chrome|settings|play store/i", context=0)
         check("grep_file over a snapshot job", not err and "-- line" in text, text[:100].replace("\n", " | "))
         err, text = await a.call("device_open_url", url="https://example.com")
         check("device_open_url", not err, text[:100])
@@ -195,8 +195,8 @@ async def main():
             check("device_click by ref", not err, text[:100])
         err, text = await a.call("device_take_screenshot", filename="e2e.png")
         shot = json.loads(text)
-        check("screenshot job", not err and shot["files"][0]["path"].endswith("e2e.png"), str(shot["files"]))
-        err, text = await a.call("get_file_url", job_id=shot["job_id"], path=shot["files"][0]["path"])
+        check("screenshot job", not err and next(iter(shot["files"])).endswith("e2e.png"), str(shot["files"]))
+        err, text = await a.call("get_file_url", job_id=shot["job_id"], path="original/" + next(iter(shot["files"])))
         url = json.loads(text)["url"]
         blob = httpx.get(local(url), headers=HOSTHDR)
         check("get_file_url download is a PNG (through nginx)", blob.status_code == 200 and blob.content[:4] == b"\x89PNG",
@@ -211,7 +211,7 @@ async def main():
         r = httpx.post(local(up["url"]), headers=HOSTHDR, files={"files": ("e2e.apk", apk, "application/vnd.android.package-archive")}, timeout=120)
         check("upload page accepts an APK (through nginx)", r.status_code < 300, str(r.status_code))
         err, text = await a.call("list_files", job_id=up["job_id"])
-        paths = [f["path"] for f in json.loads(text)["files"]]
+        paths = ["original/" + n for n in json.loads(text)["files"]]
         check("uploaded APK in the job", "original/e2e.apk" in paths, str(paths))
         err, text = await a.call("device_install_apk", job_id=up["job_id"], path="original/e2e.apk")
         check("device_install_apk", not err, text[:150])

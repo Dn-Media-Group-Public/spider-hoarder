@@ -355,3 +355,5 @@ Decided with the user while implementing; where this section and the text above 
 - `docs/operations/deploy-and-configure.md`: new variables (tokens, `PARSE_PROXY_ALLOW`, OCR profile table, limits), `RESEARCH_BLOB_URL` for `s3://` and `gs://`, the extras.
 - `docs/implemented-plans/file-metadata.md`: its isolation section is superseded.
 - `docs/implemented-plans/index.md` and `docs/plans/index.md`; each updated section gets `See also: [Plan: parser wrapper](../implemented-plans/parser-wrapper.md)`.
+
+See also: [Plan: the parser service as a library](parse-sandbox-library.md) (the code moved into the `cadmus-parser` submodule and was generalised: base URLs, per-class limits, processors, the common sidecar protocol, no GET).

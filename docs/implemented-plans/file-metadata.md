@@ -21,13 +21,13 @@ next to the other artefacts, readable by the agent with `get_file_text` / `grep_
 ### Shape
 
 Top-level key = **group**, value = mapping of tags. ExifTool's own tags come from `exiftool -json -g1` (nested by group: `EXIF`, `XMP-dc`,
-`QuickTime`, `File`, ...). Our extensions are further groups beside them, named `SpiderHoarder-<Format>`, a prefix ExifTool will never emit;
+`QuickTime`, `File`, ...). Our extensions are further groups beside them, named `Cadmus-<Format>`, a prefix ExifTool will never emit;
 their values may be arbitrarily nested (lists of revisions etc.).
 
 ```yaml
 File: {FileType: DOCX, MIMEType: application/vnd.openxmlformats-officedocument.wordprocessingml.document}
 XMP-dc: {Creator: Jane Doe}
-SpiderHoarder-Office:
+Cadmus-Office:
   Revisions:
     - {Author: Jane Doe, Date: "2024-03-01T10:12:00Z", Type: insert, Text: "..."}
   Comments: [...]
@@ -42,11 +42,11 @@ Values are passed through as produced (no remapping to a custom schema). Non-YAM
 | Extractor | Files | Group(s) | Tool |
 |---|---|---|---|
 | ExifTool | everything | ExifTool's own groups | `exiftool -json -g1 -struct` |
-| Raster | GeoTIFF and other GDAL rasters | `SpiderHoarder-Raster`: `CRS` (EPSG if known, WKT), `BBox` (native), `BBoxWGS84`, `Resolution`, `Size`, `Bands`, `NoData`, `Tags` | `rasterio` |
-| Vector | GPX, KML, GeoJSON, shapefile (zip), GeoPackage | `SpiderHoarder-Vector`: `CRS`, `BBox`, `BBoxWGS84`, `Layers` (name, geometry type, feature count) | OGR via `pyogrio`/`fiona` (the same GDAL as rasterio) |
-| Office | docx / xlsx / pptx | `SpiderHoarder-Office`: `Revisions` (author, date, insert/delete, text), `Comments`, `LastModifiedBy`, `RevisionCount` | `zipfile` + `lxml` on the OOXML parts (size/ratio limits as for archives) |
-| PDF | pdf | `SpiderHoarder-PDF`: XMP `History`, `IncrementalUpdates` (count of `%%EOF` / xref sections), `Producer`/`Creator` chain | `pypdf` + raw scan |
-| Media | audio and video | `SpiderHoarder-Media`: `Streams` (codec, bitrate, resolution, fps, channels), `Chapters`, container `Tags`, `Duration` | `ffprobe -print_format json` |
+| Raster | GeoTIFF and other GDAL rasters | `Cadmus-Raster`: `CRS` (EPSG if known, WKT), `BBox` (native), `BBoxWGS84`, `Resolution`, `Size`, `Bands`, `NoData`, `Tags` | `rasterio` |
+| Vector | GPX, KML, GeoJSON, shapefile (zip), GeoPackage | `Cadmus-Vector`: `CRS`, `BBox`, `BBoxWGS84`, `Layers` (name, geometry type, feature count) | OGR via `pyogrio`/`fiona` (the same GDAL as rasterio) |
+| Office | docx / xlsx / pptx | `Cadmus-Office`: `Revisions` (author, date, insert/delete, text), `Comments`, `LastModifiedBy`, `RevisionCount` | `zipfile` + `lxml` on the OOXML parts (size/ratio limits as for archives) |
+| PDF | pdf | `Cadmus-PDF`: XMP `History`, `IncrementalUpdates` (count of `%%EOF` / xref sections), `Producer`/`Creator` chain | `pypdf` + raw scan |
+| Media | audio and video | `Cadmus-Media`: `Streams` (codec, bitrate, resolution, fps, channels), `Chapters`, container `Tags`, `Duration` | `ffprobe -print_format json` |
 
 Detection by extension / content type (same style as `extract.binary_kind`); ExifTool runs on everything and decides by content itself.
 Output of all extractors for a file is merged into one mapping (distinct group keys, so no collisions) and dumped with `yaml.safe_dump`.

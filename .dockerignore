@@ -1,5 +1,6 @@
 # Build context of every image is the repo root (docs/plans/build-in-docker.md); keep secrets and junk out of it.
 .git
+**/.git
 .venv
 .build
 .env*

@@ -26,9 +26,10 @@ ENV CMP_BLOCKLIST_PATH=/opt/cmp_blocklist.txt
 
 # The SDK packages (third-party dependencies come from PyPI, ours from the source tree)
 COPY sdk/ /src/sdk/
+ADD lib/cadmus-parser /cadmus
 COPY backends/browser-sdk/ /src/browser-sdk/
 # GCS support is a separate pip step: sdk/pyproject.toml explains the protobuf pin that stops one resolution
-RUN pip install --no-cache-dir "/src/sdk[s3]" /src/browser-sdk \
+RUN pip install --no-cache-dir "/src/sdk[s3]" /cadmus/client /src/browser-sdk \
  && pip install --no-cache-dir --no-deps "boto3==$(python -c 'import botocore;print(botocore.__version__)')" s3transfer \
  && pip install --no-cache-dir gcsfs google-auth \
  && rm -rf /src && chmod -R a+rX /venv/lib \

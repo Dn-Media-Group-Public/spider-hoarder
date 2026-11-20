@@ -70,9 +70,9 @@ Firewall rules are installed per session uid by the browser start script (`start
 | `browser_tor` | ACCEPT only the session's own Tor SocksPort on `browser-tor-daemon`; REJECT everything else. IPv6 is rejected for all session uids. |
 | `browser_i2p` | ACCEPT only the session's own SOCKS port on `browser-i2p-router-<slot>`; REJECT everything else. |
 
-The parser service's egress proxy (`blob-sidecar`) has **its own copy** of the `browser_clear` rules (`blob-sidecar/egress_rules.py`, applied by its start script as root with `NET_ADMIN`, dropped
+The parser service's egress proxy (`blob-sidecar`) has **its own copy** of the `browser_clear` rules (`lib/cadmus-parser/common/egress_rules.py`, one file shared by both parser sidecars, applied by its start script as root with `NET_ADMIN`, dropped
 before squid starts; not imported, allowed to drift), plus the `PARSE_PROXY_ALLOW` exception (dev SeaweedFS) for exactly one address and port; the OCR sidecar's egress is pinned to its profile endpoints
-(`ocr-sidecar/egress_rules.py`). See also: [Plan: parser wrapper](../implemented-plans/parser-wrapper.md)
+(the same file). See also: [Plan: parser wrapper](../implemented-plans/parser-wrapper.md), [Plan: the parser service as a library](../implemented-plans/parse-sandbox-library.md)
 
 The gateway's own `requests` downloads (non-HTML) use `netguard.py` on clear (resolve, reject non-public, pin the IP, re-check every
 redirect) and `socks5h://<router>:<port>` on Tor and I2P (`browser-tor-daemon` / `browser-i2p-router-<slot>`; the session's own port when `ingest_page` runs inside a

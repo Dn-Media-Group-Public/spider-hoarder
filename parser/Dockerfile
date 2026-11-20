@@ -1,20 +1,15 @@
-# The parser container (docs/plans/parser-wrapper.md): the wrapper (own uid, keeps CAP_SETUID/SETGID/CHOWN/KILL) and the sandboxed parser
-# processes it forks as pool uids. No egress of its own: its networks hold only the gateways, the blob proxy and the OCR sidecar.
-# Build context: the repo root (docker build -f parser/Dockerfile .). GCS support is a separate pip step (sdk/pyproject.toml explains the pin).
+# The parser container of this project: the cadmus-parser library (lib/cadmus-parser: the wrapper, the uid pool and the default processors) plus the
+# format tools those processors shell out to. The tools run only inside the sandboxed parser processes.
+# Build context: the repo root (docker build -f parser/Dockerfile .).
 FROM debian:bookworm-slim
 ENV PATH=/venv/bin:$PATH
+ADD lib/cadmus-parser /cadmus
 RUN apt-get update \
- && apt-get install -y --no-install-recommends python3 python3-venv python3-pip ca-certificates tini util-linux unar libimage-exiftool-perl ffmpeg tesseract-ocr tesseract-ocr-nor tesseract-ocr-eng \
+ && apt-get install -y --no-install-recommends unar libimage-exiftool-perl ffmpeg tesseract-ocr tesseract-ocr-nor tesseract-ocr-eng \
  && rm -rf /var/lib/apt/lists/* \
- && python3 -m venv /venv \
- && groupadd -g 900 wrapper && useradd -u 900 -g 900 --no-create-home --shell /usr/sbin/nologin wrapper \
- && mkdir /scratch && chown wrapper:wrapper /scratch
-COPY parser/ /src/parser/
-RUN pip install --no-cache-dir "/src/parser[s3]" \
- && pip install --no-cache-dir gcsfs google-auth \
- && rm -rf /src && chmod -R a+rX /venv
-# the scratch area is ephemeral: an anonymous volume of the task (never a named one), so a restart deletes what a crash left
+ && /cadmus/server/install.sh s3,files
+# GCS support after the processors: blackboxprotobuf pins a protobuf that gcsfs refuses (pip only warns)
+RUN pip install --no-cache-dir "/cadmus/server[gcs]" && chmod -R a+rX /venv
 VOLUME /scratch
-COPY parser/entrypoint.sh /app/entrypoint.sh
 EXPOSE 8080
-ENTRYPOINT ["tini", "--", "/app/entrypoint.sh"]
+ENTRYPOINT ["tini", "--", "/cadmus/server/entrypoint.sh"]
