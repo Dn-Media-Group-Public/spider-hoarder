@@ -144,6 +144,7 @@ if [ -n "${PIN_DATA:-}" ]; then
   $TOOL pin .build/docker-compose.pin.yml
   FILES+=(-c .build/docker-compose.pin.yml)
 fi
+[ ! -f docker-compose.resources.yml ] || FILES+=(-c docker-compose.resources.yml)
 
 if [ -n "$IMAGE_PREFIX" ]; then
   docker stack deploy --prune "${FILES[@]}" "$STACK"   # tags are unique per revision: nothing to force
