@@ -277,6 +277,9 @@ def test_parse_env_checks(tmp_path):
     ok = {**PARSE_ENV, "OCR_PROFILES": json.dumps(OCR), "DUMMY_ONE_PARSE_OCR": "lan"}
     sh.check_parse_env([a], ok)
     sh.check_parse_env([a], PARSE_ENV)  # OCR is optional
+    oauth = {"token": "t3", "base_url": "https://llm/v1", "model": "m", "auth": "oauth2", "token_url": "https://id/token", "client_id": "c", "client_secret_env": "S"}
+    sh.check_parse_env([a], {**ok, "ASR_PROFILES": json.dumps({"o": oauth}), "DUMMY_ONE_PARSE_ASR": "o", "DUMMY_ONE_PARSE_ASR_FALLBACK": "o",
+                             "OCR_PROFILES": json.dumps({"o": oauth}), "DUMMY_ONE_PARSE_OCR": "o"})
     sh.check_parse_env([a], {**ok, "PARSE_LIMITS": '{"default": {"deadline_s": 60}, "video": {"ram_mib": 0}}'})
     for bad in ({"WRAPPER_TOKEN": "changeme"}, {"PROXY_TOKEN": ""}, {"PROXY_TOKEN": PARSE_ENV["WRAPPER_TOKEN"]},
                 {"OCR_PROFILES": "{"}, {"OCR_PROFILES": "[]"}, {"OCR_PROFILES": json.dumps({"x": {"token": "t"}})},
@@ -284,6 +287,9 @@ def test_parse_env_checks(tmp_path):
                 {"OCR_PROFILES": json.dumps({"x": {**OCR["remote"], "auth": "google"}})},
                 {"OCR_PROFILES": json.dumps({"x": OCR["remote"], "y": OCR["remote"]})},  # a token picks the profile: unique
                 {"OCR_PROFILES": json.dumps({"x": {**OCR["remote"], "token": PARSE_ENV["PROXY_TOKEN"]}})},
+                {"OCR_PROFILES": json.dumps({"x": {**OCR["lan"], "auth": "oauth2"}})},  # needs token_url, client_id, a secret
+                {"OCR_PROFILES": json.dumps({"x": {**OCR["lan"], "auth": "nope"}})},
+                {"ASR_PROFILES": json.dumps({"x": {"token": "t"}})}, {"DUMMY_ONE_PARSE_ASR": "nope"}, {"DUMMY_ONE_PARSE_ASR_FALLBACK": "nope"},
                 {"DUMMY_ONE_PARSE_OCR": "nope"}, {"PARSE_LIMITS": "{"}, {"PARSE_LIMITS": '{"nope": {}}'}, {"PARSE_LIMITS": '{"default": {"ram_mib": -1}}'}):
         with pytest.raises(sh.DeployError):
             sh.check_parse_env([a], {**ok, **bad})
@@ -313,6 +319,10 @@ def test_parse_env_and_overlay(tmp_path):
     assert "image" not in doc["services"]["parser"]  # the library's own cadmus-parser image, from its docker-compose.parse.yml
     plain = yaml.safe_load(sh.parse_overlay([a], {**PARSE_ENV}))
     assert "ocr-sidecar" not in plain["services"] and "blob-sidecar" not in plain["services"]
+    asr = {**env, "ASR_PROFILES": json.dumps({"w": {**OCR["lan"], "token": "t9"}})}
+    assert json.loads(sh.parse_env(asr)["PARSE_ASR_TABLE"]) == {"w": {"url": "http://asr-sidecar:8080", "token": "t9"}} == json.loads(sh.parse_env(asr)["PARSE_ASR_FALLBACK_TABLE"])
+    assert yaml.safe_load(sh.parse_overlay([a], asr))["services"]["dummy-one-gateway"]["environment"]["PARSE_ASR_FALLBACK"] == "${DUMMY_ONE_PARSE_ASR_FALLBACK:-}"
+    assert "asr-sidecar" in yaml.safe_load(sh.parse_overlay([a], asr))["services"] and sh.parse_services(asr)[-1] == "asr-sidecar"
     assert sh.parse_services(env) == ["parser", "blob-sidecar", "ocr-sidecar"] and sh.parse_services(PARSE_ENV) == ["parser", "blob-sidecar"]
     # the static stack file: the parser's networks are internal (no route out), the proxy alone reaches `public`
     base = yaml.safe_load(open(os.path.join(sh.REPO_ROOT, "lib", "cadmus-parser", "docker-compose.parse.yml")))

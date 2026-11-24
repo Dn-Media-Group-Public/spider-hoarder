@@ -41,17 +41,21 @@ users/<user>/<proj>                               index for "my projects" (a hin
 
 ```
 original/<path>      the bytes as received (for HTML: the converted HTML, i.e. the target element's if given)
-parsed/<path>.md     markitdown output (<path> may be nested, e.g. response/body.html)
-simplified/<name>.md trafilatura main-content guess (HTML only, may silently omit text; never returned inline)
-terse/<name>.md      outline: headings, links, images of parsed/ (or of a Markdown original)
-metadata/<path>.yaml file metadata (EXIF/GPS, Office revisions, CRS, media streams, PDF history); absent if there is none
+<dir>/<path...>      whatever the installed processors wrote, `<dir>` being one of their top directories; nothing here lists them, `index.json` is the
+                     truth. Today, among others: parsed/<path>.md (markitdown; <path> may be nested, e.g. response/body.html), simplified/<name>.md (trafilatura
+                     main-content guess, may silently omit text; never returned inline), terse/<name>.md (outline: headings, links, images of parsed/ or of a
+                     Markdown original), metadata/<path>.yaml (EXIF/GPS, Office revisions, CRS, media streams, PDF history), media/<path>/ (thumbnail,
+                     keyframes, audio.opus, renditions, frame store), asr/, caption/, frame-ocr/ (see the library's docs/reference.md)
 index.json           the parser library's manifest, the job's only one: {files: {<input path under original/>: {size, content_type?, meta?, notes?,
                      outputs: {<path in the job>: {size, content_type, meta?}}, files?: {<archive member>: …}}}, notes?}
-status.json          {status, owner_replica, updated, error?}: the parser service's heartbeat and result
+status.json          {status, owner_replica, updated, error?, traceback?, usage?}: the parser service's heartbeat and result; `usage` (written once the job ends)
+                     is the sidecars' own record of each model call of the job: {calls: [{feature, profile, model, outcome, unit, input, output, t}],
+                     truncated, error?}, only when a sidecar with an admin token served the job (see reference.md#statusjson-and-indexjson of the library)
 meta.json            the gateway's own keys: {url?, target?, text_cap?, depth?, query?, method?, status?, content_types: {<original>: type}, and for
                      browser_network_request_make: type, origin?, body?, redirects?, blocked?}
 ```
-`list_files` returns the index with the meta keys (minus `content_types`) merged in. Before any parse, or when none could be written, the index is built from
+`list_files` returns the index with the meta keys (minus `content_types`) merged in; every output the parser announced is in it and readable by its path
+(`get_file_text`, `grep_file`, `get_file_url`): the gateway filters none. Only the inline `text` picks `parsed/` or `terse/` by name. Before any parse, or when none could be written, the index is built from
 the stored originals; a job from before the parser library (a list `files` and the meta keys at the top of `index.json`) reads as no index and its meta keys.
 `text` is inline if the parsed/original text is under `INLINE_LIMIT` (50,000 chars); else the terse outline if that fits (with
 `text_path` naming it); else omitted, and the MCP client pages with `get_file_text` or searches with `grep_file`.
@@ -71,7 +75,7 @@ One parse per **job**: the gateway stores the job's files under `original/` (`jo
 1. mints the job's scoped credential (`gateway/creds.py`: one read grant for the project's `data/` (a parser may correlate with earlier files of the same
    project) and one write grant for `<job>/`, 900 s; S3: a role per store, revoked after the job; GCS: a downscoped token),
 2. `POST`s `<PARSE_URL>/jobs` with `input.url = <store>/<job>/original`, `output.url = <store>/<job>`, each side's credential, `options = {"files": {base_url,
-   ctypes}}` and `features = {"ocr": "<profile>"}` (from the backend's `<NAME>_PARSE_OCR`) or none; one retry on a 503 or a refused connection,
+   ctypes}}` and `features` = `ocr`, `asr`, `asr-fallback` -> profile, from the backend's `<NAME>_PARSE_OCR`, `_PARSE_ASR`, `_PARSE_ASR_FALLBACK` (only those set), or none; one retry on a 503 or a refused connection,
 3. starts `renew_loop`, which pushes fresh credentials to the replica that took the job every 5 minutes (the grant is project-wide, so renewals are re-keyed to the
    posted input URL; every minted handle is tracked in `creds.active` for `revoke_project`),
 4. waits for `status.json` under `<job>/` (the library's heartbeat rule; 12 min overall, the MCP tool call stays synchronous) and reads `index.json` and the artefacts from

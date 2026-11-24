@@ -3,6 +3,7 @@
 Plans awaiting implementation or kept as background. Implemented plans move to [implemented-plans](../implemented-plans/index.md).
 
 - [OCR: Tesseract first, remote multimodal model fallback](ocr-hybrid.md) — needs the lightllm plan `ocr-vision-models.md` for the default remote model
+- [Usage reporting](usage-reporting.md) — generated admin tokens, MCP tool `get_usage` for a job or a project
 - [gVisor runtime](gvisor-runtime.md) — stub
 - [Metrics and structured logs](metrics-and-logging.md) — stub
 - [`mcp` 2.x SDK port](mcp-sdk-2-migration.md) — stub

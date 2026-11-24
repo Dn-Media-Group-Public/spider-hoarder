@@ -20,8 +20,8 @@ def parse(key: str, base_url: str = "", features: dict | None = None) -> list[st
     url, token = os.environ.get("PARSE_URL", "").rstrip("/"), os.environ.get("PARSE_TOKEN", "")
     if not url:
         return ["not parsed (no parser service configured)"]
-    if features is None and os.environ.get("PARSE_OCR"):  # per-backend: which OCR profile may see this backend's files
-        features = {"ocr": os.environ["PARSE_OCR"]}
+    if features is None:  # per-backend: which profile of each model sidecar may see this backend's files
+        features = {f: os.environ[v] for f, v in (("ocr", "PARSE_OCR"), ("asr", "PARSE_ASR"), ("asr-fallback", "PARSE_ASR_FALLBACK")) if os.environ.get(v)} or None
     _, in_url, out_url = creds.urls(key)
     proj, handles = key.split("/")[1], []
     client = Client(url, token, storage.BLOB_OPTIONS)

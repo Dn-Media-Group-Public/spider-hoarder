@@ -19,8 +19,8 @@ descriptors with importlib.metadata and uses PyYAML for the overlay check; see d
   dev-overlay FILE   stack overlay with the dev-only settings of every enabled gateway
   seaweedfs-config DIR  the stack's SeaweedFS's s3.json and iam.json, generated from the SEAWEEDFS_* variables
   seaweedfs-overlay FILE  stack overlay joining every enabled gateway to the SeaweedFS network
-  parse-env          `export K=V` lines for the parser service: PARSE_BLOB_OPTIONS, PARSE_OCR_TABLE, PARSE_LIMITS, PARSE_PROXY_ALLOW
-  parse-overlay FILE stack overlay wiring the parser service to every enabled backend (and the OCR sidecar, when OCR_PROFILES is set)
+  parse-env          `export K=V` lines for the parser service: PARSE_BLOB_OPTIONS, PARSE_OCR_TABLE, PARSE_ASR_TABLE, PARSE_LIMITS, PARSE_PROXY_ALLOW
+  parse-overlay FILE stack overlay wiring the parser service to every enabled backend (and the OCR / ASR sidecars, when their profiles are set)
   build-parse        docker build (and push) of the library's parser, blob-sidecar and (with OCR_PROFILES) ocr-sidecar images
   parse-services     the parser service's services to force-restart after deploy, one per line
 
@@ -222,16 +222,38 @@ PARSE_TOKENS = ("WRAPPER_TOKEN", "PROXY_TOKEN")
 PLACEHOLDERS = ("", "changeme", "change-me")
 
 
-def ocr_profiles(environ) -> dict:
-    """OCR_PROFILES: {name: {token, base_url, model, auth?, ...}} (JSON, the sidecar's table); {} when unset."""
-    raw = (environ.get("OCR_PROFILES") or "").strip()
+SIDECARS = ("ocr", "asr")  # the model sidecars we deploy: <KIND>_PROFILES (the sidecar's table), <NAME>_PARSE_<KIND> (a backend's profile)
+FALLBACKS = {"asr": "asr-fallback"}  # kinds with an optional second profile, <NAME>_PARSE_<KIND>_FALLBACK
+
+
+def profiles_of(environ, kind: str) -> dict:
+    """<KIND>_PROFILES: {name: {token, base_url, model, auth?, ...}} (JSON, the sidecar's table); {} when unset."""
+    var = f"{kind.upper()}_PROFILES"
+    raw = (environ.get(var) or "").strip()
     try:
         profiles = json.loads(raw) if raw else {}
     except ValueError as e:
-        raise DeployError(f"OCR_PROFILES is not JSON: {e}")
+        raise DeployError(f"{var} is not JSON: {e}")
     if not isinstance(profiles, dict):
-        raise DeployError("OCR_PROFILES must be a JSON object: {name: {token, base_url, model, auth}}")
+        raise DeployError(f"{var} must be a JSON object: {{name: {{token, base_url, model, auth}}}}")
     return profiles
+
+
+def ocr_profiles(environ) -> dict:
+    return profiles_of(environ, "ocr")
+
+
+def check_profile(var: str, name: str, p) -> list[str]:
+    if not isinstance(p, dict) or not all(isinstance(p.get(k), str) and p[k] for k in ("token", "base_url", "model")):
+        return [f"{var}[{name}] needs token, base_url and model"]
+    auth = p.get("auth", "none")
+    need = {"bearer": ("api_key",), "google": ("audience",), "oauth2": ("token_url", "client_id")}
+    if auth != "none" and auth not in need:
+        return [f"{var}[{name}].auth must be none, bearer, google or oauth2"]
+    errs = [f"{var}[{name}] has auth {auth} but no {k}" for k in need.get(auth, ()) if not p.get(k)]
+    if auth == "oauth2" and not (p.get("client_secret") or p.get("client_secret_env")):
+        errs.append(f"{var}[{name}] has auth oauth2 but no client_secret or client_secret_env")
+    return errs
 
 
 def check_parse_env(backends: list[Backend], environ) -> None:
@@ -246,23 +268,18 @@ def check_parse_env(backends: list[Backend], environ) -> None:
             errs.append(f"PARSE_LIMITS: {e}")
     if not errs and environ["WRAPPER_TOKEN"] == environ["PROXY_TOKEN"]:
         errs.append("WRAPPER_TOKEN and PROXY_TOKEN must be different secrets")
-    profiles = ocr_profiles(environ)
-    for name, p in profiles.items():
-        if not isinstance(p, dict) or not all(isinstance(p.get(k), str) and p[k] for k in ("token", "base_url", "model")):
-            errs.append(f"OCR_PROFILES[{name}] needs token, base_url and model")
-        elif p.get("auth", "none") not in ("none", "bearer", "google"):
-            errs.append(f"OCR_PROFILES[{name}].auth must be none, bearer or google")
-        elif p.get("auth") == "bearer" and not p.get("api_key"):
-            errs.append(f"OCR_PROFILES[{name}] has auth bearer but no api_key")
-        elif p.get("auth") == "google" and not p.get("audience"):
-            errs.append(f"OCR_PROFILES[{name}] has auth google but no audience")
-    tokens = [p.get("token") for p in profiles.values() if isinstance(p, dict)]
-    if len(set(tokens)) != len(tokens) or {*tokens} & {environ.get(v) for v in PARSE_TOKENS}:
-        errs.append("OCR_PROFILES tokens must be unique and differ from WRAPPER_TOKEN and PROXY_TOKEN (the token picks the profile)")
-    for b in backends:
-        want = environ.get(f"{b.name.upper()}_PARSE_OCR", "")
-        if want and want not in profiles:
-            errs.append(f"{b.name.upper()}_PARSE_OCR={want} is not a profile of OCR_PROFILES")
+    for kind in SIDECARS:
+        var, profiles = f"{kind.upper()}_PROFILES", profiles_of(environ, kind)
+        for name, p in profiles.items():
+            errs += check_profile(var, name, p)
+        tokens = [p.get("token") for p in profiles.values() if isinstance(p, dict)]
+        if len(set(tokens)) != len(tokens) or {*tokens} & {environ.get(v) for v in PARSE_TOKENS}:
+            errs.append(f"{var} tokens must be unique and differ from WRAPPER_TOKEN and PROXY_TOKEN (the token picks the profile)")
+        for b in backends:
+            for suffix in ("", "_FALLBACK") if kind in FALLBACKS else ("",):
+                v = f"{b.name.upper()}_PARSE_{kind.upper()}{suffix}"
+                if environ.get(v) and environ[v] not in profiles:
+                    errs.append(f"{v}={environ[v]} is not a profile of {var}")
     if errs:
         raise DeployError("\n".join(errs))
 
@@ -279,13 +296,18 @@ def parse_limits(environ) -> str:
     return json.dumps({"default": d})
 
 
+def sidecar_table(environ, kind: str) -> str:
+    return json.dumps({n: {"url": f"http://{kind}-sidecar:8080", "token": p["token"]} for n, p in profiles_of(environ, kind).items()})
+
+
 def parse_env(environ) -> dict:
     """What the parser service's stack file reads: the store's options without credentials (the job's scoped credential comes with each
     request), the wrapper's OCR table (name -> sidecar URL + token), the limits and the proxy exception for the stack's own SeaweedFS."""
     opts = json.loads(environ.get("RESEARCH_BLOB_OPTIONS") or "{}")
     return {"PARSE_BLOB_OPTIONS": json.dumps({k: v for k, v in opts.items() if k not in ("key", "secret", "token", "anon")}),
             "PARSE_LIMITS": parse_limits(environ),
-            "PARSE_OCR_TABLE": json.dumps({n: {"url": "http://ocr-sidecar:8080", "token": p["token"]} for n, p in ocr_profiles(environ).items()}),
+            "PARSE_OCR_TABLE": sidecar_table(environ, "ocr"), "PARSE_ASR_TABLE": sidecar_table(environ, "asr"),
+            "PARSE_ASR_FALLBACK_TABLE": sidecar_table(environ, "asr"),  # a fallback may name a profile of the same sidecar
             "PARSE_PROXY_ALLOW": "seaweedfs:8333" if environ.get("SEAWEEDFS") == "1" else environ.get("PARSE_PROXY_ALLOW", "")}
 
 
@@ -296,21 +318,21 @@ def parse_overlay(backends: list[Backend], environ) -> str:
     import yaml
     from cadmus_parser_server import overlay
     doc = overlay.overlay([f"{b.h}-gateway" for b in backends], dev_store="seaweedfs:8333" if environ.get("SEAWEEDFS") == "1" else None,
-                          ocr=bool(ocr_profiles(environ)),
-                          extra_env={f"{b.h}-gateway": {"PARSE_OCR": f"${{{b.name.upper()}_PARSE_OCR:-}}"} for b in backends},
+                          ocr=bool(ocr_profiles(environ)), asr=bool(profiles_of(environ, "asr")),
+                          extra_env={f"{b.h}-gateway": {f"PARSE_{k}": f"${{{b.name.upper()}_PARSE_{k}:-}}" for k in ("OCR", "ASR", "ASR_FALLBACK")} for b in backends},
                           network_names={f"{b.h}-gateway": f"{b.h}-parse" for b in backends})
     return yaml.safe_dump(doc, sort_keys=False)
 
 
 def parse_services(environ) -> list[str]:
-    return ["parser", "blob-sidecar", *(["ocr-sidecar"] if ocr_profiles(environ) else [])]
+    return ["parser", "blob-sidecar", *(f"{k}-sidecar" for k in SIDECARS if profiles_of(environ, k))]
 
 
 def build_parse(environ, run=subprocess.run) -> None:
-    """The library's own images, all built from the submodule: the parser (default processors and tools), the blob-sidecar and, with OCR_PROFILES, the ocr-sidecar."""
+    """The library's own images, all built from the submodule: the parser (default processors and tools), the blob-sidecar and the ocr- / asr-sidecar when their profiles are set."""
     lib = os.path.join(REPO_ROOT, "lib", "cadmus-parser")
     for tag, dockerfile, context in (("cadmus-parser-blob-sidecar:local", os.path.join(lib, "blob-sidecar", "Dockerfile"), lib),
-                                     *([("cadmus-parser-ocr-sidecar:local", os.path.join(lib, "ocr-sidecar", "Dockerfile"), lib)] if ocr_profiles(environ) else []),
+                                     *((f"cadmus-parser-{k}-sidecar:local", os.path.join(lib, f"{k}-sidecar", "Dockerfile"), lib) for k in SIDECARS if profiles_of(environ, k)),
                                      ("cadmus-parser:local", os.path.join(lib, "server", "Dockerfile"), lib)):
         build_one(tag, dockerfile, context, environ, "parse", run)
 
