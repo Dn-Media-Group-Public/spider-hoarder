@@ -78,7 +78,7 @@ One parse per **job**: the gateway stores the job's files under `original/` (`jo
 1. mints the job's scoped credential (`gateway/creds.py`: one read grant for the project's `data/` (a parser may correlate with earlier files of the same
    project) and one write grant for `<job>/`, 900 s; S3: a role per store, revoked after the job; GCS: a downscoped token),
 2. `POST`s `<PARSE_URL>/jobs` with `input.url = <store>/<job>/original`, `output.url = <store>/<job>`, each side's credential, `options = {"files": {base_url,
-   ctypes}}` and `features` = `ocr`, `asr`, `asr-fallback`, `caption`, `caption-fallback` -> profile, from the backend's `<NAME>_PARSE_OCR`, `_PARSE_ASR`, `_PARSE_ASR_FALLBACK`, `_PARSE_CAPTION`, `_PARSE_CAPTION_FALLBACK` (only those set), or none; one retry on a 503 or a refused connection,
+   ctypes}}` and `features` = `ocr`, `asr`, `asr-fallback`, `caption`, `caption-fallback` -> profile, from the **effective policy** (`parse_client.parse(key, base_url, policy)`: chain entry 0 and 1 of each feature; resolved from the admin env, the project's policy and the session's choices when the job is created, `jobs._new_job`; only the profiles of the chains reach the parser, so a denied feature is unreachable from the sandbox; no policy, or a setting still `ASK`, means off), or none; one retry on a 503 or a refused connection,
 3. starts `renew_loop`, which pushes fresh credentials to the replica that took the job every 5 minutes (the grant is project-wide, so renewals are re-keyed to the
    posted input URL; every minted handle is tracked in `creds.active` for `revoke_project`),
 4. waits for `status.json` under `<job>/` (the library's heartbeat rule; 12 min overall, the MCP tool call stays synchronous) and reads `index.json` and the artefacts from
@@ -106,7 +106,7 @@ profile**, the image (downscaled to `OCR_MAX_SIDE` 2000 px) goes to the **ocr-si
 whatever its confidence. A failed remote step keeps Tesseract's text. A scanned PDF is rebuilt per page from pdfium's text, OCR'd pages marked
 `<!-- page N (ocr) -->` (rasterised at `OCR_DPI` 200, at most `OCR_MAX_PAGES` 50 per file). Provenance is always in the job's `notes`
 (`<path>: ocr tesseract (conf 91)`, `ocr remote`, `ocr tesseract (conf 38), remote failed: TimeoutError`, `page N ocr …`, `ocr stopped at page N`); an image over
-Pillow's pixel limit is noted and not OCR'd. Privacy: images leave the swarm only for a backend whose `<NAME>_PARSE_OCR` names a profile. Tuning variables are
+Pillow's pixel limit is noted and not OCR'd. Privacy: images leave the swarm only when the effective `ocr` chain (admin `<NAME>_POLICY_OCR`, narrowed by the project and the session) names a profile. Every job's notes say what each feature got and from which level (`ocr: lan (admin)`, `caption: off (session policy)`, `asr: off (unresolved)`), for the features the deployment has profiles for; a restrictive policy never fails a job. An upload link signs the session's resolved chains into its token (`blobtoken`, `policy`), the page shows them and lets the uploader only untick (drop) entries, and `upload_submit` parses with that; an old link without a chain means unresolved: off. See also: [Plan: policy levels](../implemented-plans/policy-levels.md).  Tuning variables are
 global, forwarded by the wrapper to the parser. See also: [Plan: OCR hybrid](../implemented-plans/ocr-hybrid.md)
 
 See also: [Plan: parser wrapper](../implemented-plans/parser-wrapper.md), [Plan: the parser service as a library](../implemented-plans/parse-sandbox-library.md)

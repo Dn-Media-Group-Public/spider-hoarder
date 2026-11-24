@@ -128,6 +128,11 @@ new arguments, then **ends the existing session** (all browsers) and starts over
 leftover session reports `opened: true`, so an MCP client that trusts it instead of calling `open_session` inherits the old browser until
 `IDLE_TIMEOUT`. See also: [Plan: No-media sessions](../implemented-plans/no-media-sessions.md)
 
+**Where the policy comes from.** The `media`, `allow` and `deny` choices are resolved from the policy levels (admin env, project, session), not read from the arguments alone: `open_session`
+validates each argument against the bound above it, takes the egress default (`false` on Tor / I2P) as the suggestion when `media` is still `ASK`, and builds the same `Policy`; enforcement
+(layers A and D, the toolserver hook) is unchanged. The session's other choices (which external models may see files) are dropped together with the policy. An operator can fix `media`
+(`<BACKEND>_POLICY_MEDIA`) or a project admin can; `open_session` is refused while a setting that applies is still `ASK`. See also: [Plan: policy levels](../implemented-plans/policy-levels.md)
+
 | Layer | Where | Blocks |
 |---|---|---|
 | A | `context.route`, by resource type | `<img>`, `srcset`, favicons, CSS backgrounds, `<video>`, `<audio>`, `<object>`, web fonts: never requested |

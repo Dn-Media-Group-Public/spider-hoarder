@@ -31,3 +31,4 @@ Back to the [documentation index](../index.md). Open plans: [plans](../plans/ind
 - [Parser service (wrapper, no-secret parser uid, authenticated egress proxy, OCR sidecar)](parser-wrapper.md)
 - [The parser service as a generic library (git submodule `lib/cadmus-parser`)](parse-sandbox-library.md)
 - [Usage reporting (sidecar admin tokens, `get_usage`)](usage-reporting.md)
+- [Policy levels (admin env, project, session; `ASK`; media and external OCR/ASR/caption profiles; `update_project`)](policy-levels.md)

@@ -9,19 +9,25 @@ from cadmus_parser import Client, ParseError
 
 from spider_hoarder_sdk.content import storage
 from spider_hoarder_sdk.gateway import creds
+from spider_hoarder_sdk.gateway import policy as lv
 
 log = logging.getLogger("parse_client")
 POLL_TIMEOUT = int(os.environ.get("PARSE_POLL_TIMEOUT") or 12 * 60)  # seconds; must exceed the largest deadline_s of PARSE_LIMITS (the default is 10 min); the MCP tool call stays synchronous
 RENEW_EVERY = 300  # seconds: well under half the credential's lifetime
 
 
-def parse(key: str, base_url: str = "", features: dict | None = None) -> list[str]:
-    """Parse the job at storage `key` (`projects/<proj>/data/<session>/<job>`) once all its originals are stored; returns notes."""
+def parse(key: str, base_url: str = "", policy: dict | None = None) -> list[str]:
+    """Parse the job at storage `key` (`projects/<proj>/data/<session>/<job>`) once all its originals are stored; returns notes. `policy` is the
+    resolved policy (policy.resolve): only the profiles of its chains reach the parser as `features`, so a denied feature is unreachable from
+    the sandbox. No policy, or a setting still ASK, means off. The notes say which chain each feature got and from which level."""
+    resolved = {f: (policy or {}).get(f) or {"value": lv.ASK, "source": "unresolved"} for f in lv.FEATURES}
+    return lv.notes(resolved, lv.profile_names(os.environ)) + _parse(key, base_url, lv.features(lv.chains(resolved)))
+
+
+def _parse(key: str, base_url: str, features: dict | None) -> list[str]:
     url, token = os.environ.get("PARSE_URL", "").rstrip("/"), os.environ.get("PARSE_TOKEN", "")
     if not url:
         return ["not parsed (no parser service configured)"]
-    if features is None:  # per-backend: which profile of each model sidecar may see this backend's files
-        features = {f: os.environ[v] for f, v in (("ocr", "PARSE_OCR"), ("asr", "PARSE_ASR"), ("asr-fallback", "PARSE_ASR_FALLBACK"), ("caption", "PARSE_CAPTION"), ("caption-fallback", "PARSE_CAPTION_FALLBACK")) if os.environ.get(v)} or None
     _, in_url, out_url = creds.urls(key)
     proj, handles = key.split("/")[1], []
     client = Client(url, token, storage.BLOB_OPTIONS)

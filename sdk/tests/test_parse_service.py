@@ -94,32 +94,39 @@ def test_a_failed_parse_says_why_and_keeps_the_originals(parser):
     assert r["notes"] == ["not parsed (parser exited with 3)"] and set(r["files"]) == {"x.md"} and "text" not in r
 
 
-def test_ocr_profile_reaches_the_parser_only_when_asked(parser, monkeypatch):
+def test_ocr_profile_reaches_the_parser_only_when_the_policy_says(parser, monkeypatch):
     parser(ocr_profiles=PROFILES, parser_cmd=script("os.write(1, json.dumps({'note': json.dumps({k: v for k, v in os.environ.items() if k.startswith('OCR')})}).encode() + b'\\n')"))
     key = testing.new_job()[1]
     jobs._store_original(key, "x.md", b"# x", "text/markdown")
-    monkeypatch.setenv("PARSE_OCR", "lan")
-    assert "ocr-lan" in jobs._parse_job(key, "", "x.md")["notes"][0] and "tok-remote" not in storage.read_bytes(key, "index.json").decode()
-    monkeypatch.delenv("PARSE_OCR")
+    monkeypatch.setenv("PROFILE_NAMES_OCR", "lan,remote")
+    notes = jobs._parse_job(key, "", "x.md")["notes"]  # nothing set: off, and the audit note says so
+    assert "ocr: off (admin policy)" in notes and not any("ocr-lan" in n for n in notes)
+    monkeypatch.setenv("POLICY_OCR", "lan")  # the admin level
+    notes = jobs._parse_job(key, "", "x.md")["notes"]
+    assert "ocr: lan (admin)" in notes and any("ocr-lan" in n for n in notes) and "tok-remote" not in storage.read_bytes(key, "index.json").decode()
+    monkeypatch.setenv("POLICY_OCR", "ASK")  # nobody chose: unresolved is off
+    notes = jobs._parse_job(key, "", "x.md")["notes"]
+    assert "ocr: off (unresolved)" in notes and not any("ocr-lan" in n for n in notes)
+    notes = jobs._parse_job(key, "", "x.md", {"ocr": {"value": ["lan"], "source": "upload link"}})["notes"]  # an explicit policy wins
+    assert "ocr: lan (upload link)" in notes and any("ocr-lan" in n for n in notes)
 
 
-def test_caption_feature_only_when_set(monkeypatch):
+def test_features_come_only_from_the_policy(monkeypatch):
     seen = []
     class C:
         def __init__(self, *a): pass
         def run(self, *a, features=None, **k): seen.append(features); raise RuntimeError
     monkeypatch.setattr(parse_client, "Client", C)
     monkeypatch.setenv("PARSE_URL", "http://x")
-    monkeypatch.delenv("PARSE_CAPTION", raising=False)
-    monkeypatch.setenv("PARSE_CAPTION_FALLBACK", "b")
+    monkeypatch.setenv("PARSE_CAPTION", "stale")  # the old variables are not read any more
+    monkeypatch.setenv("PROFILE_NAMES_CAPTION", "a,b")
     monkeypatch.setattr(parse_client.creds, "urls", lambda k: (None, "i", "o"))
     monkeypatch.setattr(parse_client.storage, "get_meta", lambda k: {})
     key = "projects/p/data/s/j"
-    for cap in (None, "a"):
-        if cap: monkeypatch.setenv("PARSE_CAPTION", cap)
-        try: parse_client.parse(key)
-        except Exception: pass
-    assert seen == [{"caption-fallback": "b"}, {"caption": "a", "caption-fallback": "b"}]
+    cap = lambda v: {"caption": {"value": v, "source": "project"}, "asr": {"value": ["x"], "source": "admin"}}
+    notes = [parse_client.parse(key, "", pol) for pol in (None, cap([]), cap(["a"]), cap(["b", "a"]))]
+    assert seen == [None, {"asr": "x"}, {"caption": "a", "asr": "x"}, {"caption": "b", "caption-fallback": "a", "asr": "x"}]
+    assert notes[0][0] == "caption: off (unresolved)" and notes[1][0] == "caption: off (project policy)" and notes[3][0] == "caption: b,a (project)"
 
 
 def test_credentials_are_renewed_while_a_long_job_runs_and_all_revoked_after(parser, monkeypatch):

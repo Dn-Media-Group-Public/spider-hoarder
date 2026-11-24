@@ -13,7 +13,7 @@ Claude registers itself through anonymous Dynamic Client Registration, so there 
 Every job lives in a project. Any authenticated user can create one and becomes its admin; `access.json` maps lowercased emails to
 `read` (read, list, `get_file_text`, `grep_file`, `get_usage`, links), `write` (also create sessions and jobs, uploads) or `admin` (also add, change and
 remove users, delete the project; a project always keeps at least one). Tools: `create_project`, `list_projects`, `get_project`,
-`share_project`, `unshare_project`, `delete_project`; `open_session(project)` binds an MCP session to a project (needs `write`).
+`update_project`, `share_project`, `unshare_project`, `delete_project`; `open_session(project)` binds an MCP session to a project (needs `write`).
 The gateway is the only component that reads or writes `access.json` and the `users/` index; "my projects" lists the index and keeps the
 projects whose `access.json` still lists the caller, so a stale index entry grants nothing. Grant: write `access.json`, then the index entry;
 revoke: `access.json`, then delete the entry. Removing a user takes effect within the 30 s cache; links and credentials already issued
@@ -23,6 +23,18 @@ and for one the caller has no role in. Deleting a project removes `access.json` 
 bound to it and deletes the prefix, verifying afterwards that nothing is left (s3fs drops the per-key errors of a bulk delete).
 Credentials minted before the delete can still write until they expire: orphans nobody can reach.
 See also: [Plan: project access model](../implemented-plans/project-access-model.md)
+
+### Policy levels
+`access.json` also holds `policy: {<backend>: {<setting>: value | "ASK"}}`, the **project level** of the policy levels (admin env, project, session), set by `create_project(policy?)`
+and, by an admin only, `update_project` (replaces it; an update replaces the local cache entry). Settings: `media` (bool), `allow` / `deny` (MIME lists), `ocr` / `asr` / `caption`
+(ordered profile lists, `[]` = off; at most 1 profile for `ocr`, 2 for `asr` and `caption`: primary, then fallback). Each level may only **narrow** what the one above allows
+(`media` true to false, `deny` grows, `allow` shrinks, a chain drops or reorders entries, never adds one) or say `ASK` (outside the order: the level below must choose, still bounded
+by the nearest non-`ASK` value above; all `ASK` above = the setting's whole domain). A value outside its bound is rejected at the tool call, never clipped. The pure rules are
+`gateway/policy.py`; `jobs.py` reads the admin level (`POLICY_<SETTING>` and `PROFILE_NAMES_<KIND>` in the gateway's environment, set from `<BACKEND>_POLICY_<SETTING>` by
+`parse-overlay`), the project's section for this backend and the session's choices (`projects.session_policy`, dropped with the binding). A gateway only knows its own backend's
+admin env, so only that backend's section of a project policy is fully validated on write; another backend's section is checked for shape, and a stored value that is
+outside a bound later (the operator tightened it) or names a vanished profile is **dropped when resolving**, not rewritten. `get_project` returns the stored `policy` and, per
+setting, the bound this backend's sessions get and its source. See also: [Plan: policy levels](../implemented-plans/policy-levels.md)
 
 ## Live view (human handoff)
 `browser_request_human_help` returns `…/<egress>/view/<rid>/<view_id>/start`. The human opens it, signs in via oauth2-proxy (same

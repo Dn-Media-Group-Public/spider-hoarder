@@ -71,9 +71,10 @@ def require(owner: str, proj: str, need: str = "read") -> dict:
     return data
 
 
-def create(owner: str, name: str) -> str:
+def create(owner: str, name: str, policy: dict | None = None) -> str:
+    """`policy` ({backend: {setting: value | ASK}}) must be validated already (jobs.check_project_policy)."""
     proj = str(uuid.uuid4())
-    _save(proj, {"name": str(name)[:200], "created": time.time(), "users": {owner.lower(): "admin"}})
+    _save(proj, {"name": str(name)[:200], "created": time.time(), "users": {owner.lower(): "admin"}, "policy": policy or {}})
     storage.write_object(f"users/{enc_user(owner)}/{proj}", b"admin")
     return proj
 
@@ -90,8 +91,20 @@ def list_for(owner: str) -> list[dict]:
 def get(owner: str, proj: str) -> dict:
     data = require(owner, proj)
     role = data["users"][owner.lower()]
-    return {"project": proj, "name": data["name"], "created": data["created"], "role": role,
+    return {"project": proj, "name": data["name"], "created": data["created"], "role": role, "policy": data.get("policy", {}),
             **({"users": data["users"]} if role == "admin" else {})}
+
+
+def policy_of(proj: str, backend: str) -> dict:
+    """The project's stored policy level for one backend ({} when none; no authorisation: the caller already holds a job in the project)."""
+    return ((_load(proj) or {}).get("policy") or {}).get(backend) or {}
+
+
+def set_policy(owner: str, proj: str, policy: dict) -> None:
+    """Replace the stored policy (admin only); `policy` must be validated already. Our own cache entry is replaced by _save."""
+    data = json.loads(json.dumps(require(owner, proj, "admin")))
+    data["policy"] = policy
+    _save(proj, data)
 
 
 def _admins(data: dict) -> int:
@@ -142,6 +155,7 @@ def delete(owner: str, proj: str) -> list[str]:
 
 # ---- per-MCP-session state: which project job-creating tools write to, and the <session> directory they write under
 bound: dict[str, str] = {}         # MCP session id -> project (open_session); dropped when the driver session ends
+session_policy: dict[str, dict] = {}  # MCP session id -> the session level of the policy (open_session's choices); dropped with the binding
 job_sessions: dict[str, str] = {}  # MCP session id -> <session> uuid, created at its first job; dropped with the MCP session
 
 
@@ -151,6 +165,7 @@ def bind(sid: str | None, proj: str) -> None:
 
 def unbind(sid: str | None) -> None:
     bound.pop(sid or "", None)
+    session_policy.pop(sid or "", None)
 
 
 def forget(sid: str | None) -> None:

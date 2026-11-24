@@ -143,7 +143,7 @@ def test_links_carry_no_email_and_upload_writes_only_its_job():
     out = json.loads(r.content[0].text)
     token = out["url"].rsplit("/", 1)[1]
     assert "/upload/" in out["url"] and "x.y" not in blobtoken._unb64(token.split(".")[0]).decode()
-    assert app._upload_key(token) == jobs.job_key(out["job_id"])
+    assert app._upload_key(token) == (jobs.job_key(out["job_id"]), {"ocr": [], "asr": [], "caption": []})  # the session's resolved chains, signed in
     projects.delete("a@x.y", p)
     with pytest.raises(Exception, match="not found"):
         app._upload_key(token)  # a deleted project takes its upload links with it
@@ -156,4 +156,4 @@ def test_links_carry_no_email_and_upload_writes_only_its_job():
     storage.write_bytes(key, "original/a.txt", b"hi", "text/plain")
     app._caller = lambda: (None, "r@x.y", "s")
     url = json.loads(asyncio.run(app.call_tool("get_file_url", {"job_id": jid, "path": "original/a.txt"})).content[0].text)["url"]
-    assert blobtoken.verify(url.rsplit("/", 1)[1]) == {"job_id": jid, "path": "original/a.txt"} and "/blob/" in url and app.RID not in url
+    assert blobtoken.verify(url.rsplit("/", 1)[1]) == {"job_id": jid, "path": "original/a.txt", "policy": None} and "/blob/" in url and app.RID not in url

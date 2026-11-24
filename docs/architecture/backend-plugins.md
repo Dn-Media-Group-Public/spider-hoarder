@@ -94,7 +94,7 @@ The base `docker-compose.yml` keeps only nginx, oauth2-proxy and the shared `pub
 
 The parser service wires itself to every enabled backend: `deploy.sh` generates `.build/docker-compose.parse-gateways.yml` (`scripts/spider_hoarder.py parse-overlay`, on the library's overlay generator `cadmus_parser_server.overlay`), which adds a network `<name>-parse`
 (internal: one shared network would let the gateways reach each other) with only that gateway and the shared `parser` on it, and `PARSE_URL`, `PARSE_TOKEN` and
-`PARSE_OCR` (from `<NAME>_PARSE_OCR`) to `<name>-gateway`. An overlay does not write any of it. See also: [Plan: parser wrapper](../implemented-plans/parser-wrapper.md), [Plan: the parser service as a library](../implemented-plans/parse-sandbox-library.md)
+the admin level of the policy levels to `<name>-gateway`: `POLICY_<SETTING>` (from `<NAME>_POLICY_<SETTING>`, six settings) and `PROFILE_NAMES_<KIND>` (the names, never the tokens, of the `<KIND>_PROFILES` tables); see [Plan: policy levels](../implemented-plans/policy-levels.md). An overlay does not write any of it. See also: [Plan: parser wrapper](../implemented-plans/parser-wrapper.md), [Plan: the parser service as a library](../implemented-plans/parse-sandbox-library.md)
 
 `scripts/spider_hoarder.py validate` checks the prefix rule and the gateway's environment and refuses a bad overlay.
 

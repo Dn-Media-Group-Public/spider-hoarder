@@ -15,8 +15,8 @@ from spider_hoarder_browser_sdk.mediapolicy import Policy
 from spider_hoarder_browser_sdk.sessiond_client import Sessiond
 from spider_hoarder_sdk.content import storage
 from spider_hoarder_sdk.gateway.driver import Driver, sessions
-from spider_hoarder_sdk.gateway import projects
-from spider_hoarder_sdk.gateway.jobs import _job_name, _new_job, _schema, _text
+from spider_hoarder_sdk.gateway import policy as lv, projects
+from spider_hoarder_sdk.gateway.jobs import _job_name, _new_job, _schema, _text, check_session_policy, policy_view
 from spider_hoarder_sdk.gateway.pool import Pool
 from spider_hoarder_sdk.textcap import DEFAULT_TEXT_CAP
 
@@ -40,6 +40,7 @@ SAVE_TARGET_ARG = "Element to convert: a ref from browser_snapshot/browser_find,
 
 
 _MIME_LIST = {"type": "array", "items": {"type": "string"}}
+_CHAIN = {"type": "array", "items": {"type": "string"}}
 
 def extra_tools(egress) -> list[types.Tool]:
     EGRESS, EGRESS_NOTE = egress.name, egress.note
@@ -50,6 +51,8 @@ def extra_tools(egress) -> list[types.Tool]:
                                    "(ingest_page and get_upload_link can take their own `project`)."},
                        "media": {"type": "boolean", "description": "true = load images, video, audio and other media; false = never request or download them. "
                                  "Default: false on Tor and I2P, true on clear."},
+                       **{f: {**_CHAIN, "description": f"Profiles of the external {f} model that files may be sent to, in order (primary, then fallback); [] = none. "
+                           "Only needed when get_session lists it under `ask`; may only narrow what the project and the operator allow."} for f in lv.FEATURES},
                        "allow": {**_MIME_LIST, "description": "Extra content types allowed for direct navigation/downloads, e.g. ['image/svg+xml']"},
                        "deny": {**_MIME_LIST, "description": "Content types always blocked for direct navigation/downloads, e.g. ['text/geojson']"}}},
                    description="Set this session's media policy. Must be the FIRST tool call of a conversation; every other tool fails until it has been called. "
@@ -57,7 +60,8 @@ def extra_tools(egress) -> list[types.Tool]:
                    "at the start, never in the middle of a task. Browsing the dark web can expose the user to legal "
                    "risk if images, video or audio are even loaded, so BEFORE calling this, explicitly ask the user about their security "
                    "settings. Call it before any browser call. Pass `allow` / `deny` only if the user asked for a specific security setup; "
-                   "otherwise call it with no arguments for the defaults. Returns the effective policy (same as get_session)."),
+                   "otherwise call it with no arguments for the defaults. It is refused while a setting is still undecided (get_session lists those under `ask`, with what they may be). "
+                   "Returns the effective policy (same as get_session)."),
         types.Tool(name="get_session", inputSchema={"type": "object", "properties": {}},
                    description="Read-only: the session's effective media policy (`opened` is false until open_session has been called, "
                    "and the rest are then the defaults open_session() would apply). Subagents: call this to see what was decided; do not call open_session (it would end the session)."),
@@ -98,6 +102,7 @@ class BrowserDriver(Driver):
     file_tools = FILE_TOOLS
     capped_tools = CAPPED_TOOLS
     hidden = HIDDEN
+    policy_settings = lv.SETTINGS
 
     def __init__(self, egress):
         self.egress = egress
@@ -161,23 +166,30 @@ class BrowserDriver(Driver):
         return [t.model_copy(update={"description": f"[{self.egress.name.upper()}] {self.egress.note}\n\n{t.description or ''}"})
                 if t.name == "browser_navigate" else t for t in tools]
 
+    def _defaults(self) -> dict:
+        return {"media": self.egress.media_default, "allow": [], "deny": []}
+
     async def pre_session(self, name, args, ctx):
         sid, mcp_session, owner = ctx.sid, ctx.mcp_session, ctx.owner
         egress = self.egress.name
         if name == "open_session":
             if not sid:
                 return _text("no MCP session", True)
-            policy = Policy.make(self.egress.media_default, args.get("media"), args.get("allow"), args.get("deny"))  # validate before ending anything
+            # validate and resolve before ending anything (also the project read): the suggestion for media is the egress default
+            defaults = self._defaults()
+            level, resolved = check_session_policy(owner, args.get("project"), args, self.policy_settings, defaults)
+            policy = Policy(*(resolved[s]["value"] for s in ("media", "allow", "deny")))
             if sid in sessions.opened:  # a client may reuse one MCP session across conversations: a repeat call starts over
                 if bs := await sessions.get_session(mcp_session, owner, create=False):
                     await sessions.close(bs)
             sessions.opened[sid] = policy
-            if args.get("project"):  # after the close above: ending a session drops its binding
-                projects.require(owner, args["project"], "write")
+            projects.session_policy[sid] = level  # after the close above: ending a session drops its binding and its policy
+            if args.get("project"):
                 projects.bind(sid, args["project"])
-            return _text(json.dumps(policy.summary(egress, True)))
+            return _text(json.dumps({**policy.summary(egress, True), **policy_view(sid, self.policy_settings, defaults)}))
         if name == "get_session":
-            return _text(json.dumps((sessions.opened.get(sid or "") or Policy.make(self.egress.media_default)).summary(egress, sid in sessions.opened)))
+            return _text(json.dumps({**(sessions.opened.get(sid or "") or Policy.make(self.egress.media_default)).summary(egress, sid in sessions.opened),
+                                     **policy_view(sid, self.policy_settings, self._defaults())}))
         if sid not in sessions.opened:  # fail closed: the MCP client cannot skip the question
             return _text("session not opened: ask the user about security settings, then call open_session first", True)
         if name == "browser_end_session":
@@ -193,6 +205,7 @@ class BrowserDriver(Driver):
                         return res
                     blocked = info["blocked"]
                 await sessions.close(bs)  # no id, or the last browser was closed
+            projects.session_policy.pop(sid, None)
             sessions.opened.pop(sid, None)  # close() already dropped it; the session is over: the next open_session asks the user again (clients reuse one MCP session across /clear)
             return _text("Browser session closed." + (f" Media policy blocked {blocked} request(s)." if blocked else ""))
         if name == "ingest_page":

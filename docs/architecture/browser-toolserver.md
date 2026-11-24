@@ -69,6 +69,7 @@ original, checked by `backends/browser-sdk/tests/test_toolserver.py`) plus a `br
 - Files (screenshots, PDFs, `filename=` outputs) go to `$HOME/out`; the gateway copies them into jobs ([Jobs](jobs-and-storage.md)).
 
 ## Media policy
+(The gateway builds the `Policy` from the resolved policy levels; the toolserver is unchanged. See also: [Plan: policy levels](../implemented-plans/policy-levels.md).)
 Fail closed: until the internal one-shot `browser_set_policy` (not in the tool list, hidden by the gateway, called by it right after
 `initialize`) has run, every tool errors without even launching Chromium. It stores the `Policy` (`spider_hoarder_browser_sdk/mediapolicy.py`) on the
 `Registry` and, when it blocks anything, installs **layer A** (`context.route("**/*")` aborting `image`, `media`, `object`, `imageset`,

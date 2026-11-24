@@ -222,8 +222,22 @@ PARSE_TOKENS = ("WRAPPER_TOKEN", "PROXY_TOKEN")
 PLACEHOLDERS = ("", "changeme", "change-me")
 
 
-SIDECARS = ("ocr", "asr", "caption")  # the model sidecars we deploy: <KIND>_PROFILES (the sidecar's table), <NAME>_PARSE_<KIND> (a backend's profile)
-FALLBACKS = {"asr": "asr-fallback", "caption": "caption-fallback"}  # kinds with an optional second profile, <NAME>_PARSE_<KIND>_FALLBACK
+SIDECARS = ("ocr", "asr", "caption")  # the model sidecars we deploy: <KIND>_PROFILES (the sidecar's table); a backend's chain is <NAME>_POLICY_<KIND>
+OLD_PARSE = {"OCR": "OCR", "ASR": "ASR", "ASR_FALLBACK": "ASR", "CAPTION": "CAPTION", "CAPTION_FALLBACK": "CAPTION"}  # <NAME>_PARSE_<key>: gone, -> <NAME>_POLICY_<value>
+POLICY_SETTINGS = ("media", "allow", "deny", "ocr", "asr", "caption")  # <NAME>_POLICY_<SETTING>: the admin level of the policy levels
+
+
+def policy_module():
+    """sdk/.../gateway/policy.py (pure stdlib), loaded from its file so the deploy tool and the gateways validate with the same code."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("spider_hoarder_policy", os.path.join(REPO_ROOT, "sdk", "spider_hoarder_sdk", "gateway", "policy.py"))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def profile_names(environ) -> dict:
+    return {k: list(profiles_of(environ, k)) for k in SIDECARS}
 
 
 def profiles_of(environ, kind: str) -> dict:
@@ -279,11 +293,16 @@ def check_parse_env(backends: list[Backend], environ) -> None:
         if (a := environ.get(f"{kind.upper()}_ADMIN_TOKEN")) and (a in {p.get("token") for k in SIDECARS for p in profiles_of(environ, k).values() if isinstance(p, dict)} or a in {environ.get(v) for v in PARSE_TOKENS} or a in admins):
             errs.append(f"{kind.upper()}_ADMIN_TOKEN must differ from every other token")
         admins.append(a)
-        for b in backends:
-            for suffix in ("", "_FALLBACK") if kind in FALLBACKS else ("",):
-                v = f"{b.name.upper()}_PARSE_{kind.upper()}{suffix}"
-                if environ.get(v) and environ[v] not in profiles:
-                    errs.append(f"{v}={environ[v]} is not a profile of {var}")
+    pol, names = policy_module(), profile_names(environ)
+    for b in backends:
+        p = b.name.upper()
+        for old, kind in OLD_PARSE.items():  # a silent switch-off of a feature must not happen: the old names are refused, not ignored
+            if environ.get(f"{p}_PARSE_{old}"):
+                errs.append(f"{p}_PARSE_{old} is not read any more: use {p}_POLICY_{kind}" + (" (the fallback is the second entry: `primary,fallback`)" if old.endswith("_FALLBACK") else ""))
+        try:  # every list is validated like a project or session value (the same code), against this deployment's profile names
+            pol.admin_level({f"POLICY_{s.upper()}": environ.get(f"{p}_POLICY_{s.upper()}") for s in POLICY_SETTINGS}, names)
+        except ValueError as e:
+            errs.append(f"{p}_{e}")
     if errs:
         raise DeployError("\n".join(errs))
 
@@ -321,12 +340,14 @@ def parse_env(environ) -> dict:
 def parse_overlay(backends: list[Backend], environ) -> str:
     """The cadmus-parser overlay (lib/cadmus-parser, `cadmus_parser_server.overlay`): per enabled backend a network `<h>-parse` that only its gateway and
     the shared parser are on, PARSE_URL / PARSE_TOKEN in the gateway, the proxy on the SeaweedFS network when that
-    is the store and the OCR sidecar when profiles are configured. Ours on top: PARSE_OCR, the OCR profile a backend's files may be sent to."""
+    is the store and the OCR sidecar when profiles are configured. Ours on top, per gateway: its admin-level policy (`POLICY_<SETTING>` from
+    `<NAME>_POLICY_<SETTING>`) and the names (never the tokens or keys) of the deployment's profiles, `PROFILE_NAMES_<KIND>`."""
     import yaml
     from cadmus_parser_server import overlay
     doc = overlay.overlay([f"{b.h}-gateway" for b in backends], dev_store="seaweedfs:8333" if environ.get("SEAWEEDFS") == "1" else None,
                           ocr=bool(ocr_profiles(environ)), asr=bool(profiles_of(environ, "asr")), caption=bool(profiles_of(environ, "caption")),
-                          extra_env={f"{b.h}-gateway": {f"PARSE_{k}": f"${{{b.name.upper()}_PARSE_{k}:-}}" for k in ("OCR", "ASR", "ASR_FALLBACK", "CAPTION", "CAPTION_FALLBACK")} for b in backends},
+                          extra_env={f"{b.h}-gateway": {**{f"POLICY_{k.upper()}": f"${{{b.name.upper()}_POLICY_{k.upper()}:-}}" for k in POLICY_SETTINGS},
+                                                        **{f"PROFILE_NAMES_{k.upper()}": ",".join(n) for k, n in profile_names(environ).items()}} for b in backends},
                           network_names={f"{b.h}-gateway": f"{b.h}-parse" for b in backends})
     if ocr := doc["services"].get("ocr-sidecar"):  # the library's overlay sets only ASR_ADMIN_TOKEN
         ocr["environment"]["OCR_ADMIN_TOKEN"] = "${OCR_ADMIN_TOKEN:-}"

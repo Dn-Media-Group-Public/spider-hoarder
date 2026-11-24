@@ -4,6 +4,7 @@ having the parser service parse them (parse_client), the {files, text?} job resu
 import json
 import mimetypes
 import os
+import re
 import uuid
 from typing import Any
 
@@ -11,6 +12,7 @@ from mcp import types
 
 from spider_hoarder_sdk.content import storage
 from spider_hoarder_sdk.gateway import ident, parse_client, projects
+from spider_hoarder_sdk.gateway import policy as lv
 
 RID = ident.RID  # this replica: the MCP session id and live-view URLs carry it, jobs and links do not
 DEFAULT_TEXT_LENGTH = 20000  # chars; keeps get_file_text results LLM-sized
@@ -51,7 +53,9 @@ def _new_job(owner: str, sid: str | None, project: str | None = None) -> tuple[s
     proj = projects.resolve(sid, project)
     projects.require(owner, proj, "write")
     session, job = projects.session_dir(sid), str(uuid.uuid4())
-    return f"{proj}/{session}/{job}", storage.job_key(proj, session, job)
+    key = storage.job_key(proj, session, job)
+    job_policy[key] = effective(proj, sid)  # ponytail: dropped by _parse_job; a job that is never parsed leaks one small dict until restart
+    return f"{proj}/{session}/{job}", key
 
 
 def _check_rel_path(path: str) -> str:
@@ -75,15 +79,92 @@ def _store_tree(key: str, files, prefix: str = "") -> None:
         _store_original(key, prefix + path, f, ctype)
 
 
-def _parse_job(key: str, base_url: str = "", main: str | None = None) -> dict:
+def _parse_job(key: str, base_url: str = "", main: str | None = None, policy: dict | None = None) -> dict:
     """Have the parser service parse everything stored in the job (archives are unpacked there), then build the job result;
-    `main` is the original whose text is returned inline."""
-    return _job_result(key, main, parse_client.parse(key, base_url))
+    `main` is the original whose text is returned inline. `policy` is the resolved policy (an upload link's: its own chains); by default
+    the one _new_job resolved for the job's session, else admin + project only (what is still ASK is off)."""
+    policy = policy or job_policy.pop(key, None) or effective(key.split("/")[1])
+    return _job_result(key, main, parse_client.parse(key, base_url, policy))
 
 
 def _store_and_parse(key: str, filename: str, raw: bytes, content_type: str, base_url: str = "") -> dict:
     _store_original(key, filename, raw, content_type)
     return _parse_job(key, base_url, filename)
+
+
+# ---- policy levels (docs/implemented-plans/policy-levels.md): the pure rules are in policy.py; this reads this gateway's admin env, the
+# project's access.json and the session's choices
+job_policy: dict[str, dict] = {}  # job key -> the resolved policy of the session that created it, until its parse
+
+
+def _admin() -> tuple[dict, dict]:
+    names = lv.profile_names(os.environ)
+    return lv.admin_level(os.environ, names), names
+
+
+def _backend() -> str:
+    return os.environ.get("BACKEND", "")
+
+
+def effective(proj: str | None, sid: str | None = None) -> dict:
+    """The resolved policy: admin env, the project's level for this backend, and the session's choices (none: still ASK means unresolved)."""
+    admin, names = _admin()
+    return lv.resolve([("admin", admin), ("project", projects.policy_of(proj, _backend()) if proj else {}),
+                       ("session", projects.session_policy.get(sid or "", {}))], names)
+
+
+def check_project_policy(policy) -> dict:
+    """Validate a project's `{backend: {setting: value | ASK}}` for storing. This backend's section is checked against this gateway's admin level;
+    a gateway only sees its own admin env, so another backend's section is checked for shape only (its stale values are dropped when it resolves)."""
+    if not isinstance(policy, dict):
+        raise ValueError("policy is an object {backend: {setting: value}}")
+    admin, names = _admin()
+    out = {}
+    for backend, level in policy.items():
+        if not isinstance(backend, str) or not re.fullmatch(r"[a-z0-9_]{1,40}", backend):
+            raise ValueError("policy: invalid backend name")
+        if backend == _backend():
+            out[backend] = lv.check_level(level, lv.resolve([("admin", admin)], names), names)
+        else:
+            out[backend] = lv.check_level(level, lv.resolve([("admin", {s: lv.ASK for s in lv.SETTINGS})]), None)
+    return out
+
+
+def bounds(proj: str | None) -> dict:
+    """What a project policy (or, without a project, the admin level) lets the level below choose, per setting and source: for get_project."""
+    admin, names = _admin()
+    r = lv.resolve([("admin", admin), ("project", projects.policy_of(proj, _backend()) if proj else {})], names)
+    return {s: {"bound": "any" if x["bound"] is None else x["bound"], "source": x["bound_source"]} for s, x in r.items()}
+
+
+def check_session_policy(owner: str, project: str | None, args: dict, settings, defaults: dict) -> tuple[dict, dict]:
+    """(session level, resolved policy) for open_session's arguments: each validated against the bound above it (rejected, never clipped); refuses
+    while a setting that applies is still ASK. Needs the write role in `project` (so this runs before anything is ended)."""
+    admin, names = _admin()
+    level = {}
+    if project:
+        projects.require(owner, project, "write")
+    above = lv.resolve([("admin", admin), ("project", projects.policy_of(project, _backend()) if project else {})], names, settings)
+    for s in settings:
+        if args.get(s) is not None:
+            if args[s] == lv.ASK:
+                raise ValueError(f"{s}: ASK is not a choice")
+            level[s] = lv.check(s, args[s], lv.bound_of(above, s), names)
+    resolved = lv.with_defaults(lv.resolve([("admin", admin), ("project", projects.policy_of(project, _backend()) if project else {}), ("session", level)],
+                                           names, settings), defaults)
+    if ask := lv.unresolved(resolved):
+        raise ValueError("open_session needs a choice for: " + "; ".join(f"{s} (any of {b if b is not None else 'the available profiles'})"
+                                                                           for s, b in ask.items()))
+    return level, resolved
+
+
+def policy_view(sid: str | None, settings, defaults: dict) -> dict:
+    """get_session's / open_session's `policy` and `ask`: the effective policy of the MCP session, before or after open_session."""
+    admin, names = _admin()
+    proj = projects.bound.get(sid or "")
+    r = lv.with_defaults(lv.resolve([("admin", admin), ("project", projects.policy_of(proj, _backend()) if proj else {}),
+                                     ("session", projects.session_policy.get(sid or "", {}))], names, settings), defaults)
+    return lv.view(r)
 
 
 def _entry_notes(files: dict):
@@ -136,8 +217,8 @@ def _text(msg: str, error: bool = False) -> types.CallToolResult:
 
 
 def _schema(optional: dict | None = None, **props: str) -> dict:
-    """JSON schema of a tool whose arguments are all strings: `props` are required, `optional` are not."""
-    return {"type": "object", "properties": {k: {"type": "string", "description": v} for k, v in {**props, **(optional or {})}.items()},
+    """JSON schema of a tool whose arguments are strings: `props` are required, `optional` are not. A value that is a dict is the property's own schema."""
+    return {"type": "object", "properties": {k: v if isinstance(v, dict) else {"type": "string", "description": v} for k, v in {**props, **(optional or {})}.items()},
             "required": list(props)}
 
 

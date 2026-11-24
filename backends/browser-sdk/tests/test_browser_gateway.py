@@ -376,6 +376,32 @@ def test_open_session_binds_a_project_with_write_role():
     sessions.opened.clear()
 
 
+def test_media_and_parse_choices_come_from_the_levels(monkeypatch):
+    """Admin env, project policy and open_session's arguments: media and allow narrow only; an ASK feature refuses to open until chosen."""
+    import json
+    from spider_hoarder_sdk.gateway import projects
+    testing.fresh_store()
+    monkeypatch.setenv("PROFILE_NAMES_CAPTION", "v,v2")
+    monkeypatch.setenv("POLICY_CAPTION", "ASK")
+    p = projects.create("a@b.c", "P", {"browser_clear": {"media": False}})
+    q = projects.create("a@b.c", "Q")
+    sessions.opened.clear(); projects.bound.clear(); projects.session_policy.clear()
+    app._caller = lambda: (None, "a@b.c", "sid-lv")
+    run = lambda n, **a: asyncio.run(app.call_tool(n, a))
+    j = lambda r: json.loads(r.content[0].text)
+    r = run("open_session", project=q)
+    assert r.isError and "caption" in r.content[0].text and "sid-lv" not in sessions.opened and "sid-lv" not in projects.bound  # nothing half-open
+    assert j(run("get_session"))["ask"] == {"caption": "any"}
+    r = run("open_session", project=p, media=True, caption=["v"])  # the project fixed media off: a wider choice is rejected, never clipped
+    assert r.isError and "media" in r.content[0].text and "sid-lv" not in sessions.opened
+    s = j(run("open_session", project=p, caption=["v2"]))
+    assert s["media"] is False and s["policy"]["media"] == {"value": False, "source": "project"} and s["policy"]["caption"] == {"value": ["v2"], "source": "session"}
+    assert sessions.opened["sid-lv"].media is False and projects.session_policy["sid-lv"] == {"caption": ["v2"]}
+    s = j(run("open_session", project=q, caption=["v"], allow=["image/svg+xml"]))  # a repeat starts over: the old choices are gone
+    assert s["policy"]["caption"]["value"] == ["v"] and s["media"] is True and projects.session_policy["sid-lv"] == {"caption": ["v"], "allow": ["image/svg+xml"]}
+    sessions.opened.clear(); projects.bound.clear(); projects.session_policy.clear()
+
+
 def test_open_session_gate_and_get_session():
     import json
     from mcp import types as mt

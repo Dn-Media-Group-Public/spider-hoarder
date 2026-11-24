@@ -1,4 +1,4 @@
-"""HMAC-signed tokens for GET /blob/<token> and /upload/<token>: {job_id (<proj>/<session>/<job>), path, exp}. Signed, not
+"""HMAC-signed tokens for GET /blob/<token> and /upload/<token>: {job_id (<proj>/<session>/<job>), path, exp, policy?}. Signed, not
 encrypted: anyone holding a link can read what it carries (no email, only the job reference)."""
 
 import base64
@@ -26,14 +26,15 @@ def _unb64(s: str) -> bytes:
     return base64.urlsafe_b64decode(s + "=" * (-len(s) % 4))
 
 
-def mint(job_id: str, path: str, ttl: int = TTL_SECONDS) -> str:
-    payload = json.dumps({"job_id": job_id, "path": path, "exp": int(time.time()) + ttl}).encode()
+def mint(job_id: str, path: str, ttl: int = TTL_SECONDS, policy: dict | None = None) -> str:
+    """`policy` ({feature: [profile, ...]}): an upload link's resolved parse chains, fixed for the link's life."""
+    payload = json.dumps({"job_id": job_id, "path": path, "exp": int(time.time()) + ttl, **({"policy": policy} if policy is not None else {})}).encode()
     sig = hmac.new(SECRET.encode(), payload, sha256).digest()
     return f"{_b64(payload)}.{_b64(sig)}"
 
 
 def verify(token: str) -> dict:
-    """Returns {"job_id", "path"} or raises ValueError."""
+    """Returns {"job_id", "path", "policy"} (policy None for a token without one) or raises ValueError."""
     try:
         payload_b64, sig_b64 = token.split(".", 1)
         payload = _unb64(payload_b64)
@@ -48,4 +49,4 @@ def verify(token: str) -> dict:
     data = json.loads(payload)
     if data["exp"] < time.time():
         raise ValueError("expired token")
-    return {"job_id": data["job_id"], "path": data["path"]}
+    return {"job_id": data["job_id"], "path": data["path"], "policy": data.get("policy")}

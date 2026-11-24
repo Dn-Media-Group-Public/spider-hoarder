@@ -34,11 +34,13 @@ from spider_hoarder_sdk.content import storage
 from spider_hoarder_sdk.gateway import auth
 from spider_hoarder_sdk.gateway import blobtoken
 from spider_hoarder_sdk.gateway import creds
+from spider_hoarder_sdk.gateway import policy as lv
 from spider_hoarder_sdk.gateway import projects
 from spider_hoarder_sdk.gateway import sessions
 from spider_hoarder_sdk.gateway.driver import driver, hyphen
 from spider_hoarder_sdk.gateway.jobs import (DEFAULT_TEXT_LENGTH, FILE_TOOLS_NOTE, INLINE_LIMIT, RID, UPLOAD_MARK, _check_rel_path,
-                                             _key, _new_job, _parse_job, _schema, _store_original, _text, job_key, usage)
+                                             _key, _new_job, _parse_job, _schema, _store_original, _text, bounds, check_project_policy, job_key,
+                                             job_policy, usage)
 
 PREFIX = sessions.PREFIX  # the URL prefix nginx routes on
 logging.basicConfig(level="INFO", format="%(name)s %(levelname)s %(message)s")
@@ -88,13 +90,22 @@ server = mcp._mcp_server  # static FastMCP tool handlers are replaced by a proxy
 driver.register(mcp)
 
 
+POLICY_ARG = {"type": "object", "description": "{backend: {setting: value | \"ASK\"}} with settings media (bool), allow / deny (MIME type lists), ocr / asr / caption "
+              "(ordered profile lists, [] = off); each level may only narrow what the level above allows"}
+
+
 # The job tools every backend has: files stored under a job id, whoever produced them.
 JOB_TOOLS = [
-    types.Tool(name="create_project", inputSchema=_schema(name="Project name (not unique; the returned id is the identity)"),
-               description="Create a project; you become its admin. Every job lives in a project, and its members see its jobs."),
+    types.Tool(name="create_project", inputSchema=_schema({"policy": POLICY_ARG}, name="Project name (not unique; the returned id is the identity)"),
+               description="Create a project; you become its admin. Every job lives in a project, and its members see its jobs. "
+               "`policy` optionally narrows what sessions in the project may choose (media, allow, deny, ocr, asr, caption), per backend."),
     types.Tool(name="list_projects", inputSchema=_schema(), description="The projects you are a member of: {project, name, role}."),
     types.Tool(name="get_project", inputSchema=_schema(project="Project id"),
-               description="A project's name and your role; its member list too, for admins."),
+               description="A project's name, your role and its stored `policy`; the member list too, for admins. `bounds` is what this backend's sessions may choose "
+               "within, per setting, and which level (admin, project) set it."),
+    types.Tool(name="update_project", inputSchema=_schema(project="Project id", policy=POLICY_ARG),
+               description="Admin only. Replace the project's policy ({backend: {setting: value or \"ASK\"}}; ASK = the session must choose). Can raise as well as lower, "
+               "up to what the operator allows. Applies to later jobs and sessions only."),
     types.Tool(name="share_project", inputSchema=_schema(project="Project id", email="User's email", role="read, write or admin"),
                description="Admin only. Give a user a role in the project (or change it): read = read and list files, write = also create jobs, admin = also manage users and delete the project."),
     types.Tool(name="unshare_project", inputSchema=_schema(project="Project id", email="User's email"),
@@ -152,18 +163,24 @@ def _caller() -> tuple[Any, str, str | None]:
 
 
 
-PROJECT_TOOLS = ("create_project", "list_projects", "get_project", "share_project", "unshare_project", "delete_project")
+PROJECT_TOOLS = ("create_project", "list_projects", "get_project", "update_project", "share_project", "unshare_project", "delete_project")
 
 
 async def _project_tool(name: str, args: dict, ctx: Ctx) -> types.CallToolResult:
     owner = ctx.owner
     if name == "create_project":
-        return _text(json.dumps({"project": await asyncio.to_thread(projects.create, owner, args["name"])}))
+        policy = check_project_policy(args["policy"]) if args.get("policy") is not None else None
+        return _text(json.dumps({"project": await asyncio.to_thread(projects.create, owner, args["name"], policy)}))
     if name == "list_projects":
         return _text(json.dumps(await asyncio.to_thread(projects.list_for, owner)))
     proj = args["project"]
     if name == "get_project":
-        return _text(json.dumps(await asyncio.to_thread(projects.get, owner, proj)))
+        res = await asyncio.to_thread(projects.get, owner, proj)
+        return _text(json.dumps({**res, "bounds": await asyncio.to_thread(bounds, proj)}))
+    if name == "update_project":
+        await asyncio.to_thread(projects.require, owner, proj, "admin")  # before validating anything about it
+        await asyncio.to_thread(projects.set_policy, owner, proj, check_project_policy(args.get("policy")))
+        return _text(json.dumps({"ok": True}))
     if name == "share_project":
         await asyncio.to_thread(projects.share, owner, proj, args["email"], args["role"])
     elif name == "unshare_project":
@@ -198,8 +215,9 @@ async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
         if (res := await driver.pre_session(name, args, ctx)) is not None:
             return res
         if name == "get_upload_link":
-            job_id, _ = _new_job(owner, sid, args.get("project"))
-            token = blobtoken.mint(job_id, UPLOAD_MARK, ttl=3600)
+            job_id, key = _new_job(owner, sid, args.get("project"))
+            # the link inherits this session's resolved chains, signed in: fixed for its hour (what is still ASK is left out: off)
+            token = blobtoken.mint(job_id, UPLOAD_MARK, ttl=3600, policy=lv.chains(job_policy.pop(key)))
             return _text(json.dumps({"url": f"{BASE}/upload/{token}", "job_id": job_id}))
         if name == "get_usage":
             return _text(json.dumps(await asyncio.to_thread(usage, owner, args["project"], args.get("job_id"))))
@@ -288,7 +306,7 @@ async def view_start(request: Request) -> Response:
         f"&resize=scale&password={bs.vnc_password}", status_code=302)
 
 
-def _upload_key(token: str) -> str:
+def _upload_key(token: str) -> tuple[str, dict]:
     try:
         data = blobtoken.verify(token)
         key = job_key(data["job_id"])
@@ -298,23 +316,37 @@ def _upload_key(token: str) -> str:
         raise HTTPException(403, "not an upload link")
     if not projects.exists(data["job_id"].split("/")[0]):  # a deleted project takes its open upload links with it
         raise HTTPException(404, "not found")
-    return key
+    return key, data.get("policy") or {}  # no policy (an old link): every feature unresolved, so off
 
 
 
 @mcp.custom_route(f"/{PREFIX}/upload/{{token}}", methods=["GET"])
 async def upload_page(request: Request) -> Response:
-    _upload_key(request.path_params["token"])
+    _, chains = _upload_key(request.path_params["token"])
+    # the link's chains, read-only except that the uploader may untick entries (lowering): never add
+    boxes = "".join(
+        f"<fieldset><legend>{f}</legend>" + "".join(
+            f'<label><input type="checkbox" name="{f}" value="{html.escape(p, quote=True)}" checked> {html.escape(p)}</label> ' for p in chain) + "</fieldset>"
+        for f, chain in sorted(chains.items()) if chain)
+    opts = ('<p>Files may be sent to these external models; untick to send fewer:</p><input type="hidden" name="lowered" value="1">' + boxes) if boxes else ""
     return HTMLResponse(
         '<!doctype html><html><body><h1>Upload files</h1>'
-        '<form method="post" action="" enctype="multipart/form-data">'
+        f'<form method="post" action="" enctype="multipart/form-data">{opts}'
         '<input type="file" name="files" multiple><button type="submit">Upload</button></form></body></html>')
+
+
+def _lowered(form, chains: dict) -> dict:
+    """The upload form's choice as an order-preserving subset of the signed chains: entries can only be dropped, never added."""
+    if not form.get("lowered"):  # a client that sends no choice gets the link's chains as they are
+        return chains
+    return {f: [p for p in chain if p in form.getlist(f)] for f, chain in chains.items()}
 
 
 @mcp.custom_route(f"/{PREFIX}/upload/{{token}}", methods=["POST"])
 async def upload_submit(request: Request) -> Response:
-    key = _upload_key(request.path_params["token"])
+    key, chains = _upload_key(request.path_params["token"])
     form = await request.form()
+    chains = _lowered(form, chains)
     names = []
     for uf in form.getlist("files"):
         if not hasattr(uf, "filename"):
@@ -324,7 +356,8 @@ async def upload_submit(request: Request) -> Response:
         ctype = uf.content_type or mimetypes.guess_type(filename)[0] or "application/octet-stream"
         await asyncio.to_thread(_store_original, key, filename, data, ctype)
         names.append(filename)
-    await asyncio.to_thread(_parse_job, key)  # one parse of everything uploaded: the parser service unpacks archives
+    policy = {f: {"value": chains[f], "source": "upload link"} if f in chains else {"value": lv.ASK, "source": "unresolved"} for f in lv.FEATURES}
+    await asyncio.to_thread(_parse_job, key, "", None, policy)  # one parse of everything uploaded: the parser service unpacks archives
     previews = [(n, storage.read_text(key, f"parsed/{n}.md") if storage.exists(key, f"parsed/{n}.md")
                  else "(stored)" if n.lower().endswith(".apk") else "(no text)") for n in names]
     body = "".join(f"<h2>{html.escape(n)}</h2><pre>{html.escape(t[:5000])}</pre>" for n, t in previews)

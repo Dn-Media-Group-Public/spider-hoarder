@@ -274,12 +274,12 @@ OCR = {"remote": {"token": "t1", "base_url": "https://llm/v1", "model": "m", "au
 
 def test_parse_env_checks(tmp_path):
     _, a, _ = make_pkg(tmp_path, name="dummy_one")
-    ok = {**PARSE_ENV, "OCR_PROFILES": json.dumps(OCR), "DUMMY_ONE_PARSE_OCR": "lan"}
+    ok = {**PARSE_ENV, "OCR_PROFILES": json.dumps(OCR), "DUMMY_ONE_POLICY_OCR": "lan"}
     sh.check_parse_env([a], ok)
     sh.check_parse_env([a], PARSE_ENV)  # OCR is optional
     oauth = {"token": "t3", "base_url": "https://llm/v1", "model": "m", "auth": "oauth2", "token_url": "https://id/token", "client_id": "c", "client_secret_env": "S"}
-    sh.check_parse_env([a], {**ok, "ASR_PROFILES": json.dumps({"o": oauth}), "DUMMY_ONE_PARSE_ASR": "o", "DUMMY_ONE_PARSE_ASR_FALLBACK": "o",
-                             "OCR_PROFILES": json.dumps({"o": oauth}), "DUMMY_ONE_PARSE_OCR": "o"})
+    sh.check_parse_env([a], {**ok, "ASR_PROFILES": json.dumps({"o": oauth}), "DUMMY_ONE_POLICY_ASR": "o",
+                             "OCR_PROFILES": json.dumps({"o": oauth}), "DUMMY_ONE_POLICY_OCR": "o"})
     sh.check_parse_env([a], {**ok, "PARSE_LIMITS": '{"default": {"deadline_s": 60}, "video": {"ram_mib": 0}}'})
     for bad in ({"WRAPPER_TOKEN": "changeme"}, {"PROXY_TOKEN": ""}, {"PROXY_TOKEN": PARSE_ENV["WRAPPER_TOKEN"]},
                 {"OCR_PROFILES": "{"}, {"OCR_PROFILES": "[]"}, {"OCR_PROFILES": json.dumps({"x": {"token": "t"}})},
@@ -289,10 +289,17 @@ def test_parse_env_checks(tmp_path):
                 {"OCR_PROFILES": json.dumps({"x": {**OCR["remote"], "token": PARSE_ENV["PROXY_TOKEN"]}})},
                 {"OCR_PROFILES": json.dumps({"x": {**OCR["lan"], "auth": "oauth2"}})},  # needs token_url, client_id, a secret
                 {"OCR_PROFILES": json.dumps({"x": {**OCR["lan"], "auth": "nope"}})},
-                {"ASR_PROFILES": json.dumps({"x": {"token": "t"}})}, {"DUMMY_ONE_PARSE_ASR": "nope"}, {"DUMMY_ONE_PARSE_ASR_FALLBACK": "nope"},
-                {"DUMMY_ONE_PARSE_OCR": "nope"}, {"PARSE_LIMITS": "{"}, {"PARSE_LIMITS": '{"nope": {}}'}, {"PARSE_LIMITS": '{"default": {"ram_mib": -1}}'}):
+                {"ASR_PROFILES": json.dumps({"x": {"token": "t"}})}, {"DUMMY_ONE_POLICY_ASR": "nope"}, {"DUMMY_ONE_POLICY_OCR": "lan,lan"},
+                {"DUMMY_ONE_POLICY_OCR": "nope"}, {"DUMMY_ONE_POLICY_MEDIA": "maybe"}, {"DUMMY_ONE_POLICY_ALLOW": "notamime"}, {"PARSE_LIMITS": "{"}, {"PARSE_LIMITS": '{"nope": {}}'}, {"PARSE_LIMITS": '{"default": {"ram_mib": -1}}'}):
         with pytest.raises(sh.DeployError):
             sh.check_parse_env([a], {**ok, **bad})
+    asr = {**ok, "ASR_PROFILES": json.dumps({"o": {**OCR["lan"], "token": "t9"}, "o2": {**OCR["lan"], "token": "t10"}})}
+    sh.check_parse_env([a], {**asr, "DUMMY_ONE_POLICY_ASR": "o", "DUMMY_ONE_POLICY_CAPTION": "ASK", "DUMMY_ONE_POLICY_MEDIA": "ASK",
+                             "DUMMY_ONE_POLICY_DENY": "image/*,text/csv", "DUMMY_ONE_POLICY_ALLOW": ""})
+    for old, new in (("OCR", "OCR"), ("ASR", "ASR"), ("ASR_FALLBACK", "ASR"), ("CAPTION", "CAPTION"), ("CAPTION_FALLBACK", "CAPTION")):  # the old names are refused, naming the replacement
+        with pytest.raises(sh.DeployError, match=f"DUMMY_ONE_PARSE_{old} is not read any more: use DUMMY_ONE_POLICY_{new}"):
+            sh.check_parse_env([a], {**asr, f"DUMMY_ONE_PARSE_{old}": "lan"})
+    sh.check_parse_env([a], {**asr, "DUMMY_ONE_PARSE_OCR": ""})  # unset and empty are the same
 
 
 def test_parse_env_and_overlay(tmp_path):
@@ -313,7 +320,10 @@ def test_parse_env_and_overlay(tmp_path):
     doc = yaml.safe_load(sh.parse_overlay([a, b], env))
     assert doc["services"]["parser"]["networks"] == ["dummy-one-parse", "dummy-two-parse"]
     assert doc["services"]["dummy-one-gateway"]["networks"] == ["dummy-one-parse"]
-    assert doc["services"]["dummy-one-gateway"]["environment"]["PARSE_OCR"] == "${DUMMY_ONE_PARSE_OCR:-}"
+    genv = doc["services"]["dummy-one-gateway"]["environment"]
+    assert genv["POLICY_OCR"] == "${DUMMY_ONE_POLICY_OCR:-}" and genv["POLICY_MEDIA"] == "${DUMMY_ONE_POLICY_MEDIA:-}" and "PARSE_OCR" not in genv
+    assert genv["PROFILE_NAMES_OCR"] == "remote,lan" and genv["PROFILE_NAMES_ASR"] == ""
+    assert not any(v in json.dumps(genv) for v in ("t1", "t2", "api_key", "token"))  # names only: never a token or a key
     assert doc["networks"] == {"dummy-one-parse": {"driver": "overlay", "internal": True}, "dummy-two-parse": {"driver": "overlay", "internal": True}}
     assert doc["services"]["blob-sidecar"] == {"networks": ["seaweedfs"], "environment": {"PARSE_PROXY_ALLOW": "seaweedfs:8333"}} and "ocr-sidecar" in doc["services"]
     assert "image" not in doc["services"]["parser"]  # the library's own cadmus-parser image, from its docker-compose.parse.yml
@@ -321,11 +331,11 @@ def test_parse_env_and_overlay(tmp_path):
     assert "ocr-sidecar" not in plain["services"] and "blob-sidecar" not in plain["services"]
     asr = {**env, "ASR_PROFILES": json.dumps({"w": {**OCR["lan"], "token": "t9"}})}
     assert json.loads(sh.parse_env(asr)["PARSE_ASR_TABLE"]) == {"w": {"url": "http://asr-sidecar:8080", "token": "t9"}} == json.loads(sh.parse_env(asr)["PARSE_ASR_FALLBACK_TABLE"])
-    assert yaml.safe_load(sh.parse_overlay([a], asr))["services"]["dummy-one-gateway"]["environment"]["PARSE_ASR_FALLBACK"] == "${DUMMY_ONE_PARSE_ASR_FALLBACK:-}"
+    assert yaml.safe_load(sh.parse_overlay([a], asr))["services"]["dummy-one-gateway"]["environment"]["PROFILE_NAMES_ASR"] == "w"
     assert "asr-sidecar" in yaml.safe_load(sh.parse_overlay([a], asr))["services"] and sh.parse_services(asr)[-1] == "asr-sidecar"
     cap = {**env, "CAPTION_PROFILES": json.dumps({"v": {**OCR["lan"], "token": "t8"}})}
     assert json.loads(sh.parse_env(cap)["PARSE_CAPTION_FALLBACK_TABLE"]) == {"v": {"url": "http://caption-sidecar:8080", "token": "t8"}}
-    assert yaml.safe_load(sh.parse_overlay([a], cap))["services"]["dummy-one-gateway"]["environment"]["PARSE_CAPTION_FALLBACK"] == "${DUMMY_ONE_PARSE_CAPTION_FALLBACK:-}"
+    assert yaml.safe_load(sh.parse_overlay([a], cap))["services"]["dummy-one-gateway"]["environment"]["PROFILE_NAMES_CAPTION"] == "v"
     assert "caption-sidecar" in yaml.safe_load(sh.parse_overlay([a], cap))["services"] and sh.parse_services(cap)[-1] == "caption-sidecar"
     assert sh.parse_services(env) == ["parser", "blob-sidecar", "ocr-sidecar"] and sh.parse_services(PARSE_ENV) == ["parser", "blob-sidecar"]
     # the static stack file: the parser's networks are internal (no route out), the proxy alone reaches `public`

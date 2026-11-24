@@ -12,7 +12,8 @@ from spider_hoarder_sdk.gateway import blobtoken
 def test_blobtoken_roundtrip():
     token = blobtoken.mint("job1", "parsed/a.md")
     data = blobtoken.verify(token)
-    assert data == {"job_id": "job1", "path": "parsed/a.md"}
+    assert data == {"job_id": "job1", "path": "parsed/a.md", "policy": None}
+    assert blobtoken.verify(blobtoken.mint("job1", "@upload", policy={"ocr": ["lan"]}))["policy"] == {"ocr": ["lan"]}
 
 
 def test_blobtoken_tamper_rejected():

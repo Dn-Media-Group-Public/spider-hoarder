@@ -13,10 +13,10 @@ from mcp import types
 
 from spider_hoarder_android_sdk import slots
 from spider_hoarder_sdk.content import storage
-from spider_hoarder_sdk.gateway import projects
+from spider_hoarder_sdk.gateway import policy as lv, projects
 from spider_hoarder_sdk.gateway.driver import Driver, sessions
 from spider_hoarder_sdk.gateway.jobs import (MAX_FILE_BYTES, _check_rel_path, _ctype, _job_name, _key, _new_job, _schema, _store_and_parse,
-                                             _text)
+                                             _text, check_session_policy, policy_view)
 from spider_hoarder_sdk.gateway.pool import Pool
 
 FILE_TOOLS = {"device_snapshot": "snapshot.txt", "device_find": "matches.txt", "device_take_screenshot": "screenshot.png",
@@ -43,10 +43,17 @@ def _stack_client(headers=None, timeout=None, auth=None) -> httpx.AsyncClient:
 
 def extra_tools() -> list[types.Tool]:
     return [
-        types.Tool(name="open_session", inputSchema=_schema(project="Project id that this conversation's jobs are stored in (needs the write role)"),
+        types.Tool(name="open_session", inputSchema=_schema({f: {"type": "array", "items": {"type": "string"}, "description":
+                                                                f"Profiles of the external {f} model that files may be sent to, in order (primary, then fallback); [] = none. "
+                                                                "Only needed when get_session lists it under `ask`; may only narrow what the project and the operator allow."}
+                                                               for f in lv.FEATURES}, project="Project id that this conversation's jobs are stored in (needs the write role)"),
                    description="Bind this conversation to a project: every job the device tools create is stored there. Call it first "
                    "(create a project with create_project if you have none), and again after the device session ended (device_end_session or an idle timeout). "
-                   "It does not start the device."),
+                   "It is refused while a setting is still undecided (get_session lists those under `ask`, with what they may be); ask the user which external models "
+                   "may see their files. It does not start the device."),
+        types.Tool(name="get_session", inputSchema=_schema(),
+                   description="Read-only: whether open_session has been called, the project and the effective policy for external models (OCR, ASR, captions) with its source, "
+                   "and any setting still undecided under `ask`."),
         types.Tool(name="device_request_human_help", inputSchema=_schema(reason="What the user needs to do, e.g. 'sign in to Google'"),
                    description="Get a link that lets the user see and control THIS conversation's device in a new tab. "
                    "Use it for a Google / Play Store sign-in, CAPTCHA, 2FA, a permission or anything else a human should do. "
@@ -64,6 +71,7 @@ class AndroidDriver(Driver):
     noun = "device"
     file_tools = FILE_TOOLS
     capped_tools = ()
+    policy_settings = lv.FEATURES
 
     def __init__(self, note: str):
         self.note = note  # the egress note: what this backend's traffic looks like
@@ -74,7 +82,7 @@ class AndroidDriver(Driver):
         # or the waiter is cancelled mid-reset (pool.release finishes on its own, but the caller sees a timeout)
         self.close_timeout = slots.RESET_TIMEOUT + 90
         self.extra_tools = extra_tools()
-        self.names = {t["name"] for t in json.load(open(slots.TOOLS_FILE))} | {"device_request_human_help", "open_session"}
+        self.names = {t["name"] for t in json.load(open(slots.TOOLS_FILE))} | {"device_request_human_help", "open_session", "get_session"}
         self.instructions = (
             f"{note} Every job is stored in a project: call open_session(project) first (list_projects shows yours, create_project makes one; "
             "ask the user which to use). The binding ends with the device session, so call open_session again after device_end_session or an idle timeout. "
@@ -117,10 +125,17 @@ class AndroidDriver(Driver):
         return name in self.names  # the static list (the toolserver's) plus the gateway's own
 
     async def pre_session(self, name, args, ctx):
+        sid = ctx.sid or ""
         if name == "open_session":
-            projects.require(ctx.owner, args["project"], "write")
-            projects.bind(ctx.sid, args["project"])
-            return _text(json.dumps({"project": args["project"]}))
+            level, _ = check_session_policy(ctx.owner, args["project"], args, self.policy_settings, {})  # also the write role; nothing is changed on a refusal
+            projects.bind(sid, args["project"])
+            projects.session_policy[sid] = level
+            sessions.opened[sid] = level  # ends with the device session, like the binding
+            return _text(json.dumps({"project": args["project"], **policy_view(sid, self.policy_settings, {})}))
+        if name == "get_session":
+            return _text(json.dumps({"opened": sid in sessions.opened, "project": projects.bound.get(sid), **policy_view(sid, self.policy_settings, {})}))
+        if sid not in sessions.opened:  # fail closed, as the browser: the choices about external models are made first
+            return _text("session not opened: call open_session(project) first", True)
         if name == "device_end_session":
             bs = await sessions.get_session(ctx.mcp_session, ctx.owner, create=False)
             if bs:

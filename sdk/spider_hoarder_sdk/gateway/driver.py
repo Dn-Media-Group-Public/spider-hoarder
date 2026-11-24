@@ -45,6 +45,7 @@ class Driver:
     capped_tools: tuple = ()             # of those, the ones that take `text_cap`
     hidden: frozenset = frozenset()      # upstream tools never exposed
     extra_tools: list[types.Tool] = []   # the gateway's own tools besides the job tools (open_session, ...)
+    policy_settings: tuple = ("ocr", "asr", "caption")  # the policy settings that apply to this backend (docs/implemented-plans/policy-levels.md)
 
     @property
     def prefix(self) -> str:

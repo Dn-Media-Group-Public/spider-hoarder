@@ -147,3 +147,13 @@ The job still runs; local steps (Tesseract, metadata, everything not remote) wor
 - `docs/api/tools.md`: `create_project`, `get_project`, `update_project`, `open_session`, `get_session`, `get_upload_link`.
 - `docs/operations/deploy-and-configure.md`: the `<BACKEND>_POLICY_*` variables replace `<BACKEND>_PARSE_*` (format, `ASK`, defaults), and the migration of old `.env` files.
 - Each with a "See also" link to `../implemented-plans/policy-levels.md`; `docs/implemented-plans/index.md` updated on completion.
+
+## Implementation notes (deviations from the plan as written)
+
+- **Chain length per feature, not one `MAX_CHAIN`.** The parser has no OCR fallback feature (`ocr-fallback` would fail every job: the wrapper rejects unknown features), so an `ocr` chain is one profile; `asr` and `caption` take two. The limits are `len(policy.FEATURE_KEYS[feature])`: lengthen a tuple (and the parser's `features`) to lift one.
+- **Unset `allow` is not the value `[]`.** Taken literally, an empty admin `allow` would close it (a level may only shrink it) and `open_session(allow=...)` would stop working. Admin-unset `allow` / `deny` / `media` are `ASK` with a silent default (empty lists; the egress suggestion for `media`), so only the features can make `open_session` refuse. An explicit "no `allow` at all" is therefore not expressible at admin level.
+- **The gateway gets profile *names* in `PROFILE_NAMES_<KIND>`** (from the `<KIND>_PROFILES` keys when `parse-overlay` is generated; never tokens or keys), needed for "the whole domain" and for dropping vanished profiles.
+- **A gateway only validates its own backend's section of a project policy** (it sees only its own admin env); other backends' sections are checked for shape and their stale values are dropped when they resolve.
+- **Resolution happens when a job is created** (`jobs._new_job`: admin env, the project of the job, the MCP session's choices) and is kept until its parse; `_parse_job` without one (direct callers, tests) resolves admin + project only.
+- **Android** gained the fail-closed gate (every tool but `open_session`, `get_session` and the project tools needs `open_session`) and a `get_session`.
+- **An `ASK` over `false` for `media`** clips the egress suggestion to the bound instead of erroring.

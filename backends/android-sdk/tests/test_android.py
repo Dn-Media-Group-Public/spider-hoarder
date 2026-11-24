@@ -260,6 +260,7 @@ def _fake_session(client, owner="a@b.c"):
     async def get_session(*a, **k):
         return bs
     sessions.get_session = get_session
+    sessions.opened[""] = {}  # open_session was called (policy-levels: every tool but get_session needs it)
     app._caller = lambda: (None, owner, None)
     return bs
 
@@ -355,6 +356,32 @@ def test_open_session_binds_a_project_and_books_no_device():
     assert not asyncio.run(app.call_tool("open_session", {"project": p})).isError and projects.bound["sid-a"] == p and not called
     app._caller = lambda: (None, "x@b.c", "sid-x")
     assert asyncio.run(app.call_tool("open_session", {"project": p})).isError and "sid-x" not in projects.bound
+
+
+def test_open_session_gate_and_the_parse_choices(monkeypatch):
+    """Fail closed until open_session; refused while a parse feature is ASK; the choice is bounded, per session and dropped with it."""
+    import json as j
+    from spider_hoarder_sdk.gateway import projects
+    testing.fresh_store()
+    monkeypatch.setenv("PROFILE_NAMES_ASR", "w,w2")
+    monkeypatch.setenv("POLICY_ASR", "ASK")
+    sessions.opened.clear(); projects.bound.clear(); projects.session_policy.clear()
+    p = projects.create("a@b.c", "P")
+    app._caller = lambda: (None, "a@b.c", "sid-g")
+    run = lambda name, **a: asyncio.run(app.call_tool(name, a))
+    assert run("device_snapshot").isError and "not opened" in run("device_snapshot").content[0].text  # the gate
+    before = j.loads(run("get_session").content[0].text)  # get_session is always open
+    assert before["opened"] is False and before["ask"] == {"asr": "any"} and "media" not in before["policy"]  # android has no media settings
+    r = run("open_session", project=p)
+    assert r.isError and "asr" in r.content[0].text and "sid-g" not in projects.bound and "sid-g" not in sessions.opened  # refused: nothing changed
+    assert run("open_session", project=p, asr=["nope"]).isError
+    r = run("open_session", project=p, asr=["w2"])
+    assert not r.isError and projects.bound["sid-g"] == p and projects.session_policy["sid-g"] == {"asr": ["w2"]}
+    after = j.loads(run("get_session").content[0].text)
+    assert after["opened"] and after["policy"]["asr"] == {"value": ["w2"], "source": "session"} and "ask" not in after
+    assert not run("device_snapshot").content[0].text.startswith("session not opened")  # past the gate (no device here)
+    projects.unbind("sid-g"); sessions.opened.pop("sid-g")  # the device session ended
+    assert j.loads(run("get_session").content[0].text)["ask"] == {"asr": "any"}
 
 
 def test_unknown_tool_books_no_device():
