@@ -11,7 +11,7 @@ Claude registers itself through anonymous Dynamic Client Registration, so there 
 
 ## Projects and roles
 Every job lives in a project. Any authenticated user can create one and becomes its admin; `access.json` maps lowercased emails to
-`read` (read, list, `get_file_text`, `grep_file`, links), `write` (also create sessions and jobs, uploads) or `admin` (also add, change and
+`read` (read, list, `get_file_text`, `grep_file`, `get_usage`, links), `write` (also create sessions and jobs, uploads) or `admin` (also add, change and
 remove users, delete the project; a project always keeps at least one). Tools: `create_project`, `list_projects`, `get_project`,
 `share_project`, `unshare_project`, `delete_project`; `open_session(project)` binds an MCP session to a project (needs `write`).
 The gateway is the only component that reads or writes `access.json` and the `users/` index; "my projects" lists the index and keeps the

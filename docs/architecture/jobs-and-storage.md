@@ -57,6 +57,9 @@ meta.json            the gateway's own keys: {url?, target?, text_cap?, depth?, 
 `list_files` returns the index with the meta keys (minus `content_types`) merged in; every output the parser announced is in it and readable by its path
 (`get_file_text`, `grep_file`, `get_file_url`): the gateway filters none. Only the inline `text` picks `parsed/` or `terse/` by name. Before any parse, or when none could be written, the index is built from
 the stored originals; a job from before the parser library (a list `files` and the meta keys at the top of `index.json`) reads as no index and its meta keys.
+
+**Usage.** When a sidecar has an admin token (deploy.sh always sets one), the parser writes `usage` (`calls`, `truncated`, `error?`) into the job's `status.json`. The MCP tool `get_usage(project, job_id?)` returns it for a job, or summed over all jobs of the project (one row per feature, profile, model, outcome and unit; `tokens` and `audio_seconds` never mixed; jobs without usage counted in `jobs` only). No prices. It reads `status.json` of each job on request, no state kept.
+See also: [Plan: usage reporting](../implemented-plans/usage-reporting.md)
 `text` is inline if the parsed/original text is under `INLINE_LIMIT` (50,000 chars); else the terse outline if that fits (with
 `text_path` naming it); else omitted, and the MCP client pages with `get_file_text` or searches with `grep_file`.
 See also: [Plan: Terse outline view](../implemented-plans/terse-view.md)

@@ -38,7 +38,7 @@ from spider_hoarder_sdk.gateway import projects
 from spider_hoarder_sdk.gateway import sessions
 from spider_hoarder_sdk.gateway.driver import driver, hyphen
 from spider_hoarder_sdk.gateway.jobs import (DEFAULT_TEXT_LENGTH, FILE_TOOLS_NOTE, INLINE_LIMIT, RID, UPLOAD_MARK, _check_rel_path,
-                                             _key, _new_job, _parse_job, _schema, _store_original, _text, job_key)
+                                             _key, _new_job, _parse_job, _schema, _store_original, _text, job_key, usage)
 
 PREFIX = sessions.PREFIX  # the URL prefix nginx routes on
 logging.basicConfig(level="INFO", format="%(name)s %(levelname)s %(message)s")
@@ -104,6 +104,9 @@ JOB_TOOLS = [
     types.Tool(name="get_upload_link", inputSchema=_schema({"project": "Project id; optional when this session is bound to one"}),
                description="Mint a job id and a link for a human to upload files through a browser (needs the write role)."),
     types.Tool(name="list_files", inputSchema=_schema(job_id="Job id (<project>/<session>/<job>)"), description="Manifest of files stored under a job id. terse/<name>.md is an outline (headings, links, images) of parsed/<name>.md."),
+    types.Tool(name="get_usage", inputSchema=_schema({"job_id": "Job id (<project>/<session>/<job>); omit for the whole project"}, project="Project id"),
+               description="What the model sidecars (OCR, ASR) reported for one job, or summed over every job of a project: calls, tokens and audio seconds per feature, "
+               "profile, model and outcome. No prices. Jobs from before usage was collected count as without usage. Needs the read role."),
     types.Tool(name="get_file_text", inputSchema={
                    "type": "object", "required": ["job_id", "path"],
                    "properties": {
@@ -198,6 +201,8 @@ async def call_tool(name: str, arguments: dict) -> types.CallToolResult:
             job_id, _ = _new_job(owner, sid, args.get("project"))
             token = blobtoken.mint(job_id, UPLOAD_MARK, ttl=3600)
             return _text(json.dumps({"url": f"{BASE}/upload/{token}", "job_id": job_id}))
+        if name == "get_usage":
+            return _text(json.dumps(await asyncio.to_thread(usage, owner, args["project"], args.get("job_id"))))
         if name in ("list_files", "get_file_text", "get_file_url", "grep_file"):
             key = _key(owner, args["job_id"])
             if name == "list_files":

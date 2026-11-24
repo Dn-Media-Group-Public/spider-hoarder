@@ -60,7 +60,7 @@ See also: [Plan: Browser sessions](../implemented-plans/browser-sessions-plan.md
 
 The gateway framework (`spider_hoarder_sdk/gateway/app.py`, `sessions.py`) speaks MCP to Claude (low-level `mcp` SDK, because the tool list is dynamic: proxied from the
 session's tool server) and proxies browser tool calls over loopback HTTP to that session's tool server on port `9000+n`
-(`Host: mcp-upstream` is required). Everything backend-specific goes through the driver named by `$BACKEND` ([Pluggable backends](backend-plugins.md)). It adds its own tools (`browser_request_human_help`, `browser_save_page`,
+(`Host: mcp-upstream` is required). Everything backend-specific goes through the driver named by `$BACKEND` ([Pluggable backends](backend-plugins.md)). It adds its own tools (`get_usage`, `browser_request_human_help`, `browser_save_page`,
 `browser_end_session`, `ingest_page`, file tools) and turns every bulk output into a *job*
 ([Jobs and storage](jobs-and-storage.md)). Browser internals: [Browser tool server](browser-toolserver.md).
 

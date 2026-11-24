@@ -1,6 +1,7 @@
 """Job store helpers shared by every backend: job ids (`<proj>/<session>/<job>`, project-scoped storage keys), storing files and
 having the parser service parse them (parse_client), the {files, text?} job result. Nothing here knows what produced the file."""
 
+import json
 import mimetypes
 import os
 import uuid
@@ -138,3 +139,51 @@ def _schema(optional: dict | None = None, **props: str) -> dict:
     """JSON schema of a tool whose arguments are all strings: `props` are required, `optional` are not."""
     return {"type": "object", "properties": {k: {"type": "string", "description": v} for k, v in {**props, **(optional or {})}.items()},
             "required": list(props)}
+
+
+def sum_usage(calls: list[dict]) -> list[dict]:
+    """One row per (feature, profile, model, outcome, unit), input / output summed; units are never mixed."""
+    rows: dict = {}
+    for c in calls:
+        k = tuple(c.get(f) for f in ("feature", "profile", "model", "outcome", "unit"))
+        r = rows.setdefault(k, {"calls": 0, "input": 0, "output": 0})
+        r["calls"] += 1
+        r["input"] += c.get("input") or 0
+        r["output"] += c.get("output") or 0
+    return [{**dict(zip(("feature", "profile", "model", "outcome", "unit"), k)), **r} for k, r in sorted(rows.items(), key=lambda i: tuple(map(str, i[0])))]
+
+
+def _status(key: str) -> dict:
+    raw = storage.read_object(f"{key}/status.json")
+    return json.loads(raw) if raw else {}
+
+
+def usage(owner: str, project: str, job_id: str | None = None) -> dict:
+    """What the sidecars reported (status.json `usage`) for one job, or summed over every job of the project; needs the read role."""
+    if job_id:
+        if _parse_ref(job_id)[0] != project:
+            raise projects.NotFound()
+        st = _status(_key(owner, job_id, "read"))
+        u = st.get("usage") or {}
+        calls = u.get("calls") or []
+        return {"job_id": job_id, "status": st.get("status"), "calls": calls, "truncated": bool(u.get("truncated")), **({"error": u["error"]} if u.get("error") else {}),
+                "totals": sum_usage(calls)}
+    if not projects.UUID_RE.match(project or ""):
+        raise projects.NotFound()
+    projects.require(owner, project, "read")
+    calls, jobs, with_usage, truncated, errors = [], 0, 0, 0, []
+    base = f"projects/{project}/data"
+    for session in storage.list_names(base):
+        for job in storage.list_names(f"{base}/{session}"):
+            st = _status(f"{base}/{session}/{job}")
+            if not st:
+                continue
+            jobs += 1
+            u = st.get("usage") or {}
+            if u.get("error"):
+                errors.append({"job_id": f"{project}/{session}/{job}", "error": u["error"]})
+            if u.get("calls") is not None and not u.get("error"):
+                with_usage += 1
+                truncated += bool(u.get("truncated"))
+            calls += u.get("calls") or []
+    return {"project": project, "jobs": jobs, "jobs_with_usage": with_usage, "truncated_jobs": truncated, "errors": errors, "totals": sum_usage(calls)}  # ponytail: one read per job; a tally in index.json if projects get large

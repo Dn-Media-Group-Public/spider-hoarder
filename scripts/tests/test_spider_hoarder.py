@@ -466,3 +466,17 @@ def test_in_tree_dockerfiles_copy_only_existing_unignored_paths():
                     assert os.path.exists(os.path.join(root, src)), f"{df}: COPY {src} not found"
                     parts = src.rstrip("/").split("/")
                     assert not any(fnmatch.fnmatch(p, pat.removeprefix("**/")) for p in parts for pat in ignore), f"{df}: {src} is in .dockerignore"
+
+
+def test_admin_tokens(tmp_path):
+    import yaml
+    _, a, _ = make_pkg(tmp_path, name="dummy_one")
+    env = {**PARSE_ENV, "OCR_PROFILES": json.dumps(OCR), "ASR_PROFILES": json.dumps({"w": {**OCR["lan"], "token": "t9"}}), "OCR_ADMIN_TOKEN": "oa", "ASR_ADMIN_TOKEN": "aa"}
+    sh.check_parse_env([a], env)
+    pe = sh.parse_env(env)
+    assert {e["admin_token"] for e in json.loads(pe["PARSE_OCR_TABLE"]).values()} == {"oa"}
+    assert {e["admin_token"] for t in ("PARSE_ASR_TABLE", "PARSE_ASR_FALLBACK_TABLE") for e in json.loads(pe[t]).values()} == {"aa"}
+    assert yaml.safe_load(sh.parse_overlay([a], env))["services"]["ocr-sidecar"]["environment"]["OCR_ADMIN_TOKEN"] == "${OCR_ADMIN_TOKEN:-}"
+    for bad in ({"OCR_ADMIN_TOKEN": "w" * 8}, {"ASR_ADMIN_TOKEN": "oa"}, {"OCR_ADMIN_TOKEN": "t9"}, {"OCR_ADMIN_TOKEN": OCR["lan"]["token"]}):
+        with pytest.raises(sh.DeployError):
+            sh.check_parse_env([a], {**env, **bad})

@@ -268,6 +268,7 @@ def check_parse_env(backends: list[Backend], environ) -> None:
             errs.append(f"PARSE_LIMITS: {e}")
     if not errs and environ["WRAPPER_TOKEN"] == environ["PROXY_TOKEN"]:
         errs.append("WRAPPER_TOKEN and PROXY_TOKEN must be different secrets")
+    admins: list = []
     for kind in SIDECARS:
         var, profiles = f"{kind.upper()}_PROFILES", profiles_of(environ, kind)
         for name, p in profiles.items():
@@ -275,6 +276,9 @@ def check_parse_env(backends: list[Backend], environ) -> None:
         tokens = [p.get("token") for p in profiles.values() if isinstance(p, dict)]
         if len(set(tokens)) != len(tokens) or {*tokens} & {environ.get(v) for v in PARSE_TOKENS}:
             errs.append(f"{var} tokens must be unique and differ from WRAPPER_TOKEN and PROXY_TOKEN (the token picks the profile)")
+        if (a := environ.get(f"{kind.upper()}_ADMIN_TOKEN")) and (a in {p.get("token") for k in SIDECARS for p in profiles_of(environ, k).values() if isinstance(p, dict)} or a in {environ.get(v) for v in PARSE_TOKENS} or a in admins):
+            errs.append(f"{kind.upper()}_ADMIN_TOKEN must differ from every other token")
+        admins.append(a)
         for b in backends:
             for suffix in ("", "_FALLBACK") if kind in FALLBACKS else ("",):
                 v = f"{b.name.upper()}_PARSE_{kind.upper()}{suffix}"
@@ -297,7 +301,9 @@ def parse_limits(environ) -> str:
 
 
 def sidecar_table(environ, kind: str) -> str:
-    return json.dumps({n: {"url": f"http://{kind}-sidecar:8080", "token": p["token"]} for n, p in profiles_of(environ, kind).items()})
+    admin = environ.get(f"{kind.upper()}_ADMIN_TOKEN")  # deploy.sh always sets it: the wrapper collects the sidecar's usage with it
+    return json.dumps({n: {"url": f"http://{kind}-sidecar:8080", "token": p["token"], **({"admin_token": admin} if admin else {})}
+                       for n, p in profiles_of(environ, kind).items()})
 
 
 def parse_env(environ) -> dict:
@@ -321,6 +327,8 @@ def parse_overlay(backends: list[Backend], environ) -> str:
                           ocr=bool(ocr_profiles(environ)), asr=bool(profiles_of(environ, "asr")),
                           extra_env={f"{b.h}-gateway": {f"PARSE_{k}": f"${{{b.name.upper()}_PARSE_{k}:-}}" for k in ("OCR", "ASR", "ASR_FALLBACK")} for b in backends},
                           network_names={f"{b.h}-gateway": f"{b.h}-parse" for b in backends})
+    if ocr := doc["services"].get("ocr-sidecar"):  # the library's overlay sets only ASR_ADMIN_TOKEN
+        ocr["environment"]["OCR_ADMIN_TOKEN"] = "${OCR_ADMIN_TOKEN:-}"
     return yaml.safe_dump(doc, sort_keys=False)
 
 

@@ -167,3 +167,31 @@ def test_fake_driver_tools_and_unknown_tool_proxy():
     names = [t.name for t in tools]
     assert "fake_tool" in names and {"list_files", "get_file_text", "grep_file", "get_file_url", "get_upload_link"} <= set(names)
     assert app.mcp.name == "spider-hoarder-fake-backend" and app.mcp.instructions.startswith("A fake backend.")
+
+
+def test_usage():
+    import json
+    import uuid
+    import pytest
+    from spider_hoarder_sdk.content import storage
+    from spider_hoarder_sdk.gateway import projects
+    testing.fresh_store()
+    proj, other = projects.create("a@b.c", "p"), projects.create("x@y.z", "q")
+    call = lambda **o: {"feature": "ocr", "profile": "p", "model": "m", "outcome": "ok", "unit": "tokens", "input": 3, "output": 2, **o}
+    def job(p, usage):
+        jid = f"{p}/{uuid.uuid4()}/{uuid.uuid4()}"
+        storage.write_object(f"projects/{jid.split('/', 1)[0]}/data/{jid.split('/', 1)[1]}/status.json", json.dumps({"status": "done", **({"usage": usage} if usage else {})}).encode())
+        return jid
+    j1 = job(proj, {"calls": [call(), call(), call(unit="audio_seconds", feature="asr", input=7, output=0)], "truncated": True})
+    job(proj, None)  # from before the sidecars had admin tokens
+    job(proj, {"calls": [], "error": "sidecar down"})
+    job(other, {"calls": [call()]})
+    one = jobs.usage("a@b.c", proj, j1)
+    assert one["truncated"] and one["status"] == "done" and len(one["calls"]) == 3 and len(one["totals"]) == 2
+    tot = jobs.usage("a@b.c", proj)
+    assert (tot["jobs"], tot["jobs_with_usage"], tot["truncated_jobs"]) == (3, 1, 1) and tot["errors"][0]["error"] == "sidecar down"
+    assert {(r["unit"], r["calls"], r["input"], r["output"]) for r in tot["totals"]} == {("tokens", 2, 6, 4), ("audio_seconds", 1, 7, 0)}
+    assert jobs.usage("a@b.c", projects.create("a@b.c", "empty"))["totals"] == []
+    for who, p, j in (("x@y.z", proj, None), ("x@y.z", proj, j1), ("a@b.c", other, j1), ("a@b.c", other, None)):  # no role / another project's job
+        with pytest.raises(projects.NotFound):
+            jobs.usage(who, p, j)

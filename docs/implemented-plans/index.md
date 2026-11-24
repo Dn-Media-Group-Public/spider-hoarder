@@ -29,3 +29,4 @@ Back to the [documentation index](../index.md). Open plans: [plans](../plans/ind
 - [OCR in the parse step (Tesseract, remote fallback)](ocr-hybrid.md)
 - [Parser service (wrapper, no-secret parser uid, authenticated egress proxy, OCR sidecar)](parser-wrapper.md)
 - [The parser service as a generic library (git submodule `lib/cadmus-parser`)](parse-sandbox-library.md)
+- [Usage reporting (sidecar admin tokens, `get_usage`)](usage-reporting.md)
