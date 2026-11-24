@@ -61,8 +61,8 @@ See also: [Plan: Terse outline view](../implemented-plans/terse-view.md)
 Nothing that interprets an untrusted file runs in a gateway. Every stored original is parsed by the shared **parser service**, which is a library in its own
 repository, **cadmus-parser**, included as the git submodule `lib/cadmus-parser/` (its documentation, in `lib/cadmus-parser/docs/`, is the reference for the wrapper API,
 `index.json`, the worker protocol, the limits, the sidecar protocol and the security model; this section is only what is specific to this project). Each stack runs its own
-instance. The library's parts used here: the wrapper and its uid pool, `server/install.sh` (this project's `parser/Dockerfile` `ADD`s the submodule, runs it and adds ExifTool, ffmpeg,
-Tesseract, `unar` and the default processors (the library's `files` extra: `metadata`, `archives`, `html`, `documents` ...)), `blob-sidecar`, `ocr-sidecar`, the stack file `docker-compose.parse.yml`, the overlay generator and the
+instance. The library's parts used here: the wrapper and its uid pool, the library's own `cadmus-parser` image (`server/Dockerfile`: ExifTool, ffmpeg,
+Tesseract, `unar` and the default processors, the `files` extra: `metadata`, `archives`, `html`, `documents` ...), `blob-sidecar`, `ocr-sidecar`, the stack file `docker-compose.parse.yml`, the overlay generator and the
 client (`cadmus_parser`, in the gateway images).
 
 One parse per **job**: the gateway stores the job's files under `original/` (`jobs._store_original` / `_store_tree`, which remember each file's content type in `meta.json`), then

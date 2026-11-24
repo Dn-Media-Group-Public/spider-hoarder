@@ -310,7 +310,7 @@ def test_parse_env_and_overlay(tmp_path):
     assert doc["services"]["dummy-one-gateway"]["environment"]["PARSE_OCR"] == "${DUMMY_ONE_PARSE_OCR:-}"
     assert doc["networks"] == {"dummy-one-parse": {"driver": "overlay", "internal": True}, "dummy-two-parse": {"driver": "overlay", "internal": True}}
     assert doc["services"]["blob-sidecar"] == {"networks": ["seaweedfs"], "environment": {"PARSE_PROXY_ALLOW": "seaweedfs:8333"}} and "ocr-sidecar" in doc["services"]
-    assert doc["services"]["parser"]["image"] == "${IMAGE_PREFIX:-}spider-hoarder-parser:${IMAGE_TAG:-local}"  # this project's image FROM the library's base
+    assert "image" not in doc["services"]["parser"]  # the library's own cadmus-parser image, from its docker-compose.parse.yml
     plain = yaml.safe_load(sh.parse_overlay([a], {**PARSE_ENV}))
     assert "ocr-sidecar" not in plain["services"] and "blob-sidecar" not in plain["services"]
     assert sh.parse_services(env) == ["parser", "blob-sidecar", "ocr-sidecar"] and sh.parse_services(PARSE_ENV) == ["parser", "blob-sidecar"]

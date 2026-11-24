@@ -21,7 +21,7 @@ descriptors with importlib.metadata and uses PyYAML for the overlay check; see d
   seaweedfs-overlay FILE  stack overlay joining every enabled gateway to the SeaweedFS network
   parse-env          `export K=V` lines for the parser service: PARSE_BLOB_OPTIONS, PARSE_OCR_TABLE, PARSE_LIMITS, PARSE_PROXY_ALLOW
   parse-overlay FILE stack overlay wiring the parser service to every enabled backend (and the OCR sidecar, when OCR_PROFILES is set)
-  build-parse        docker build (and push) of the parser, blob-sidecar and (with OCR_PROFILES) ocr-sidecar images
+  build-parse        docker build (and push) of the library's parser, blob-sidecar and (with OCR_PROFILES) ocr-sidecar images
   parse-services     the parser service's services to force-restart after deploy, one per line
 
 Hooks (preflight, post_build, build contexts) get BACKEND, BACKEND_HYPHEN and STACK_NAME in their environment."""
@@ -291,12 +291,12 @@ def parse_env(environ) -> dict:
 
 def parse_overlay(backends: list[Backend], environ) -> str:
     """The cadmus-parser overlay (lib/cadmus-parser, `cadmus_parser_server.overlay`): per enabled backend a network `<h>-parse` that only its gateway and
-    the shared parser are on, PARSE_URL / PARSE_TOKEN in the gateway, this project's parser image, the proxy on the SeaweedFS network when that
+    the shared parser are on, PARSE_URL / PARSE_TOKEN in the gateway, the proxy on the SeaweedFS network when that
     is the store and the OCR sidecar when profiles are configured. Ours on top: PARSE_OCR, the OCR profile a backend's files may be sent to."""
     import yaml
     from cadmus_parser_server import overlay
     doc = overlay.overlay([f"{b.h}-gateway" for b in backends], dev_store="seaweedfs:8333" if environ.get("SEAWEEDFS") == "1" else None,
-                          ocr=bool(ocr_profiles(environ)), parser_image="${IMAGE_PREFIX:-}spider-hoarder-parser:${IMAGE_TAG:-local}",
+                          ocr=bool(ocr_profiles(environ)),
                           extra_env={f"{b.h}-gateway": {"PARSE_OCR": f"${{{b.name.upper()}_PARSE_OCR:-}}"} for b in backends},
                           network_names={f"{b.h}-gateway": f"{b.h}-parse" for b in backends})
     return yaml.safe_dump(doc, sort_keys=False)
@@ -307,11 +307,11 @@ def parse_services(environ) -> list[str]:
 
 
 def build_parse(environ, run=subprocess.run) -> None:
-    """The library's sidecars (context: the submodule), then this project's parser image (context: the repo root, it ADDs the submodule)."""
+    """The library's own images, all built from the submodule: the parser (default processors and tools), the blob-sidecar and, with OCR_PROFILES, the ocr-sidecar."""
     lib = os.path.join(REPO_ROOT, "lib", "cadmus-parser")
     for tag, dockerfile, context in (("cadmus-parser-blob-sidecar:local", os.path.join(lib, "blob-sidecar", "Dockerfile"), lib),
                                      *([("cadmus-parser-ocr-sidecar:local", os.path.join(lib, "ocr-sidecar", "Dockerfile"), lib)] if ocr_profiles(environ) else []),
-                                     ("spider-hoarder-parser:local", os.path.join(REPO_ROOT, "parser", "Dockerfile"), REPO_ROOT)):
+                                     ("cadmus-parser:local", os.path.join(lib, "server", "Dockerfile"), lib)):
         build_one(tag, dockerfile, context, environ, "parse", run)
 
 
