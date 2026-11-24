@@ -4,6 +4,8 @@ Plans awaiting implementation or kept as background. Implemented plans move to [
 
 - [OCR: Tesseract first, remote multimodal model fallback](ocr-hybrid.md) — needs the lightllm plan `ocr-vision-models.md` for the default remote model
 - [Usage reporting](usage-reporting.md) — generated admin tokens, MCP tool `get_usage` for a job or a project
+- [Captioning](caption-feature.md) — enable the library's caption feature and sidecar, mirroring OCR and ASR
+- [Policy levels](policy-levels.md) — admin / project / session levels with an `ASK` marker for media and for which external OCR/ASR/caption profiles may see files; needs the captioning plan first
 - [gVisor runtime](gvisor-runtime.md) — stub
 - [Metrics and structured logs](metrics-and-logging.md) — stub
 - [`mcp` 2.x SDK port](mcp-sdk-2-migration.md) — stub
