@@ -19,8 +19,8 @@ descriptors with importlib.metadata and uses PyYAML for the overlay check; see d
   dev-overlay FILE   stack overlay with the dev-only settings of every enabled gateway
   seaweedfs-config DIR  the stack's SeaweedFS's s3.json and iam.json, generated from the SEAWEEDFS_* variables
   seaweedfs-overlay FILE  stack overlay joining every enabled gateway to the SeaweedFS network
-  parse-env          `export K=V` lines for the parser service: PARSE_BLOB_OPTIONS, PARSE_OCR_TABLE, PARSE_ASR_TABLE, PARSE_LIMITS, PARSE_PROXY_ALLOW
-  parse-overlay FILE stack overlay wiring the parser service to every enabled backend (and the OCR / ASR sidecars, when their profiles are set)
+  parse-env          `export K=V` lines for the parser service: PARSE_BLOB_OPTIONS, PARSE_OCR_TABLE, PARSE_ASR_TABLE, PARSE_CAPTION_TABLE, PARSE_LIMITS, PARSE_PROXY_ALLOW
+  parse-overlay FILE stack overlay wiring the parser service to every enabled backend (and the OCR / ASR / caption sidecars, when their profiles are set)
   build-parse        docker build (and push) of the library's parser, blob-sidecar and (with OCR_PROFILES) ocr-sidecar images
   parse-services     the parser service's services to force-restart after deploy, one per line
 
@@ -222,8 +222,8 @@ PARSE_TOKENS = ("WRAPPER_TOKEN", "PROXY_TOKEN")
 PLACEHOLDERS = ("", "changeme", "change-me")
 
 
-SIDECARS = ("ocr", "asr")  # the model sidecars we deploy: <KIND>_PROFILES (the sidecar's table), <NAME>_PARSE_<KIND> (a backend's profile)
-FALLBACKS = {"asr": "asr-fallback"}  # kinds with an optional second profile, <NAME>_PARSE_<KIND>_FALLBACK
+SIDECARS = ("ocr", "asr", "caption")  # the model sidecars we deploy: <KIND>_PROFILES (the sidecar's table), <NAME>_PARSE_<KIND> (a backend's profile)
+FALLBACKS = {"asr": "asr-fallback", "caption": "caption-fallback"}  # kinds with an optional second profile, <NAME>_PARSE_<KIND>_FALLBACK
 
 
 def profiles_of(environ, kind: str) -> dict:
@@ -314,6 +314,7 @@ def parse_env(environ) -> dict:
             "PARSE_LIMITS": parse_limits(environ),
             "PARSE_OCR_TABLE": sidecar_table(environ, "ocr"), "PARSE_ASR_TABLE": sidecar_table(environ, "asr"),
             "PARSE_ASR_FALLBACK_TABLE": sidecar_table(environ, "asr"),  # a fallback may name a profile of the same sidecar
+            "PARSE_CAPTION_TABLE": sidecar_table(environ, "caption"), "PARSE_CAPTION_FALLBACK_TABLE": sidecar_table(environ, "caption"),
             "PARSE_PROXY_ALLOW": "seaweedfs:8333" if environ.get("SEAWEEDFS") == "1" else environ.get("PARSE_PROXY_ALLOW", "")}
 
 
@@ -324,8 +325,8 @@ def parse_overlay(backends: list[Backend], environ) -> str:
     import yaml
     from cadmus_parser_server import overlay
     doc = overlay.overlay([f"{b.h}-gateway" for b in backends], dev_store="seaweedfs:8333" if environ.get("SEAWEEDFS") == "1" else None,
-                          ocr=bool(ocr_profiles(environ)), asr=bool(profiles_of(environ, "asr")),
-                          extra_env={f"{b.h}-gateway": {f"PARSE_{k}": f"${{{b.name.upper()}_PARSE_{k}:-}}" for k in ("OCR", "ASR", "ASR_FALLBACK")} for b in backends},
+                          ocr=bool(ocr_profiles(environ)), asr=bool(profiles_of(environ, "asr")), caption=bool(profiles_of(environ, "caption")),
+                          extra_env={f"{b.h}-gateway": {f"PARSE_{k}": f"${{{b.name.upper()}_PARSE_{k}:-}}" for k in ("OCR", "ASR", "ASR_FALLBACK", "CAPTION", "CAPTION_FALLBACK")} for b in backends},
                           network_names={f"{b.h}-gateway": f"{b.h}-parse" for b in backends})
     if ocr := doc["services"].get("ocr-sidecar"):  # the library's overlay sets only ASR_ADMIN_TOKEN
         ocr["environment"]["OCR_ADMIN_TOKEN"] = "${OCR_ADMIN_TOKEN:-}"
@@ -337,7 +338,7 @@ def parse_services(environ) -> list[str]:
 
 
 def build_parse(environ, run=subprocess.run) -> None:
-    """The library's own images, all built from the submodule: the parser (default processors and tools), the blob-sidecar and the ocr- / asr-sidecar when their profiles are set."""
+    """The library's own images, all built from the submodule: the parser (default processors and tools), the blob-sidecar and the ocr- / asr- / caption-sidecar when their profiles are set."""
     lib = os.path.join(REPO_ROOT, "lib", "cadmus-parser")
     for tag, dockerfile, context in (("cadmus-parser-blob-sidecar:local", os.path.join(lib, "blob-sidecar", "Dockerfile"), lib),
                                      *((f"cadmus-parser-{k}-sidecar:local", os.path.join(lib, f"{k}-sidecar", "Dockerfile"), lib) for k in SIDECARS if profiles_of(environ, k)),

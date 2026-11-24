@@ -103,6 +103,25 @@ def test_ocr_profile_reaches_the_parser_only_when_asked(parser, monkeypatch):
     monkeypatch.delenv("PARSE_OCR")
 
 
+def test_caption_feature_only_when_set(monkeypatch):
+    seen = []
+    class C:
+        def __init__(self, *a): pass
+        def run(self, *a, features=None, **k): seen.append(features); raise RuntimeError
+    monkeypatch.setattr(parse_client, "Client", C)
+    monkeypatch.setenv("PARSE_URL", "http://x")
+    monkeypatch.delenv("PARSE_CAPTION", raising=False)
+    monkeypatch.setenv("PARSE_CAPTION_FALLBACK", "b")
+    monkeypatch.setattr(parse_client.creds, "urls", lambda k: (None, "i", "o"))
+    monkeypatch.setattr(parse_client.storage, "get_meta", lambda k: {})
+    key = "projects/p/data/s/j"
+    for cap in (None, "a"):
+        if cap: monkeypatch.setenv("PARSE_CAPTION", cap)
+        try: parse_client.parse(key)
+        except Exception: pass
+    assert seen == [{"caption-fallback": "b"}, {"caption": "a", "caption-fallback": "b"}]
+
+
 def test_credentials_are_renewed_while_a_long_job_runs_and_all_revoked_after(parser, monkeypatch):
     parser(parser_cmd=script("os.makedirs(jobdir + '/out/parsed', exist_ok=True)\ntime.sleep(3)\nopen(jobdir + '/out/parsed/late.md', 'wb').write(b'late')\n"
                              "os.write(1, json.dumps({'in': ['x.md'], 'path': 'parsed/late.md', 'content_type': 'text/markdown'}).encode() + b'\\n')"))

@@ -22,7 +22,7 @@ if [ -z "${TEST_BLOB_URL:-}" ]; then
 fi
 run() { echo "==> $*"; "$@" || fail=1; }
 LIB=lib/cadmus-parser
-areas=(sdk $LIB/server $LIB/client backends/browser-sdk backends/android-sdk scripts $LIB/blob-sidecar $LIB/ocr-sidecar $LIB/asr-sidecar)
+areas=(sdk $LIB/server $LIB/client backends/browser-sdk backends/android-sdk scripts $LIB/blob-sidecar $LIB/ocr-sidecar $LIB/asr-sidecar $LIB/caption-sidecar)
 for d in backends/browser_* backends/android_*; do [ -d "$d/tests" ] && areas+=("$d"); done
 for a in "${areas[@]}"; do
   [ -d "$a" ] || continue

@@ -78,7 +78,7 @@ One parse per **job**: the gateway stores the job's files under `original/` (`jo
 1. mints the job's scoped credential (`gateway/creds.py`: one read grant for the project's `data/` (a parser may correlate with earlier files of the same
    project) and one write grant for `<job>/`, 900 s; S3: a role per store, revoked after the job; GCS: a downscoped token),
 2. `POST`s `<PARSE_URL>/jobs` with `input.url = <store>/<job>/original`, `output.url = <store>/<job>`, each side's credential, `options = {"files": {base_url,
-   ctypes}}` and `features` = `ocr`, `asr`, `asr-fallback` -> profile, from the backend's `<NAME>_PARSE_OCR`, `_PARSE_ASR`, `_PARSE_ASR_FALLBACK` (only those set), or none; one retry on a 503 or a refused connection,
+   ctypes}}` and `features` = `ocr`, `asr`, `asr-fallback`, `caption`, `caption-fallback` -> profile, from the backend's `<NAME>_PARSE_OCR`, `_PARSE_ASR`, `_PARSE_ASR_FALLBACK`, `_PARSE_CAPTION`, `_PARSE_CAPTION_FALLBACK` (only those set), or none; one retry on a 503 or a refused connection,
 3. starts `renew_loop`, which pushes fresh credentials to the replica that took the job every 5 minutes (the grant is project-wide, so renewals are re-keyed to the
    posted input URL; every minted handle is tracked in `creds.active` for `revoke_project`),
 4. waits for `status.json` under `<job>/` (the library's heartbeat rule; 12 min overall, the MCP tool call stays synchronous) and reads `index.json` and the artefacts from

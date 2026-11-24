@@ -323,6 +323,10 @@ def test_parse_env_and_overlay(tmp_path):
     assert json.loads(sh.parse_env(asr)["PARSE_ASR_TABLE"]) == {"w": {"url": "http://asr-sidecar:8080", "token": "t9"}} == json.loads(sh.parse_env(asr)["PARSE_ASR_FALLBACK_TABLE"])
     assert yaml.safe_load(sh.parse_overlay([a], asr))["services"]["dummy-one-gateway"]["environment"]["PARSE_ASR_FALLBACK"] == "${DUMMY_ONE_PARSE_ASR_FALLBACK:-}"
     assert "asr-sidecar" in yaml.safe_load(sh.parse_overlay([a], asr))["services"] and sh.parse_services(asr)[-1] == "asr-sidecar"
+    cap = {**env, "CAPTION_PROFILES": json.dumps({"v": {**OCR["lan"], "token": "t8"}})}
+    assert json.loads(sh.parse_env(cap)["PARSE_CAPTION_FALLBACK_TABLE"]) == {"v": {"url": "http://caption-sidecar:8080", "token": "t8"}}
+    assert yaml.safe_load(sh.parse_overlay([a], cap))["services"]["dummy-one-gateway"]["environment"]["PARSE_CAPTION_FALLBACK"] == "${DUMMY_ONE_PARSE_CAPTION_FALLBACK:-}"
+    assert "caption-sidecar" in yaml.safe_load(sh.parse_overlay([a], cap))["services"] and sh.parse_services(cap)[-1] == "caption-sidecar"
     assert sh.parse_services(env) == ["parser", "blob-sidecar", "ocr-sidecar"] and sh.parse_services(PARSE_ENV) == ["parser", "blob-sidecar"]
     # the static stack file: the parser's networks are internal (no route out), the proxy alone reaches `public`
     base = yaml.safe_load(open(os.path.join(sh.REPO_ROOT, "lib", "cadmus-parser", "docker-compose.parse.yml")))

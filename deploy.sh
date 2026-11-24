@@ -88,7 +88,7 @@ pip install -q --no-deps --force-reinstall ./sdk ./lib/cadmus-parser/client ./li
 TOOL="python scripts/spider_hoarder.py"
 # Admin tokens of the model sidecars (usage reporting): generated once, kept in .build/ (secrets, not committed); .env may set them and wins.
 mkdir -p .build
-for k in OCR_ADMIN_TOKEN ASR_ADMIN_TOKEN; do
+for k in OCR_ADMIN_TOKEN ASR_ADMIN_TOKEN CAPTION_ADMIN_TOKEN; do
   [ -n "${!k:-}" ] || grep -q "^$k=" .build/admin-tokens.env 2>/dev/null || echo "$k=$(openssl rand -hex 32)" >> .build/admin-tokens.env
 done
 set -a; [ ! -f .build/admin-tokens.env ] || while IFS='=' read -r k v; do [ -n "${!k:-}" ] || export "$k=$v"; done < .build/admin-tokens.env; set +a

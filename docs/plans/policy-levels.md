@@ -13,7 +13,7 @@ below must choose" (`ASK`), which is how media behaves today. Parse features def
 Out of scope (decided): content-type, size or volume filters for the parse features (the policy is a dict and can gain fields); chains longer than two profiles per feature (needs a
 `cadmus-parser` change, `features` as ordered lists; here the list shape is kept and `MAX_CHAIN = 2` is the one constant to lift later); re-parsing or purging earlier results when a policy changes.
 
-Prerequisite: [Plan: captioning](caption-feature.md) (the `caption` feature).
+Prerequisite: [Plan: captioning](../implemented-plans/caption-feature.md) (the `caption` feature).
 
 ## Design
 
